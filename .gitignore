@@ -1,0 +1,81 @@
+# -----------------------------------------------------------------------------
+# 1. PYTHON CACHES & BUILD ARTIFACTS
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+ENV/
+env/
+.env/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.ipynb_checkpoints/
+
+# -----------------------------------------------------------------------------
+# 2. HEAVY ASTRONOMY DATA FORMATS (GLOBAL GUARD)
+# -----------------------------------------------------------------------------
+*.fits
+*.fit
+*.fts
+*.h5
+*.hdf5
+*.parquet
+*.feather
+
+# -----------------------------------------------------------------------------
+# 3. CANDIDATE WORKSPACES & LOCAL PAYLOADS
+# -----------------------------------------------------------------------------
+candidate/*
+!candidate/.gitkeep
+
+# -----------------------------------------------------------------------------
+# 4. DOCUMENTATION AND HOST-LOCAL ARTIFACTS
+# -----------------------------------------------------------------------------
+# Keep project-local documentation private; the public README and the bundled
+# runtime templates required by installed wheels are deliberate exceptions.
+*.md
+!/README.md
+.txt
+
+# -----------------------------------------------------------------------------
+# 5. LOCAL WORKSPACE & AI SKILLS
+# -----------------------------------------------------------------------------
+methods/
+literature/
+resources/
+.agents/
+
+# -----------------------------------------------------------------------------
+# 6. INGESTION STAGING, TEMP & LOG FILES
+# -----------------------------------------------------------------------------
+exonym-ingest-*/
+.ingest-staging/
+*.tmp
+*.log
+*.bak
+
+# -----------------------------------------------------------------------------
+# 7. OS, EDITORS & AI AGENT ARTIFACTS
+# -----------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+.directory
+.idea/
+.vscode/
+*.swp
+*.swo
+.gemini/
+.antigravity/
+.cursor/
+.opencode/

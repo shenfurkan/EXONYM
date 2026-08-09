@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Data Asset Provenance Sidecar",
+  "type": "object",
+  "required": [
+    "source_uri",
+    "download_timestamp_utc",
+    "sha256",
+    "fetched_by"
+  ],
+  "properties": {
+    "source_uri": { "type": "string", "format": "uri" },
+    "download_timestamp_utc": { "type": "string", "format": "date-time" },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "fetched_by": { "type": "string" }
+  }
+}

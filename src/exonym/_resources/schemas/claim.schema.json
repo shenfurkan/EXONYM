@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Scientific Claim Assertion",
+  "type": "object",
+  "required": [
+    "parameter",
+    "value",
+    "uncertainty_upper",
+    "uncertainty_lower",
+    "unit",
+    "method"
+  ],
+  "properties": {
+    "parameter": {
+      "type": "string",
+      "enum": ["period_days", "radius_earth", "mass_earth", "fpp"]
+    },
+    "value": { "type": "number" },
+    "uncertainty_upper": { "type": "number" },
+    "uncertainty_lower": { "type": "number" },
+    "unit": { "type": "string" },
+    "method": { "type": "string" }
+  }
+}

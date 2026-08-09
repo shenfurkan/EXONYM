@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/candidate-2.0.json",
+  "title": "Candidate Identity Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_id",
+    "identifiers",
+    "lifecycle",
+    "workflow",
+    "scientific_disposition",
+    "publication",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "candidate_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "identifiers": {
+      "type": "object",
+      "required": ["toi", "tic", "aliases"],
+      "properties": {
+        "toi": {
+          "type": ["string", "null"],
+          "pattern": "^\\d{1,7}(\\.\\d{1,2})?$"
+        },
+        "tic": {
+          "type": ["string", "null"],
+          "pattern": "^[1-9]\\d{0,19}$"
+        },
+        "aliases": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "mission": {
+          "type": ["string", "null"],
+          "enum": ["tess", "kepler", "k2", "plato", "cheops"]
+        },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "lifecycle": {
+      "type": "object",
+      "required": ["state", "state_since", "reason"],
+      "properties": {
+        "state": {
+          "enum": ["active", "paused", "stopped", "published", "archived"]
+        },
+        "state_since": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "workflow": {
+      "type": "object",
+      "required": ["phase"],
+      "properties": {
+        "phase": {
+          "enum": [
+            "intake",
+            "feasibility",
+            "acquisition",
+            "vetting",
+            "followup",
+            "analysis",
+            "review"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "scientific_disposition": {
+      "enum": [
+        "unknown",
+        "candidate",
+        "unvalidated_candidate",
+        "false_positive",
+        "validated",
+        "confirmed",
+        "inconclusive"
+      ]
+    },
+    "publication": {
+      "enum": ["none", "draft", "submitted", "published"]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "notes": {
+      "type": "string"
+    }
+  }
+}
