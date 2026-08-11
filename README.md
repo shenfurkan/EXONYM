@@ -1,23 +1,23 @@
 # EXONYM
 
-EXONYM is a Python 3.9 framework and command-line interface for candidate-local, auditable assessment of transiting exoplanet signals. It is TESS-centered: it provisions isolated workspaces, ingests SPOC light-curve and target-pixel products, records evidence and decisions, and applies a staged disposition workflow. The shared package contains no target-specific identifiers, sector selections, ephemerides, or research payloads.
+EXONYM is a Python 3.9 command-line tool for working through TESS transit signals one candidate at a time. It creates an isolated workspace, downloads SPOC light curves and target-pixel files, and keeps the evidence, decisions, and outputs together. Shared code never contains a target identifier, sector choice, ephemeris, or research payload.
 
-The project supports screening and exploratory characterization. It does not, by itself, confirm a planet or establish statistical validation. A defensible planetary interpretation still requires scrutiny of instrumental systematics, contamination, astrophysical false-positive scenarios, stellar characterization, and, where appropriate, independent photometric, imaging, spectroscopic, and radial-velocity evidence.
+The project is for screening and exploratory characterization. It cannot confirm or statistically validate a planet on its own. A planet claim still needs checks for systematics, contamination, false-positive scenarios, stellar properties, and, when needed, follow-up photometry, imaging, spectroscopy, or radial velocities.
 
 ## Scope and scientific status
 
-EXONYM separates two concerns that are often mixed in small transit-analysis projects:
+EXONYM keeps two things separate:
 
 - The shared code implements generic procedures such as transit searches, fixed-ephemeris screening, catalog context, and posterior sampling.
 - Each candidate workspace contains the identity, inputs, provenance, diagnostic products, decisions, claims, and release records for one target.
 
-This separation makes a candidate result inspectable without turning shared software into a store of target knowledge. It also makes it possible to audit whether a conclusion was based on real inputs, a declared method, and a recorded decision.
+That separation keeps each result inspectable without turning the shared package into a store of target facts. You can see which inputs, method, and decision led to a conclusion.
 
-The command surface supports multiple mission labels at workspace creation, but SPOC ingestion and most operational workflows are TESS-focused. Treat all numerical thresholds in this repository as protocol or screening criteria. They are not universal physical boundaries between planets and false positives.
+You can label a workspace with several missions, but data ingestion and most commands are TESS-focused. Treat the repository thresholds as screening rules, not universal boundaries between planets and false positives.
 
-### Discovery-first target policy
+### Independent discovery policy
 
-New discovery work defaults to TIC targets with no assigned TOI or cTOI at intake. The intake record must document the ExoFOP and literature checks that support this status. An existing TOI is appropriate for method validation, comparison, or follow-up work, but it is not a new EXONYM discovery unless the candidate-local record states a separate, reviewable contribution.
+Independent discovery starts with a TIC target that has no assigned TOI or cTOI. Record the ExoFOP and literature checks in the intake workspace. A known TOI is still useful for method checks, comparisons, or follow-up, but it is not an independent EXONYM discovery unless the workspace documents a separate contribution.
 
 ### Read this before interpreting an output
 
@@ -43,15 +43,28 @@ An exonym is an externally assigned name. The name reflects the architectural bo
 
 EXONYM requires Python `3.9.*`. The version constraint is exact because the package and its pinned dependencies are tested against that interpreter series.
 
+### First-time setup
+
+Run these commands from the repository root in PowerShell:
+
 ```powershell
-# Core package and test dependencies
-pip install -e ".[test]"
+py -3.9 -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -e ".[test]"
+python -m exonym --root . verify
+```
 
-# Add TRICERATOPS screening and asteroseismology dependencies
-pip install -e ".[test,screening,asteroseismology]"
+Install optional analysis engines separately when they are needed:
 
-# Add the optional native-cadence Transit Least Squares discovery engine
-pip install -e ".[test,discovery]"
+```powershell
+# Native-cadence Transit Least Squares discovery
+python -m pip install -e ".[discovery]"
+
+# TRICERATOPS screening
+python -m pip install -e ".[screening]"
+
+# Asteroseismology tools
+python -m pip install -e ".[asteroseismology]"
 
 # Confirm the installed command
 exonym --version
@@ -70,35 +83,37 @@ Place the optional repository-root argument before the subcommand when operating
 exonym --root <repository-root> verify
 ```
 
-Networked operations need access to their upstream services. In particular, SPOC ingestion needs a catalog identifier and network access, Gaia and ExoFOP queries depend on remote services, and the TRICERATOPS command needs the optional `screening` extra.
+Networked operations need access to their upstream services. In particular, SPOC ingestion needs a catalog identifier and network access, Gaia and ExoFOP queries depend on remote services, and TRICERATOPS and TLS require their optional dependency groups.
 
-## Minimal, evidence-aware workflow
+## First discovery run
 
-Run these commands from the repository root. The placeholders below are deliberately generic; do not place real catalog identifiers or target aliases in shared documentation, source code, or tests.
+The placeholders below are deliberately generic; do not place real catalog identifiers or target aliases in shared documentation, source code, or tests.
 
 ```powershell
-# Create a candidate-local workspace for a TOI-free discovery target.
+# Create a workspace for an independent-discovery target.
 exonym init <candidate-id> --tic <tic> --mission tess
 
-# Inspect the new workspace and confirm repository isolation.
+# Inspect the workspace created by init and confirm repository isolation.
 exonym status <candidate-id>
 exonym verify
 
-# Download both SPOC light curves and target pixel files for selected sectors.
+# Download SPOC light curves and target pixel files for selected sectors.
 exonym ingest <candidate-id> --products both --sectors <sector>
 
-# Retrieve available catalog transit priors, then search the acquired photometry.
-exonym fetch-priors <candidate-id>
-exonym search <candidate-id>
+# Search the acquired real photometry with the default BLS engine.
+exonym search <candidate-id> --engine bls
+
+# If the discovery extra is installed, also run native-cadence TLS.
+exonym search <candidate-id> --engine tls
 
 # Inspect outstanding evidence requirements before advancing a phase.
 exonym track <candidate-id>
 exonym advance <candidate-id>
 ```
 
-`exonym advance` is intentionally not a substitute for scientific review. Complete each mandatory checklist item only after the candidate-local evidence supports it. Record scientific caveats in the relevant candidate document rather than trying to encode them in a generic checkbox.
+`exonym advance` only checks whether the required records and checklist items are present. It does not decide whether the science is sound. Check a box only after the candidate evidence supports it, and write caveats in the relevant candidate document.
 
-Pass `--toi <toi>` only when a known TOI is deliberately being analyzed for validation, comparison, or follow-up rather than as a new discovery target.
+Pass `--toi <toi>` only when a known TOI is deliberately being analyzed for validation, comparison, or follow-up rather than independent discovery.
 
 ## Candidate lifecycle and gate logic
 
@@ -108,7 +123,7 @@ Candidate disposition follows one ordered state machine:
 intake -> feasibility -> acquisition -> vetting -> followup -> analysis -> review
 ```
 
-The active phase advances only if its gate passes. A lifecycle state of `stopped` blocks advancement. For Markdown-gated phases, the parser requires the designated document, at least one `[MANDATORY]` checkbox, and every mandatory checkbox marked complete. It validates checklist syntax, not the scientific truth of prose statements.
+The active phase advances only when its gate passes. `stopped` workspaces cannot advance. For Markdown-gated phases, the parser looks for the required document and checked mandatory items. It checks the checklist structure, not the scientific judgement behind the text.
 
 | Phase | Candidate-local evidence | Gate behavior |
 | --- | --- | --- |
@@ -172,7 +187,7 @@ candidate/<candidate-id>/
 
 src/exonym/                   Target-neutral library and CLI implementation
 schemas/                      JSON Schema 2020-12 definitions
-templates/                    Files cloned into new candidate workspaces
+  templates/                    Files cloned into candidate workspaces created by init
 policy/                        Isolation policy and approved exceptions
 docs/                          Target-neutral governance and lifecycle guidance
 ```
@@ -212,7 +227,7 @@ All commands accept the global form `exonym [--root <repository-root>] <command>
 | --- | --- | --- |
 | `ingest <candidate-id>` | `--sectors <int> [<int> ...]`, `--exptime <int>`, `--products {lc,tp,both}` | Downloads SPOC light curves and/or target pixel files into `data/raw/` and writes provenance sidecars. `lc` is the default product choice. |
 | `fetch-priors <candidate-id>` | None | Retrieves available catalog transit priors into `config/signals/transit_config.NN.json`. It can legitimately return an empty list. |
-| `search <candidate-id>` | `--period-min`, `--period-max`, `--signal` | Writes `outputs/bls_search_results.json` or a signal-scoped equivalent. The default blind period interval is 0.5 to 15.0 days. |
+| `search <candidate-id>` | `--engine {bls,tls}`, `--period-min`, `--period-max`, `--signal` | Writes engine-specific search results and a content-addressed input manifest. The default blind period interval is 0.5 to 15.0 days. TLS requires the `discovery` extra. |
 | `screen <candidate-id>` | `--signal` | Writes `outputs/fixed_ephemeris_screen.json` or a signal-scoped equivalent after fixed-ephemeris primary, odd-even, half-phase, and alternating-event checks. |
 | `vet <candidate-id>` | `--n-draws`, `--signal` | Runs the optional TRICERATOPS wrapper, writes `outputs/triceratops_report.json`, and on success writes an FPP claim. The default draw count is 2000. |
 | `archive <candidate-id>` | `--radius-arcsec` | Writes `outputs/archival_vetting_report.json` from Gaia DR3 and available ExoFOP context. The default search radius is 10 arcsec. |
@@ -237,7 +252,7 @@ The following descriptions document the implemented procedures, not an abstract 
 
 ### Transit search
 
-`exonym search` uses a custom box-shaped periodic search. For an in-transit and out-of-transit partition, it estimates depth as:
+`exonym search --engine bls` uses a custom box-shaped periodic search. For an in-transit and out-of-transit partition, it estimates depth as:
 
 ```text
 d = median(f_out) - median(f_in)
@@ -251,6 +266,8 @@ SNR = d * sqrt(N_eff) / sigma_out
 ```
 
 The blind search uses a fixed three-hour duration, refines candidate periods, and checks twofold and threefold harmonic aliases. `best_duration_hours` therefore describes the supplied search duration rather than a recovered physical transit duration. The score uses median-box statistics rather than a complete transit likelihood, weighted photometric uncertainties, a detrending model, or a correlated-noise model. Inspect recovered periods against the catalog and phase-folded data before treating a peak as an astrophysical event.
+
+`exonym search --engine tls` uses the optional Transit Least Squares engine on native-cadence photometry and per-cadence flux uncertainties. It reports TLS Signal Detection Efficiency alongside period, epoch, depth, and duration. TLS improves transit-shape matching but does not calibrate its own false-alarm rate; injection-recovery and null searches remain required before ranking alerts as a survey result.
 
 ### Fixed-ephemeris photometric screening
 
@@ -272,9 +289,12 @@ Z_centroid = sqrt((delta_RA * cos(dec))^2 + delta_Dec^2) / sigma
 
 ### False-positive probability and archival context
 
-`exonym vet` delegates scenario-probability calculation to the optional TRICERATOPS package. It obtains period, depth, and duration from a declared signal configuration or BLS result, combines those inputs with workspace metadata, and records a structured report and FPP claim on success.
+`exonym vet` uses the optional [TRICERATOPS](https://github.com/stevengiacalone/triceratops) package for false-positive scenarios. It reads the period, depth, and duration from a signal configuration or BLS result, combines them with workspace metadata, and writes a report and FPP claim when the run succeeds.
 
-The current wrapper supplies a simplified synthetic box-shaped light curve to TRICERATOPS rather than fitting the observed candidate photometry directly. Its claim uncertainties use a fixed fractional heuristic rather than posterior quantiles from a full end-to-end likelihood. Use the result as a documented screening input, then independently assess whether the adopted stellar properties, aperture contamination, contrast limits, light-curve treatment, and population assumptions are appropriate for the candidate.
+The current wrapper gives TRICERATOPS a simplified box-shaped light curve instead of the observed candidate photometry. It also uses a fixed fractional uncertainty rather than a full posterior. Treat its output as a screening input, then check whether the stellar properties, aperture contamination, contrast limits, light-curve treatment, and population assumptions make sense for the candidate.
+
+> [!IMPORTANT]
+> TRICERATOPS can keep a laptop busy for a long time and may use enough CPU or memory to make other work unpleasant. Google Colab is a reasonable place for a long exploratory run when its data policy permits the upload. Keep a candidate-local record of the command, package version, input hashes, and output, then rerun any result that supports a claim in the project's frozen environment.
 
 `exonym archive` queries Gaia DR3 through available TAP, VizieR, and mirror backends. It validates target association within two arcsec, including proper-motion propagation where applicable. A Renormalised Unit Weight Error value above 1.4 flags possible unresolved multiplicity, but does not establish binarity. The command's default ten-arcsec archive radius is suitable for local catalog context, not a complete crowding analysis when brighter contaminants sit farther from the target aperture.
 
@@ -294,7 +314,7 @@ It fits nonnegative amplitudes of isotropic Gaussian source templates using nonn
 C_contam = sum(F_neighbor / F_target)
 ```
 
-When only Gaia magnitudes are available, it uses the approximate flux ratio `10^(-0.4 * (G_neighbor - G_target))`. It compares pipeline and square-aperture assumptions. Gaia G-band contrast is not TESS-band contrast, and a catalog neighbor is not a model of its eclipse depth, so the result bounds plausible dilution rather than resolving every blend scenario. The dilution command consumes supplied neighbor data or a validated archival report; it does not issue a new Gaia query itself.
+When only Gaia magnitudes are available, it uses the approximate flux ratio `10^(-0.4 * (G_neighbor - G_target))`. It compares pipeline and square-aperture assumptions. Gaia G-band contrast is not TESS-band contrast, and a catalog neighbor is not a model of its eclipse depth, so the result bounds plausible dilution rather than resolving every blend scenario. The dilution command consumes supplied neighbor data or a validated archival report; it does not query Gaia itself.
 
 ### Transit fitting and stellar parameters
 
@@ -346,7 +366,7 @@ Low signal-to-noise timing estimates can be dominated by shape and baseline nois
 
 ## Methodological limits
 
-Use the framework as part of a scientific review process, not as an automated validation certificate.
+Use the framework to organize and test evidence. Do not treat it as an automatic planet-validation certificate.
 
 - Transit-like signals can arise from eclipsing binaries, background blends, instrumental artifacts, stellar variability, or detrending behavior.
 - BLS period aliases, sparse sampling, transit-duration assumptions, and time-correlated noise can bias detection statistics and ephemerides.
@@ -360,7 +380,7 @@ Use the framework as part of a scientific review process, not as an automated va
 
 `exonym freeze <candidate-id> --version <version>` creates a release directory below `candidate/<candidate-id>/releases/`. The bundle captures dependency and container definitions, a manifest, source-control metadata, and a metadata hash. It requires `requirements-lock.txt` at the repository root.
 
-Freezing does not automatically copy the full candidate workspace, raw FITS data, derived outputs, or claims into the release directory. Before treating a release as reproducible, confirm that source inputs, candidate-local records, and any external-data retrieval conditions are retained and documented.
+Freezing does not copy the full candidate workspace, raw FITS data, derived outputs, or claims into the release directory. Before calling a release reproducible, check that the source inputs, candidate records, and external-data retrieval conditions are still available and documented.
 
 Run the following before a code, schema, template, or scientific-record milestone:
 

@@ -2,10 +2,14 @@
 
 ## Reporting
 
+Report vulnerabilities through GitHub Private Vulnerability Reporting:
+
+https://github.com/shenfurkan/EXONYM/security/advisories/new
+
 Do not open a public issue containing credentials, tokens, private paths,
-unreleased data, or an exploitable vulnerability. Report privately to the
-repository owner using the contact listed in the current candidate or release
-metadata.
+unreleased data, or an exploitable vulnerability. Include the affected version
+or commit, Python and operating-system details, reproduction steps, impact, and
+any relevant logs with secrets and target payloads redacted.
 
 ## Supported Scope
 
@@ -18,20 +22,25 @@ or data under `candidate/`.
 1. Do not disable TLS certificate verification globally.
 2. Do not commit secrets, API keys, cookies, private keys, or credentials.
 3. Use least-privilege, short-lived credentials for archive and release tasks.
-4. Record and hash external downloads used in scientific inference; retain
-   source, retrieval date, and terms in the owning candidate workspace.
+4. Record external downloads used in scientific inference in the owning
+   candidate workspace with source URI, retrieval date, terms, and a SHA-256
+   digest. FITS ingestion writes provenance sidecars; archive responses and
+   other external records need equivalent candidate-local provenance before
+   they support a release claim.
 5. Isolate optional or legacy dependencies from the verified shared core.
 6. Review dependencies and licenses before release.
-7. Scan release archives for secrets, unsafe paths, and unexpected binaries.
-8. Archive-extraction helpers must reject absolute member paths, traversal,
-   symlinks, and reserved names.
+7. Before release, scan release archives for secrets, unsafe paths, and
+   unexpected binaries. `exonym freeze` creates a manifest but does not perform
+   this scan automatically.
+8. If archive-extraction code is added, it must reject absolute member paths,
+   traversal, symlinks, and reserved names.
 
 ## Research Isolation
 
 Target-specific research is confined to `candidate/`. The isolation checker
-rejects target identifiers and aliases in shared zones, hardcoded sectors and
-ephemerides in shared code, research payload formats outside `candidate/`,
-and symlink/reparse-point payloads anywhere.
+enforces its listed rules: target identifiers and aliases in shared zones,
+hardcoded sectors and ephemerides in shared code, research payload formats
+outside `candidate/`, and symlink/reparse-point payloads anywhere.
 
 ## Incident Handling
 

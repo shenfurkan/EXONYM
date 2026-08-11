@@ -16,7 +16,9 @@ Run `exonym verify` after any edit that could violate this — it enforces five 
 ```powershell
 # Install (Python 3.9 required — pyproject.toml enforces ==3.9.*)
 pip install -e ".[test]"                         # core + test deps
-pip install -e ".[test,screening,asteroseismology]"  # full suite
+pip install -e ".[discovery]"                    # optional TLS discovery engine
+pip install -e ".[screening]"                    # optional TRICERATOPS screening
+pip install -e ".[asteroseismology]"             # optional analysis extras
 
 # Run all tests (takes ~3 minutes due to BLS search)
 python -m pytest -q
@@ -32,14 +34,14 @@ exonym verify --schemas-only                     # schema validation only
 python -m compileall -q src tests
 
 # CLI entry point
-exonym <command> [--root <repo_root>]            # --root defaults to package grandparent
+python -m exonym <command> [--root <repo_root>]   # works before the script is on PATH
 ```
 
 ## CLI Commands
 
 | Command | Purpose |
 |---|---|
-| `exonym init <id> --toi <n> --tic <n> --mission tess` | Provision workspace + clone templates |
+| `exonym init <id> --tic <n> --mission tess` | Provision an independent-discovery workspace + clone templates |
 | `exonym ingest <id> --sectors 14 15 --exptime 120` | Download SPOC FITS + write provenance sidecars |
 | `exonym ingest <id> --products tp --sectors 47` | Download SPOC target pixel files (canonical `sNNNN_tp.fits` + sidecars) |
 | `exonym advance <id>` | Validate gate and promote workflow phase |
@@ -47,7 +49,7 @@ exonym <command> [--root <repo_root>]            # --root defaults to package gr
 | `exonym track <id>` | ANSI dashboard of checklist completion |
 | `exonym freeze <id> --version v1.0.0` | Build reproducibility bundle |
 | `exonym verify` | Full isolation + schema audit |
-| `exonym search <id>` | BLS transit search (writes `outputs/bls_search_results.json`) |
+| `exonym search <id> [--engine bls|tls]` | BLS or optional TLS transit search |
 | `exonym vet <id>` | TRICERATOPS Monte Carlo FPP simulation (writes `outputs/triceratops_report.json` & `claims/fpp_claim.json`) |
 | `exonym plot <id>` | Diagnostic figures to `figures/` |
 
@@ -57,7 +59,7 @@ exonym <command> [--root <repo_root>]            # --root defaults to package gr
 src/exonym/         ← target-neutral library; zero candidate constants allowed
 candidate/<id>/     ← all research payload; isolated per target
 schemas/            ← JSON Schema 2020-12 for candidate.json, provenance, claims
-templates/          ← cloned into every new workspace via exonym init
+templates/          ← cloned into every workspace created by exonym init
 tests/              ← synthetic fixtures only; no real target data
 policy/isolation-exceptions.json  ← approved isolation rule exceptions (requires expiry date)
 ```

@@ -4,9 +4,9 @@ Target-neutral protocol templates cloned into every candidate workspace by
 `exonym init`. Placeholders (`{{CANDIDATE_ID}}`, `{{TOI}}`, `{{TIC}}`,
 `{{TIMESTAMP}}`) are bound to the candidate identity record on instantiation.
 
-New discovery work defaults to a TIC target with no assigned TOI or cTOI.
-Known TOIs are for validation, comparison, or follow-up unless the workspace
-records a separate contribution.
+Independent discovery mode defaults to a TIC target with no assigned TOI or
+cTOI. Known TOIs are for validation, comparison, or follow-up unless the
+workspace records a separate contribution.
 
 | Path | Phase | Purpose |
 | --- | --- | --- |

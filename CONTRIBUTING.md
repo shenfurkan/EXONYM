@@ -7,13 +7,33 @@ Contributions may improve the shared pipeline (`src/`), repository policy
 candidate workspace (`candidate/<candidate-id>/`). Target research never
 leaves `candidate/`.
 
+## First-time setup
+
+EXONYM targets Python `3.9.*`. From the repository root, create an environment,
+install the test dependencies, and run the repository audit before changing code:
+
+```powershell
+py -3.9 -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -e ".[test]"
+python -m exonym --root . verify
+```
+
+Install optional groups only when the change or analysis needs them:
+
+```powershell
+python -m pip install -e ".[discovery]"
+python -m pip install -e ".[screening]"
+python -m pip install -e ".[asteroseismology]"
+```
+
 ## Before Work
 
 1. Read `docs/governance/README.md` and `docs/lifecycle.md`.
 2. Classify the change: C0 editorial, C1 implementation, C2 input/data,
    C3 protocol, C4 claim, C5 release, C6 security.
 3. Inspect `git status`; do not overwrite unrelated work.
-4. Check `exonym verify` before and after.
+4. Check `python -m exonym --root . verify` before and after.
 
 ## Rules
 
@@ -34,10 +54,11 @@ leaves `candidate/`.
 ```powershell
 python -m compileall -q src tests
 python -m pytest -q
-exonym verify
+python -m exonym --root . verify
+python -m exonym --root . verify --schemas-only
 ```
 
-> **Testing Policy**: To prevent unnecessary operational overhead ("red tape"), automated test suites (`pytest`) do not need to be run after minor tasks where no Python code (`src/`, `tests/`) has been created or modified. Once a candidate manuscript or campaign milestone takes shape as a draft, test suites should be executed more frequently to ensure data integrity and baseline stability.
+> **Testing policy:** Skip `pytest` for editorial, metadata, or Markdown-only changes. Run `pytest` and both verification commands when changing `src/`, `tests/`, `schemas/`, or `templates/`, and when recording a milestone draft or gate sign-off.
 
 Report exact failures; do not hide known baseline failures.
 
@@ -45,9 +66,9 @@ Report exact failures; do not hide known baseline failures.
 
 The repository guard layer runs on every push and pull request:
 
-1. `python -m pytest -q` — shared-layer unit tests.
-2. `exonym verify` — repository isolation audit.
-3. `exonym verify --schemas-only` — JSON schema validation of candidate
+1. `python -m pytest -q`: shared-layer unit tests.
+2. `python -m exonym --root . verify`: repository isolation audit.
+3. `python -m exonym --root . verify --schemas-only`: JSON schema validation of candidate
    records, provenance sidecars, and claim assertions.
 
 Install the local pre-commit hook to run the audit before every commit:
@@ -57,10 +78,10 @@ pip install pre-commit
 pre-commit install
 ```
 
-The hook runs `exonym verify` on the full repository (`always_run`) and
+The hook runs the repository verification command on the full repository (`always_run`) and
 rejects target identifiers, research payloads, symlinks, and schema
-violations outside `candidate/`. Policy, schema, and template files are
-owner-reviewed (`CODEOWNERS`); exceptions require an entry in
+violations outside `candidate/`. Policy, schema, and template files require
+owner review before merge; exceptions require an entry in
 `policy/isolation-exceptions.json` with an expiry date.
 
 ## Commit and Release

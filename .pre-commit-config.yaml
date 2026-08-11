@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: exonym-verify
+        name: EXONYM isolation and schema audit
+        entry: python -m exonym --root . verify
+        language: system
+        pass_filenames: false
+        always_run: true
