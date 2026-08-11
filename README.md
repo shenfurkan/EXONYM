@@ -187,7 +187,7 @@ candidate/<candidate-id>/
 
 src/exonym/                   Target-neutral library and CLI implementation
 schemas/                      JSON Schema 2020-12 definitions
-  templates/                    Files cloned into candidate workspaces created by init
+templates/                    Files cloned into candidate workspaces created by init
 policy/                        Isolation policy and approved exceptions
 docs/                          Target-neutral governance and lifecycle guidance
 ```
@@ -393,11 +393,7 @@ exonym verify --schemas-only
 
 For an editorial-only README change, the repository policy does not require the full Python test suite. The isolation audit remains appropriate because target-neutral documentation can accidentally contain target-specific identifiers or aliases.
 
-Continuous integration runs the test suite, full isolation audit, and schema-only audit on pushes and pull requests. Install the local hook to run the isolation audit before commits:
-
-```powershell
-pre-commit install
-```
+Continuous integration runs the test suite, full isolation audit, and schema-only audit on pushes and pull requests.
 
 ## Contributing
 
