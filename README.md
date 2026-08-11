@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="images/logo.png" alt="EXONYM Logo" width="320">
+</p>
+
 # EXONYM
 
 EXONYM is a Python 3.9 command-line tool for working through TESS transit signals one candidate at a time. It creates an isolated workspace, downloads SPOC light curves and target-pixel files, and keeps the evidence, decisions, and outputs together. Shared code never contains a target identifier, sector choice, ephemeris, or research payload.

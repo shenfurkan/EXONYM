@@ -1,3 +1,11 @@
 {
-  "entries": []
+  "entries": [
+    {
+      "path": "images/logo.png",
+      "line": null,
+      "rule": "research-payload-outside-candidate",
+      "reason": "Repository logo asset for README documentation",
+      "expires": "2028-01-01"
+    }
+  ]
 }
