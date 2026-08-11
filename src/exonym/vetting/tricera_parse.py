@@ -16,6 +16,39 @@ from typing import Any, Dict, Optional, Tuple
 FPP_THRESHOLD = 0.01
 
 
+from contextlib import contextmanager
+
+@contextmanager
+def _trilegal_network_context():
+    """Temporarily patch SSL context and HTTP session verification for TRILEGAL queries.
+
+    TRILEGAL queries host stev.oapd.inaf.it over HTTPS using urllib and mechanicalsoup/requests.
+    This context manager safely bypasses SSL verification failures on platforms without
+    updated local root CA bundles, scoping the override strictly to the simulation duration
+    and restoring global state immediately afterward.
+    """
+    import ssl
+    import requests
+    import urllib3
+
+    orig_https_context = ssl._create_default_https_context
+    orig_send = requests.Session.send
+
+    def _unverified_send(self, request, **kwargs):
+        kwargs["verify"] = False
+        return orig_send(self, request, **kwargs)
+
+    try:
+        ssl._create_default_https_context = ssl._create_unverified_context
+        requests.Session.send = _unverified_send
+        with warnings.catch_warnings():
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            yield
+    finally:
+        ssl._create_default_https_context = orig_https_context
+        requests.Session.send = orig_send
+
+
 def _observed_sectors(workspace: Any) -> list:
     """Return the sorted list of TESS sectors observed for this workspace.
 
@@ -192,7 +225,7 @@ def run_triceratops_simulation(
             # to the process working directory; run the Monte Carlo from a
             # temporary directory so no research payload leaks into the repo.
             cwd_before = os.getcwd()
-            with tempfile.TemporaryDirectory(prefix="exonym-trilegal-") as tmp_cwd:
+            with tempfile.TemporaryDirectory(prefix="exonym-trilegal-") as tmp_cwd, _trilegal_network_context():
                 os.chdir(tmp_cwd)
                 try:
                     targ = target_cls(
