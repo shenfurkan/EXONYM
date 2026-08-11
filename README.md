@@ -37,7 +37,11 @@ Independent discovery starts with a TIC target that has no assigned TOI or cTOI.
 | Sequential review | A seven-phase workflow prevents a candidate from skipping intake, feasibility, acquisition, vetting, follow-up, analysis, or final review. |
 | Reproducibility metadata | Release bundles capture environment definitions, dependency locks, a manifest, and source-control metadata. They are not automatic full data archives. |
 
-An [exonym](https://unstats.un.org/unsd/publication/seriesm/seriesm_88e.pdf) is an externally assigned name. The name reflects the architectural boundary between shared, survey-facing software and the candidate-local record that contains the actual target identity and evidence.
+### Why the name EXONYM?
+
+In terminology and geography ([UNGEGN ST/ESA/STAT/SER.M/88](https://unstats.un.org/unsd/publication/seriesm/seriesm_88e.pdf)), an *exonym* is an externally assigned name used by outer observers.
+
+In this framework, **EXONYM** serves as an architectural metaphor: the shared library acts as a target-neutral observer that interacts with candidates solely through external identifiers, while the true candidate identity, inputs, and research payloads remain strictly isolated within `candidate/<candidate-id>/`.
 
 ## Installation
 
