@@ -37,7 +37,7 @@ Independent discovery starts with a TIC target that has no assigned TOI or cTOI.
 | Sequential review | A seven-phase workflow prevents a candidate from skipping intake, feasibility, acquisition, vetting, follow-up, analysis, or final review. |
 | Reproducibility metadata | Release bundles capture environment definitions, dependency locks, a manifest, and source-control metadata. They are not automatic full data archives. |
 
-An exonym is an externally assigned name. The name reflects the architectural boundary between shared, survey-facing software and the candidate-local record that contains the actual target identity and evidence.
+An [exonym](https://unstats.un.org/unsd/publication/seriesm/seriesm_88e.pdf) is an externally assigned name. The name reflects the architectural boundary between shared, survey-facing software and the candidate-local record that contains the actual target identity and evidence.
 
 ## Installation
 
