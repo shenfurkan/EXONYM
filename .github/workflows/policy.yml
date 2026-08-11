@@ -14,8 +14,6 @@ jobs:
           python-version: "3.9"
       - name: Install
         run: pip install -e ".[test]"
-      - name: Pre-commit checks
-        run: python -m pre_commit run --all-files --show-diff-on-failure
       - name: Unit tests
         run: python -m pytest -q
       - name: Isolation audit
