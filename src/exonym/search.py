@@ -177,6 +177,7 @@ def find_transits_tls(
     flux_err: Sequence[float],
     period_min: float = 0.5,
     period_max: float = 15.0,
+    use_threads: int = 1,
 ) -> Dict[str, float]:
     """Run a weighted, native-cadence Transit Least Squares search.
 
@@ -186,6 +187,9 @@ def find_transits_tls(
         flux_err: Per-cadence normalized flux uncertainties.
         period_min: Minimum searched orbital period in days.
         period_max: Maximum searched orbital period in days.
+        use_threads: TLS worker count. The default of one avoids TLS's
+            multiprocessing path, which is unreliable in constrained Windows
+            shells.
 
     Returns:
         TLS best period, epoch, depth, duration, and SDE. This is a discovery
@@ -202,6 +206,8 @@ def find_transits_tls(
         raise ValueError("insufficient data points for TLS transit search")
     if period_min <= 0 or period_max <= period_min:
         raise ValueError("invalid period search bounds")
+    if use_threads < 1:
+        raise ValueError("TLS use_threads must be at least one")
 
     try:
         from transitleastsquares import transitleastsquares
@@ -214,11 +220,23 @@ def find_transits_tls(
         period_min=period_min,
         period_max=period_max,
         show_progress_bar=False,
+        use_threads=use_threads,
     )
+    bottom_flux = float(result.depth)
+    depth_relative = 1.0 - bottom_flux
+    values_to_check = (
+        float(result.period),
+        float(result.T0),
+        float(result.duration),
+        float(result.SDE),
+        bottom_flux,
+    )
+    if not np.all(np.isfinite(values_to_check)) or not 0.0 < depth_relative < 1.0:
+        raise RuntimeError("TLS did not return a physical transit solution")
     return {
         "best_period": float(result.period),
         "best_epoch": float(result.T0),
-        "best_depth_ppm": float(result.depth) * 1e6,
+        "best_depth_ppm": depth_relative * 1e6,
         "best_duration_hours": float(result.duration) * 24.0,
         "sde": float(result.SDE),
     }
@@ -437,7 +455,7 @@ def run_bls_on_candidate(
             "period_max_days": period_max,
             "duration_hours": duration_hours if duration_hours is not None else 3.0,
             "n_periods": 2000 if engine == "bls" else None,
-            "max_points": 4000,
+            "max_points": 4000 if engine == "bls" else None,
             "quality_filter": "quality == 0 when available",
             "normalization": "lightkurve.remove_nans().normalize()",
             "binning": (
@@ -448,6 +466,7 @@ def run_bls_on_candidate(
             "signal": signal,
             "engine": engine,
             "cadence": "native" if engine == "tls" else "median-binned",
+            "use_threads": 1 if engine == "tls" else None,
         },
     }
     if signal_provenance is not None:

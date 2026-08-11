@@ -68,7 +68,7 @@ def test_find_transits_tls_uses_native_cadence_uncertainties(monkeypatch):
             return types.SimpleNamespace(
                 period=4.0,
                 T0=1.0,
-                depth=0.001,
+                depth=0.999,
                 duration=0.125,
                 SDE=9.0,
             )
@@ -94,14 +94,13 @@ def test_find_transits_tls_uses_native_cadence_uncertainties(monkeypatch):
         "period_min": 1.0,
         "period_max": 10.0,
         "show_progress_bar": False,
+        "use_threads": 1,
     }
-    assert result == {
-        "best_period": 4.0,
-        "best_epoch": 1.0,
-        "best_depth_ppm": 1000.0,
-        "best_duration_hours": 3.0,
-        "sde": 9.0,
-    }
+    assert result["best_period"] == 4.0
+    assert result["best_epoch"] == 1.0
+    assert result["best_depth_ppm"] == pytest.approx(1000.0)
+    assert result["best_duration_hours"] == 3.0
+    assert result["sde"] == 9.0
 
 
 def test_run_bls_on_candidate_requires_real_photometry(tmp_path):
