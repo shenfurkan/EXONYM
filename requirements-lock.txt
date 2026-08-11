@@ -15,3 +15,4 @@ pysyd==6.10.5
 scipy==1.13.1
 tess-atl==0.0.3.1
 triceratops==1.0.20
+transitleastsquares==1.32

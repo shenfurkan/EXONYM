@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -170,6 +171,59 @@ def find_transits(
     )
 
 
+def find_transits_tls(
+    time_btjd: Sequence[float],
+    flux: Sequence[float],
+    flux_err: Sequence[float],
+    period_min: float = 0.5,
+    period_max: float = 15.0,
+) -> Dict[str, float]:
+    """Run a weighted, native-cadence Transit Least Squares search.
+
+    Args:
+        time_btjd: Observation times in BTJD.
+        flux: Normalized flux values.
+        flux_err: Per-cadence normalized flux uncertainties.
+        period_min: Minimum searched orbital period in days.
+        period_max: Maximum searched orbital period in days.
+
+    Returns:
+        TLS best period, epoch, depth, duration, and SDE. This is a discovery
+        statistic, not a planetary-validation result.
+    """
+    time = np.asarray(time_btjd, dtype=float)
+    values = np.asarray(flux, dtype=float)
+    errors = np.asarray(flux_err, dtype=float)
+    finite = np.isfinite(time) & np.isfinite(values) & np.isfinite(errors) & (errors > 0)
+    time = time[finite]
+    values = values[finite]
+    errors = errors[finite]
+    if time.size < 50:
+        raise ValueError("insufficient data points for TLS transit search")
+    if period_min <= 0 or period_max <= period_min:
+        raise ValueError("invalid period search bounds")
+
+    try:
+        from transitleastsquares import transitleastsquares
+    except ImportError as exc:
+        raise RuntimeError(
+            "TLS search requires the optional 'discovery' dependency group"
+        ) from exc
+
+    result = transitleastsquares(time, values, errors, verbose=False).power(
+        period_min=period_min,
+        period_max=period_max,
+        show_progress_bar=False,
+    )
+    return {
+        "best_period": float(result.period),
+        "best_epoch": float(result.T0),
+        "best_depth_ppm": float(result.depth) * 1e6,
+        "best_duration_hours": float(result.duration) * 24.0,
+        "sde": float(result.SDE),
+    }
+
+
 def _median_bin(time: np.ndarray, flux: np.ndarray, n_bins: int = 4000) -> Tuple[np.ndarray, np.ndarray]:
     """Median-bin a time-sorted light curve down to at most n_bins samples."""
     if time.size <= n_bins:
@@ -196,8 +250,7 @@ def load_candidate_light_curve(
     Products are read from ``data/processed/`` first, then ``data/raw/``.
     Multiple products are concatenated (per-sector binning) so multi-sector
     baselines are searched jointly. Returns None when no readable FITS light
-    curve with at least 50 points exists, so callers can fall back to a
-    synthetic demonstration grid.
+    curve with at least 50 points exists.
     """
     from .inputs import load_light_curve_table
 
@@ -211,11 +264,55 @@ def load_candidate_light_curve(
     return time, flux
 
 
+def _sha256(path: Path) -> str:
+    """Return the SHA-256 digest for a candidate-local input file."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _input_manifest_records(workspace: CandidateWorkspace) -> List[Dict[str, Any]]:
+    """Describe the exact light-curve products selected by the input loader."""
+    from .inputs import load_light_curve_table
+
+    table = load_light_curve_table(workspace)
+    if table is None:
+        return []
+
+    records: List[Dict[str, Any]] = []
+    for path in table.get("input_files", []):
+        product_path = Path(path)
+        sidecar_path = product_path.with_name(product_path.stem + ".provenance.json")
+        provenance: Optional[Dict[str, Any]] = None
+        if sidecar_path.is_file():
+            try:
+                provenance = json.loads(sidecar_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                provenance = None
+        records.append(
+            {
+                "path": product_path.relative_to(workspace.path).as_posix(),
+                "sha256": _sha256(product_path),
+                "provenance_path": (
+                    sidecar_path.relative_to(workspace.path).as_posix()
+                    if sidecar_path.is_file()
+                    else None
+                ),
+                "provenance": provenance,
+            }
+        )
+    return records
+
+
 def run_bls_on_candidate(
     workspace: CandidateWorkspace,
     period_min: float = 0.5,
     period_max: float = 15.0,
     signal: Optional[str] = None,
+    allow_synthetic: bool = False,
+    engine: str = "bls",
 ) -> Path:
     """Run BLS transit search on candidate data and save JSON summary to outputs/.
 
@@ -226,12 +323,10 @@ def run_bls_on_candidate(
     overwrite one another. A run without ``signal`` retains the historical
     ``outputs/bls_search_results.json`` path and behavior.
 
-    Real candidate light curves are used when present; otherwise a synthetic
-    demonstration grid is analyzed and the payload is marked ``source``.
+    Candidate searches require real, readable light-curve photometry. The
+    explicit ``allow_synthetic`` escape hatch exists only for demonstrations
+    and tests; it is not exposed by the CLI.
     """
-    outputs_dir = workspace.path / "outputs"
-    outputs_dir.mkdir(parents=True, exist_ok=True)
-
     duration_hours: Optional[float] = None
     signal_provenance: Optional[Dict[str, Any]] = None
     if signal is not None:
@@ -271,32 +366,99 @@ def run_bls_on_candidate(
             "period_max_days": period_max,
         }
 
-    loaded = load_candidate_light_curve(workspace)
+    if engine not in ("bls", "tls"):
+        raise ValueError("search engine must be 'bls' or 'tls'")
+
+    tls_errors: Optional[np.ndarray] = None
+    if engine == "tls":
+        from .inputs import load_light_curve_table
+
+        native_table = load_light_curve_table(workspace, max_points=None)
+        loaded = None
+        if native_table is not None:
+            loaded = (
+                np.asarray(native_table["time"], dtype=float),
+                np.asarray(native_table["flux"], dtype=float),
+            )
+            tls_errors = np.asarray(native_table["flux_err"], dtype=float)
+    else:
+        loaded = load_candidate_light_curve(workspace)
     if loaded is None:
+        if not allow_synthetic:
+            raise ValueError("no readable candidate light-curve photometry available for BLS transit search")
         time = np.linspace(0, 30, 1000)
         flux = 1.0 - 0.001 * (np.abs((time - 2.0) % 3.5) < 0.05).astype(float)
         source = "synthetic-demo"
+        input_records: List[Dict[str, Any]] = []
+        tls_errors = np.full_like(flux, 0.0002)
     else:
         time, flux = loaded
         source = "candidate-data"
+        input_records = _input_manifest_records(workspace)
 
-    search_kwargs: Dict[str, float] = {
-        "period_min": period_min,
-        "period_max": period_max,
-    }
-    if duration_hours is not None:
-        search_kwargs["duration_hours"] = duration_hours
-    result = find_transits(time, flux, **search_kwargs)
-    payload = result.to_dict()
+    if engine == "tls":
+        if tls_errors is None:
+            raise ValueError("TLS transit search requires per-cadence flux uncertainties")
+        payload = find_transits_tls(
+            time,
+            flux,
+            tls_errors,
+            period_min=period_min,
+            period_max=period_max,
+        )
+    else:
+        search_kwargs: Dict[str, float] = {
+            "period_min": period_min,
+            "period_max": period_max,
+        }
+        if duration_hours is not None:
+            search_kwargs["duration_hours"] = duration_hours
+        payload = find_transits(time, flux, **search_kwargs).to_dict()
     payload["source"] = source
     payload["n_points"] = int(time.size)
     if signal_provenance is not None:
         payload["signal"] = signal
         payload["search_provenance"] = signal_provenance
 
-    output_name = "bls_search_results{0}.json".format(signal or "")
+    outputs_dir = workspace.path / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    output_name = "{0}_search_results{1}.json".format(engine, signal or "")
     output_path = outputs_dir / output_name
     output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    manifest: Dict[str, Any] = {
+        "schema": "exonym-{0}-search-manifest-1".format(engine),
+        "candidate_id": workspace.candidate_id,
+        "result_path": output_path.relative_to(workspace.path).as_posix(),
+        "source": source,
+        "inputs": input_records,
+        "configuration": {
+            "period_min_days": period_min,
+            "period_max_days": period_max,
+            "duration_hours": duration_hours if duration_hours is not None else 3.0,
+            "n_periods": 2000 if engine == "bls" else None,
+            "max_points": 4000,
+            "quality_filter": "quality == 0 when available",
+            "normalization": "lightkurve.remove_nans().normalize()",
+            "binning": (
+                "per-product median binning; final median binning"
+                if engine == "bls"
+                else "none; native cadence"
+            ),
+            "signal": signal,
+            "engine": engine,
+            "cadence": "native" if engine == "tls" else "median-binned",
+        },
+    }
+    if signal_provenance is not None:
+        prior_path = workspace.path / signal_provenance["prior_path"]
+        manifest["targeted_prior"] = {
+            "path": signal_provenance["prior_path"],
+            "sha256": _sha256(prior_path),
+            "search_provenance": signal_provenance,
+        }
+    manifest_path = outputs_dir / "{0}_search_manifest{1}.json".format(engine, signal or "")
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return output_path
 
 

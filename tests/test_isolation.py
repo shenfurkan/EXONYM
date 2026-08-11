@@ -323,8 +323,8 @@ def test_candidate_directory_symlink_or_reparse_point_rejected(tmp_path):
 def test_self_check_of_actual_repository():
     import os
 
-    root = os.environ.get("EXOPLANET_REPO_ROOT")
+    root = os.environ.get("EXONYM_REPO_ROOT")
     if not root:
-        pytest.skip("EXOPLANET_REPO_ROOT not set")
+        pytest.skip("EXONYM_REPO_ROOT not set")
     report = check_repository(root)
     assert report.ok, format_report(report)

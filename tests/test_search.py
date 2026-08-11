@@ -1,12 +1,14 @@
 """Tests for the target-neutral BLS transit search engine."""
 
 import json
+import sys
+import types
 
 import numpy as np
 import pytest
 
 from exonym.lightcurve import phase_hours
-from exonym.search import BLSSearchResult, find_transits, run_bls_on_candidate
+from exonym.search import BLSSearchResult, find_transits, find_transits_tls, run_bls_on_candidate
 from exonym.workspace import create_candidate
 
 
@@ -57,14 +59,72 @@ def test_find_transits_invalid():
         find_transits(np.linspace(0, 10, 100), np.ones(100), period_min=-1.0)
 
 
-def test_run_bls_on_candidate_synthetic_fallback(tmp_path):
+def test_find_transits_tls_uses_native_cadence_uncertainties(monkeypatch):
+    calls = {}
+
+    class FakeModel:
+        def power(self, **kwargs):
+            calls["power"] = kwargs
+            return types.SimpleNamespace(
+                period=4.0,
+                T0=1.0,
+                depth=0.001,
+                duration=0.125,
+                SDE=9.0,
+            )
+
+    def fake_tls(time, flux, flux_err, verbose):
+        calls["time"] = time
+        calls["flux"] = flux
+        calls["flux_err"] = flux_err
+        calls["verbose"] = verbose
+        return FakeModel()
+
+    fake_module = types.ModuleType("transitleastsquares")
+    fake_module.transitleastsquares = fake_tls
+    monkeypatch.setitem(sys.modules, "transitleastsquares", fake_module)
+
+    time = np.linspace(0.0, 20.0, 100)
+    flux = np.ones_like(time)
+    flux_err = np.full_like(time, 0.001)
+    result = find_transits_tls(time, flux, flux_err, period_min=1.0, period_max=10.0)
+
+    assert calls["verbose"] is False
+    assert calls["power"] == {
+        "period_min": 1.0,
+        "period_max": 10.0,
+        "show_progress_bar": False,
+    }
+    assert result == {
+        "best_period": 4.0,
+        "best_epoch": 1.0,
+        "best_depth_ppm": 1000.0,
+        "best_duration_hours": 3.0,
+        "sde": 9.0,
+    }
+
+
+def test_run_bls_on_candidate_requires_real_photometry(tmp_path):
     workspace = create_candidate(tmp_path, "candidate-test-bls")
-    out = run_bls_on_candidate(workspace)
+
+    with pytest.raises(ValueError, match="no readable candidate light-curve photometry"):
+        run_bls_on_candidate(workspace)
+
+    assert not (workspace.path / "outputs" / "bls_search_results.json").exists()
+    assert not (workspace.path / "outputs" / "bls_search_manifest.json").exists()
+
+
+def test_run_bls_on_candidate_allows_explicit_synthetic_demo(tmp_path):
+    workspace = create_candidate(tmp_path, "candidate-test-bls")
+    out = run_bls_on_candidate(workspace, allow_synthetic=True)
     assert out.is_file()
     assert out.name == "bls_search_results.json"
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert payload["source"] == "synthetic-demo"
     assert payload["n_points"] > 0
+    manifest = json.loads((workspace.path / "outputs" / "bls_search_manifest.json").read_text())
+    assert manifest["source"] == "synthetic-demo"
+    assert manifest["inputs"] == []
 
 
 def test_run_bls_signal_uses_prior_duration_and_preserves_each_signal_output(tmp_path, monkeypatch):
@@ -151,6 +211,30 @@ def test_run_bls_signal_requires_a_readable_signal_prior(tmp_path):
         run_bls_on_candidate(workspace, signal=".01")
 
 
+def test_synthetic_bls_result_cannot_seed_an_ephemeris(tmp_path):
+    from exonym.inputs import load_transit_ephemeris
+
+    workspace = create_candidate(tmp_path, "synthetic-bls-guard")
+    outputs = workspace.path / "outputs"
+    outputs.mkdir(parents=True, exist_ok=True)
+    (outputs / "bls_search_results.json").write_text(
+        json.dumps(
+            {
+                "best_period": 3.0,
+                "best_epoch": 1.0,
+                "best_duration_hours": 2.0,
+                "best_depth_ppm": 500.0,
+                "source": "synthetic-demo",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ephemeris = load_transit_ephemeris(workspace)
+
+    assert ephemeris["source"] == "synthetic-demo"
+
+
 def test_run_bls_on_candidate_with_real_data(tmp_path):
     import lightkurve as lk
 
@@ -180,6 +264,10 @@ def test_run_bls_on_candidate_with_real_data(tmp_path):
     assert payload["source"] == "candidate-data"
     assert payload["n_points"] == 600
     assert payload["best_period"] > 0
+    manifest = json.loads((workspace.path / "outputs" / "bls_search_manifest.json").read_text())
+    assert manifest["source"] == "candidate-data"
+    assert manifest["inputs"][0]["path"] == "data/raw/test_lc.fits"
+    assert len(manifest["inputs"][0]["sha256"]) == 64
 
 
 def test_quality_flag_masking_excludes_bad_cadences(tmp_path):

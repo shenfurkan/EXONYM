@@ -50,6 +50,9 @@ pip install -e ".[test]"
 # Add TRICERATOPS screening and asteroseismology dependencies
 pip install -e ".[test,screening,asteroseismology]"
 
+# Add the optional native-cadence Transit Least Squares discovery engine
+pip install -e ".[test,discovery]"
+
 # Confirm the installed command
 exonym --version
 ```

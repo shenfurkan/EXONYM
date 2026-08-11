@@ -118,6 +118,42 @@ def test_cli_vet_command(tmp_path, capsys, monkeypatch):
     assert "triceratops_report.json" in output
 
 
+def test_cli_search_forwards_tls_engine(tmp_path, capsys, monkeypatch):
+    repo = _repo(tmp_path)
+    root = ["--root", str(repo)]
+    main(root + ["init", "candidate-alpha"])
+    calls = []
+
+    def fake_search(candidate, period_min, period_max, signal, engine):
+        calls.append(
+            {
+                "candidate": candidate.candidate_id,
+                "period_min": period_min,
+                "period_max": period_max,
+                "signal": signal,
+                "engine": engine,
+            }
+        )
+        output = candidate.path / "outputs" / "tls_search_results.json"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("{}\n", encoding="utf-8")
+        return output
+
+    monkeypatch.setattr("exonym.search.run_bls_on_candidate", fake_search)
+
+    assert main(root + ["search", "candidate-alpha", "--engine", "tls"]) == 0
+    assert calls == [
+        {
+            "candidate": "candidate-alpha",
+            "period_min": 0.5,
+            "period_max": 15.0,
+            "signal": None,
+            "engine": "tls",
+        }
+    ]
+    assert "tls_search_results.json" in capsys.readouterr().out
+
+
 def test_cli_fetch_priors_command(tmp_path, capsys, monkeypatch):
     repo = _repo(tmp_path)
     root = ["--root", str(repo)]

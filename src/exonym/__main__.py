@@ -138,10 +138,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Validate JSON schemas only (skip the isolation scan).",
     )
 
-    search_parser = commands.add_parser("search", help="Run BLS transit search on candidate data.")
+    search_parser = commands.add_parser("search", help="Run a transit search on candidate data.")
     search_parser.add_argument("candidate_id")
     search_parser.add_argument("--period-min", type=float, default=0.5, help="Minimum orbital period.")
     search_parser.add_argument("--period-max", type=float, default=15.0, help="Maximum orbital period.")
+    search_parser.add_argument(
+        "--engine",
+        choices=("bls", "tls"),
+        default="bls",
+        help="Search engine: BLS or optional native-cadence Transit Least Squares.",
+    )
     search_parser.add_argument(
         "--signal",
         default=None,
@@ -381,6 +387,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 period_min=args.period_min,
                 period_max=args.period_max,
                 signal=args.signal,
+                engine=args.engine,
             )
             print(output.relative_to(repository_root).as_posix())
             return 0

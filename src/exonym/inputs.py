@@ -147,7 +147,7 @@ def load_transit_ephemeris(
     if result["source"] != "candidate-config":
         bls_path = workspace.path / "outputs" / "bls_search_results.json"
         payload = _read_json(bls_path)
-        if payload is not None:
+        if payload is not None and payload.get("source") != "synthetic-demo":
             period_value = _first_number(payload, ("best_period",))
             epoch_value = _first_number(payload, ("best_epoch",))
             duration_hours_value = _first_number(payload, ("best_duration_hours",))
@@ -273,13 +273,14 @@ def _median_bin(
 
 
 def load_light_curve_table(
-    workspace: CandidateWorkspace, max_points: int = 4000
-) -> Optional[Dict[str, np.ndarray]]:
+    workspace: CandidateWorkspace, max_points: Optional[int] = 4000
+) -> Optional[Dict[str, Any]]:
     """Return a light curve table from candidate FITS products, or None.
 
-    The returned dict has ``time``, ``flux`` (normalized), ``flux_err`` and
-    ``sector`` (int array). Products are read from ``data/processed/`` first,
-    then ``data/raw/``. Returns None when no readable light curve exists.
+    The returned dict has ``time``, ``flux`` (normalized), ``flux_err``,
+    ``sector`` (int array), and ``input_files`` (the accepted products).
+    Products are read from ``data/processed/`` first, then ``data/raw/``.
+    Returns None when no readable light curve exists.
     """
     roots = (
         workspace.path / "data" / "processed",
@@ -310,7 +311,7 @@ def load_light_curve_table(
 
     import warnings as _warnings
 
-    tables: List[Dict[str, np.ndarray]] = []
+    tables: List[Dict[str, Any]] = []
     seen_sectors: set = set()
     for path in fits_files:
         try:
@@ -359,7 +360,11 @@ def load_light_curve_table(
                 continue
             seen_sectors.add(sector_value)
             sector_values = np.full(time.size, sector_value, dtype=int)
-            binned = _median_bin(time, flux, flux_err, sector_values, n_bins=max_points)
+            binned = (
+                _median_bin(time, flux, flux_err, sector_values, n_bins=max_points)
+                if max_points is not None
+                else (time, flux, flux_err, sector_values)
+            )
             if binned[0].size >= 50:
                 tables.append(
                     {
@@ -367,6 +372,7 @@ def load_light_curve_table(
                         "flux": binned[1],
                         "flux_err": binned[2],
                         "sector": binned[3],
+                        "path": path,
                     }
                 )
         except Exception as exc:
@@ -382,7 +388,7 @@ def load_light_curve_table(
     flux = np.concatenate([table["flux"] for table in tables])
     flux_err = np.concatenate([table["flux_err"] for table in tables])
     sector_values = np.concatenate([table["sector"] for table in tables])
-    if time.size > max_points:
+    if max_points is not None and time.size > max_points:
         time, flux, flux_err, sector_values = _median_bin(
             time, flux, flux_err, sector_values, n_bins=max_points
         )
@@ -391,6 +397,7 @@ def load_light_curve_table(
         "flux": flux,
         "flux_err": flux_err,
         "sector": sector_values.astype(int),
+        "input_files": [table["path"] for table in tables],
     }
 
 

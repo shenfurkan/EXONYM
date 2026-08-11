@@ -7,7 +7,7 @@ import pytest
 
 
 def pytest_configure(config):
-    """Automatically set EXOPLANET_REPO_ROOT to the repository root.
+    """Automatically set EXONYM_REPO_ROOT to the repository root.
 
     The test ``test_self_check_of_actual_repository`` requires this env var
     to locate the live repository tree and run the isolation audit against it.
@@ -15,5 +15,5 @@ def pytest_configure(config):
     execute the self-check.
     """
     repo_root = Path(__file__).resolve().parent.parent
-    if "EXOPLANET_REPO_ROOT" not in os.environ:
-        os.environ["EXOPLANET_REPO_ROOT"] = str(repo_root)
+    if "EXONYM_REPO_ROOT" not in os.environ:
+        os.environ["EXONYM_REPO_ROOT"] = str(repo_root)
