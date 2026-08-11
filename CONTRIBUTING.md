@@ -29,11 +29,10 @@ python -m pip install -e ".[asteroseismology]"
 
 ## Before Work
 
-1. Read `docs/governance/README.md` and `docs/lifecycle.md`.
-2. Classify the change: C0 editorial, C1 implementation, C2 input/data,
+1. Classify the change: C0 editorial, C1 implementation, C2 input/data,
    C3 protocol, C4 claim, C5 release, C6 security.
-3. Inspect `git status`; do not overwrite unrelated work.
-4. Check `python -m exonym --root . verify` before and after.
+2. Inspect `git status`; do not overwrite unrelated work.
+3. Check `python -m exonym --root . verify` before and after.
 
 ## Rules
 
@@ -71,18 +70,7 @@ The repository guard layer runs on every push and pull request:
 3. `python -m exonym --root . verify --schemas-only`: JSON schema validation of candidate
    records, provenance sidecars, and claim assertions.
 
-Install the local pre-commit hook to run the audit before every commit:
-
-```powershell
-pip install pre-commit
-pre-commit install
-```
-
-The hook runs the repository verification command on the full repository (`always_run`) and
-rejects target identifiers, research payloads, symlinks, and schema
-violations outside `candidate/`. Policy, schema, and template files require
-owner review before merge; exceptions require an entry in
-`policy/isolation-exceptions.json` with an expiry date.
+Run the verification command before committing to reject target identifiers, research payloads, symlinks, and schema violations outside `candidate/`. Policy, schema, and template files require owner review before merge; exceptions require an entry in `policy/isolation-exceptions.json` with an expiry date.
 
 ## Commit and Release
 

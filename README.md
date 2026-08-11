@@ -189,7 +189,7 @@ src/exonym/                   Target-neutral library and CLI implementation
 schemas/                      JSON Schema 2020-12 definitions
 templates/                    Files cloned into candidate workspaces created by init
 policy/                        Isolation policy and approved exceptions
-docs/                          Target-neutral governance and lifecycle guidance
+docs/                          Target-neutral documentation
 ```
 
 ### Structured records
@@ -397,7 +397,7 @@ Continuous integration runs the test suite, full isolation audit, and schema-onl
 
 ## Contributing
 
-Read [the contribution guide](CONTRIBUTING.md), [governance documentation](docs/governance/README.md), and [lifecycle guidance](docs/lifecycle.md) before changing shared pipeline behavior or a candidate record.
+Read [the contribution guide](CONTRIBUTING.md) before changing shared pipeline behavior or a candidate record.
 
 - Keep all target research inside `candidate/`.
 - Use synthetic fixtures in shared tests.

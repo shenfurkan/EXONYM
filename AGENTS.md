@@ -69,7 +69,7 @@ policy/isolation-exceptions.json  ← approved isolation rule exceptions (requir
 2. `python -m exonym --root . verify`
 3. `python -m exonym --root . verify --schemas-only`
 
-**Pre-commit hook** (`.pre-commit-config.yaml`) runs `exonym verify` on `always_run` — install with `pre-commit install`.
+**Verification audit** (`exonym verify`) enforces isolation rules and schema integrity before push/PR.
 
 ## Workflow Phases & Gate Rules
 
