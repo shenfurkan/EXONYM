@@ -39,9 +39,9 @@ Independent discovery starts with a TIC target that has no assigned TOI or cTOI.
 
 ### Why the name EXONYM?
 
-In terminology and geography ([UNGEGN ST/ESA/STAT/SER.M/88](https://unstats.un.org/unsd/publication/seriesm/seriesm_88e.pdf)), an *exonym* is an externally assigned name used by outer observers.
+In terminology and geography, an **exonym** is [an externally assigned name](https://unstats.un.org/unsd/publication/seriesm/seriesm_88e.pdf) used by an outer community to refer to an entity outside its jurisdiction, adapted without altering the original local *endonym* (UNGEGN Manual, ST/ESA/STAT/SER.M/88, Ch. VI).
 
-In this framework, **EXONYM** serves as an architectural metaphor: the shared library acts as a target-neutral observer that interacts with candidates solely through external identifiers, while the true candidate identity, inputs, and research payloads remain strictly isolated within `candidate/<candidate-id>/`.
+In this framework, **EXONYM** serves as an architectural metaphor: the shared codebase acts as a target-neutral outer observer that interacts with candidates solely through external identifiers and standardized placeholders, while the true candidate identity, raw inputs, and research payloads remain strictly isolated within `candidate/<candidate-id>/`.
 
 ## Installation
 
