@@ -24,15 +24,18 @@ jobs:
         run: python -m exonym --root . verify
       - name: JSON schema validation
         run: python -m exonym --root . verify --schemas-only
-      # Semgrep 1.136.0 publishes wheels through Python 3.11, while pipx
-      # otherwise selects the runner's unsupported Python 3.12 interpreter.
+      # Semgrep 1.136.0 publishes wheels through Python 3.11 and its
+      # OpenTelemetry dependency imports pkg_resources from setuptools.
       - name: Set up Semgrep runtime
         id: semgrep-python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - name: Static analysis
-        run: pipx run --python "${{ steps.semgrep-python.outputs.python-path }}" "semgrep==1.136.0" scan --config p/python --severity ERROR --error --metrics=off src
+        run: >-
+          pipx run --python "${{ steps.semgrep-python.outputs.python-path }}"
+          --pip-args="setuptools<81" "semgrep==1.136.0" scan
+          --config p/python --severity ERROR --error --metrics=off src
 
   secrets:
     runs-on: ubuntu-latest
