@@ -45,7 +45,6 @@ candidate/*
 # runtime templates required by installed wheels are deliberate exceptions.
 *.md
 !/README.md
-!/CONTRIBUTING.md
 !/SECURITY.md
 !/templates/**/*.md
 !/src/exonym/_resources/templates/**/*.md

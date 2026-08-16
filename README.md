@@ -244,7 +244,7 @@ All commands accept the global form `exonym [--root <repository-root>] <command>
 
 | Command | Key options | Primary artifact or result |
 | --- | --- | --- |
-| `asteroseismology <candidate-id>` | `--numax-min`, `--numax-max` | Writes `outputs/asteroseismic_results.json`; optional pySYD results can provide a cross-check. |
+| `asteroseismology <candidate-id>` | `--numax-min`, `--numax-max` | Writes `outputs/asteroseismic_results.json`. |
 | `localization <candidate-id>` | `--search-radius` | Writes `outputs/prf_localization_results.json` from pixel-depth and Gaussian-template screening. |
 | `sed <candidate-id>` | None | Writes `outputs/sed_fit_results.json` and an MCMC chain array. |
 | `fit <candidate-id>` | `--n-samples`, `--eccentric`, `--signal` | Writes `outputs/mcmc_transit_fit.json` and an MCMC chain array. The default chain length is 5000 samples. |
@@ -340,7 +340,7 @@ a_over_Rstar = (G * P^2 * rho_star / (3 * pi))^(1/3)
 
 The current fitter uses phase-folded, median-binned data and independent white errors with a jitter term. It does not fit a Gaussian-process noise model or provide a native-cadence adopted posterior. Inspect posterior correlations, prior sensitivity, dilution treatment, and cadence integration before converting a fitted radius ratio into a physical companion radius.
 
-`exonym sed` fits either a candidate-supplied atmosphere grid or a reddened blackbody representation at catalog pivot wavelengths with `emcee`. The blackbody path uses parallax information to infer radius and luminosity. It is useful for a transparent first-pass stellar context, but it is not a default passband-integrated atmosphere analysis and should not replace a dedicated stellar-characterization study.
+`exonym sed` fits a reddened blackbody representation at catalog pivot wavelengths with `emcee`. It uses parallax information to infer radius and luminosity. It is useful for a transparent first-pass stellar context, but it is not a passband-integrated atmosphere analysis and should not replace a dedicated stellar-characterization study.
 
 `exonym asteroseismology` estimates a power spectral density, whitens a median background, searches for a smoothed oscillation envelope, and estimates the large frequency separation from lag correlation. It applies standard solar-like scaling relations, including:
 
@@ -349,7 +349,7 @@ R_star / R_sun = (numax / numax_sun) * (Dnu / Dnu_sun)^(-2) * (Teff / Teff_sun)^
 M_star / M_sun = (numax / numax_sun)^3 * (Dnu / Dnu_sun)^(-4) * (Teff / Teff_sun)^(3/2)
 ```
 
-The output includes physical sanity checks and can use pySYD as an optional cross-check. Scaling relations are empirical approximations with regime-dependent systematics; a plausible result is not a validated seismic solution.
+The output includes physical sanity checks. Scaling relations are empirical approximations with regime-dependent systematics; a plausible result is not a validated seismic solution.
 
 ### Variability, phase curves, and timing
 
@@ -401,16 +401,6 @@ exonym verify --schemas-only
 For an editorial-only README change, the repository policy does not require the full Python test suite. The isolation audit remains appropriate because target-neutral documentation can accidentally contain target-specific identifiers or aliases.
 
 Continuous integration runs the test suite, full isolation audit, and schema-only audit on pushes and pull requests.
-
-## Contributing
-
-Read [the contribution guide](CONTRIBUTING.md) before changing shared pipeline behavior or a candidate record.
-
-- Keep all target research inside `candidate/`.
-- Use synthetic fixtures in shared tests.
-- Pass target identity, observing selections, and ephemerides into shared code as inputs rather than hardcoding them.
-- Treat threshold or gate-rule changes as protocol changes and document their scientific rationale.
-- Do not weaken a test or screening criterion merely to make a candidate pass.
 
 ## License
 
