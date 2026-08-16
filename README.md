@@ -195,8 +195,8 @@ candidate/<candidate-id>/
 src/exonym/                   Target-neutral library and CLI implementation
 schemas/                      JSON Schema 2020-12 definitions
 templates/                    Files cloned into candidate workspaces created by init
-policy/                        Isolation policy and approved exceptions
-docs/                          Target-neutral documentation
+policy/                       Isolation policy and approved exceptions
+tests/                        Target-neutral automated test suite
 ```
 
 ### Structured records

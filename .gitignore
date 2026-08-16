@@ -47,7 +47,6 @@ candidate/*
 !/README.md
 !/CONTRIBUTING.md
 !/SECURITY.md
-!/AGENTS.md
 !/templates/**/*.md
 !/src/exonym/_resources/templates/**/*.md
 .txt
