@@ -273,14 +273,19 @@ def _median_bin(
 
 
 def load_light_curve_table(
-    workspace: CandidateWorkspace, max_points: Optional[int] = 4000
+    workspace: CandidateWorkspace,
+    max_points: Optional[int] = 4000,
+    sectors: Optional[Sequence[int]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Return a light curve table from candidate FITS products, or None.
 
     The returned dict has ``time``, ``flux`` (normalized), ``flux_err``,
     ``sector`` (int array), and ``input_files`` (the accepted products).
     Products are read from ``data/processed/`` first, then ``data/raw/``.
-    Returns None when no readable light curve exists.
+    When ``sectors`` is supplied, only products whose resolved TESS sector is
+    in that sequence are returned. Multiple products in one selected sector
+    are deduplicated by sorted filename, with the first product retained.
+    Returns None when no readable light curve exists after filtering.
     """
     roots = (
         workspace.path / "data" / "processed",
@@ -311,6 +316,7 @@ def load_light_curve_table(
 
     import warnings as _warnings
 
+    requested_sectors = set(sectors) if sectors is not None else None
     tables: List[Dict[str, Any]] = []
     seen_sectors: set = set()
     for path in fits_files:
@@ -352,6 +358,8 @@ def load_light_curve_table(
                 sector_value = None
             if not sector_value or sector_value <= 0:
                 sector_value = len(tables) + 1
+            if requested_sectors is not None and sector_value not in requested_sectors:
+                continue
             if sector_value in seen_sectors:
                 # Different products from the same TESS sector (e.g. SPOC and
                 # QLP copies) would otherwise double-count one sector and make

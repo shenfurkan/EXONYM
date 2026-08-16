@@ -1,0 +1,347 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/survey-robustness-1.0.json",
+  "title": "Candidate-local Survey Robustness Artifact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source",
+    "survey_id",
+    "candidate_id",
+    "sectors",
+    "configuration",
+    "input_files",
+    "reference_signal",
+    "diagnostics",
+    "injection_recovery",
+    "injection_recovery_summary"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "source": { "const": "candidate-data" },
+    "survey_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "candidate_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "sectors": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "integer", "minimum": 1 }
+    },
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "duration_grid_hours",
+        "period_min_days",
+        "period_max_days",
+        "n_periods",
+        "detrend_window_days",
+        "scramble_seeds",
+        "period_agreement_fraction",
+        "injection_recovery"
+      ],
+      "properties": {
+        "duration_grid_hours": { "const": [1.0, 2.0, 4.0] },
+        "period_min_days": { "const": 0.5 },
+        "period_max_days": { "const": 20.0 },
+        "n_periods": { "const": 200 },
+        "detrend_window_days": { "const": 1.0 },
+        "scramble_seeds": { "const": [5, 7, 11] },
+        "period_agreement_fraction": { "const": 0.01 },
+        "injection_recovery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "phase_offsets",
+            "minimum_recovered_trials",
+            "minimum_recovery_fraction",
+            "epoch_tolerance_duration_fraction",
+            "minimum_snr"
+          ],
+          "properties": {
+            "phase_offsets": { "const": [0.25, 0.5, 0.75] },
+            "minimum_recovered_trials": { "const": 2 },
+            "minimum_recovery_fraction": { "const": 0.6666666666666666 },
+            "epoch_tolerance_duration_fraction": { "const": 1.0 },
+            "minimum_snr": { "type": "number", "exclusiveMinimum": 0 }
+          }
+        }
+      }
+    },
+    "input_files": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^data/(?:raw|processed)/(?:[A-Za-z0-9][A-Za-z0-9._-]*/)*[A-Za-z0-9][A-Za-z0-9._-]*\\.(?:fits|fz)$"
+      }
+    },
+    "reference_signal": { "$ref": "#/$defs/reference_signal" },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["variants", "controls"],
+      "properties": {
+        "variants": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["normalized", "running-median"],
+          "properties": {
+            "normalized": { "$ref": "#/$defs/variant" },
+            "running-median": { "$ref": "#/$defs/variant" }
+          }
+        },
+        "controls": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["inverted", "scrambles", "max_snr"],
+          "properties": {
+            "inverted": { "$ref": "#/$defs/bls_result" },
+            "scrambles": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["seed", "best"],
+                "properties": {
+                  "seed": { "type": "integer", "minimum": 0 },
+                  "best": { "$ref": "#/$defs/bls_result" }
+                }
+              }
+            },
+            "max_snr": { "type": "number", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "injection_recovery": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/injection_recovery_entry" }
+    },
+    "injection_recovery_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reference_signal_usable",
+        "masked_cadences",
+        "trial_count",
+        "expected_trial_count",
+        "recovered_count",
+        "recovery_fraction",
+        "minimum_recovered_trials",
+        "minimum_recovery_fraction",
+        "passed"
+      ],
+      "properties": {
+        "reference_signal_usable": { "type": "boolean" },
+        "masked_cadences": { "type": "integer", "minimum": 0 },
+        "trial_count": { "type": "integer", "minimum": 0 },
+        "expected_trial_count": { "type": "integer", "minimum": 1 },
+        "recovered_count": { "type": "integer", "minimum": 0 },
+        "recovery_fraction": { "type": "number", "minimum": 0, "maximum": 1 },
+        "minimum_recovered_trials": { "type": "integer", "minimum": 1 },
+        "minimum_recovery_fraction": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "passed": { "type": "boolean" }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["reference_signal"],
+        "properties": {
+          "reference_signal": {
+            "required": ["usable_for_injection_recovery"],
+            "properties": {
+              "usable_for_injection_recovery": { "const": true }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "injection_recovery": { "minItems": 3, "maxItems": 3 },
+          "injection_recovery_summary": {
+            "properties": {
+              "reference_signal_usable": { "const": true },
+              "trial_count": { "const": 3 },
+              "expected_trial_count": { "const": 3 },
+              "minimum_recovered_trials": { "const": 2 },
+              "minimum_recovery_fraction": { "const": 0.6666666666666666 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["reference_signal"],
+        "properties": {
+          "reference_signal": {
+            "required": ["usable_for_injection_recovery"],
+            "properties": {
+              "usable_for_injection_recovery": { "const": false }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "injection_recovery": { "maxItems": 0 },
+          "injection_recovery_summary": {
+            "properties": {
+              "reference_signal_usable": { "const": false },
+              "trial_count": { "const": 0 },
+              "recovered_count": { "const": 0 },
+              "recovery_fraction": { "const": 0.0 },
+              "passed": { "const": false }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["injection_recovery_summary"],
+        "properties": {
+          "injection_recovery_summary": {
+            "required": ["passed"],
+            "properties": {
+              "passed": { "const": true }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "reference_signal": {
+            "properties": {
+              "usable_for_injection_recovery": { "const": true }
+            }
+          },
+          "injection_recovery": { "minItems": 3, "maxItems": 3 },
+          "injection_recovery_summary": {
+            "properties": {
+              "reference_signal_usable": { "const": true },
+              "trial_count": { "const": 3 },
+              "expected_trial_count": { "const": 3 },
+              "recovered_count": { "minimum": 2 },
+              "recovery_fraction": { "minimum": 0.6666666666666666 },
+              "minimum_recovered_trials": { "const": 2 },
+              "minimum_recovery_fraction": { "const": 0.6666666666666666 }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "bls_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "best_period",
+        "best_epoch",
+        "best_depth_ppm",
+        "best_duration_hours",
+        "snr"
+      ],
+      "properties": {
+        "best_period": { "type": "number", "exclusiveMinimum": 0 },
+        "best_epoch": { "type": "number" },
+        "best_depth_ppm": { "type": "number" },
+        "best_duration_hours": { "type": "number", "exclusiveMinimum": 0 },
+        "snr": { "type": "number", "minimum": 0 }
+      }
+    },
+    "reference_signal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "best_period",
+        "best_epoch",
+        "best_depth_ppm",
+        "best_duration_hours",
+        "snr",
+        "usable_for_injection_recovery"
+      ],
+      "properties": {
+        "best_period": { "type": "number", "exclusiveMinimum": 0 },
+        "best_epoch": { "type": "number" },
+        "best_depth_ppm": { "type": "number" },
+        "best_duration_hours": { "type": "number", "exclusiveMinimum": 0 },
+        "snr": { "type": "number", "minimum": 0 },
+        "usable_for_injection_recovery": { "type": "boolean" }
+      }
+    },
+    "variant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["best", "trials"],
+      "properties": {
+        "best": { "$ref": "#/$defs/bls_result" },
+        "trials": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/bls_result" }
+        }
+      }
+    },
+    "injection_recovery_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "injection",
+        "period_match",
+        "epoch_match",
+        "snr_pass",
+        "epoch_tolerance_hours",
+        "recovered",
+        "best"
+      ],
+      "properties": {
+        "injection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "period_days",
+            "epoch_btjd",
+            "duration_hours",
+            "depth_ppm",
+            "phase_offset"
+          ],
+          "properties": {
+            "period_days": { "type": "number", "exclusiveMinimum": 0 },
+            "epoch_btjd": { "type": "number" },
+            "duration_hours": { "type": "number", "exclusiveMinimum": 0 },
+            "depth_ppm": { "type": "number", "exclusiveMinimum": 0 },
+            "phase_offset": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "exclusiveMaximum": 1
+            }
+          }
+        },
+        "period_match": { "type": "boolean" },
+        "epoch_match": { "type": "boolean" },
+        "snr_pass": { "type": "boolean" },
+        "epoch_tolerance_hours": { "type": "number", "exclusiveMinimum": 0 },
+        "recovered": { "type": "boolean" },
+        "best": { "$ref": "#/$defs/bls_result" }
+      }
+    }
+  }
+}

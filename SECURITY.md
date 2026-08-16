@@ -34,6 +34,8 @@ or data under `candidate/`.
    this scan automatically.
 8. If archive-extraction code is added, it must reject absolute member paths,
    traversal, symlinks, and reserved names.
+9. Install `.[security]` before local security checks. CI runs Bandit, isolated
+   Semgrep, and a full-history Gitleaks scan on every push and pull request.
 
 ## Research Isolation
 

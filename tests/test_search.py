@@ -126,6 +126,41 @@ def test_run_bls_on_candidate_allows_explicit_synthetic_demo(tmp_path):
     assert manifest["inputs"] == []
 
 
+def test_run_bls_output_suffix_preserves_the_default_result(tmp_path, monkeypatch):
+    # Arrange
+    workspace = create_candidate(tmp_path, "candidate-output-suffix")
+    outputs = workspace.path / "outputs"
+    default_result = outputs / "bls_search_results.json"
+    default_result.write_text('{"source": "candidate-data", "snr": 2.0}\n', encoding="utf-8")
+    time = np.linspace(0.0, 30.0, 100)
+    flux = np.ones_like(time)
+    monkeypatch.setattr(
+        "exonym.search.load_candidate_light_curve", lambda _, sectors=None: (time, flux)
+    )
+    monkeypatch.setattr(
+        "exonym.search.find_transits",
+        lambda *args, **kwargs: BLSSearchResult(3.0, 1.0, 100.0, 2.0, 6.0),
+    )
+
+    # Act
+    output = run_bls_on_candidate(workspace, result_suffix=".survey-test")
+
+    # Assert
+    assert output.name == "bls_search_results.survey-test.json"
+    assert json.loads(default_result.read_text(encoding="utf-8"))["snr"] == 2.0
+    assert (outputs / "bls_search_manifest.survey-test.json").is_file()
+
+
+@pytest.mark.parametrize("suffix", ["survey", ".bad_value", ".bad.value"])
+def test_run_bls_rejects_an_unsafe_or_ambiguous_output_suffix(tmp_path, suffix):
+    # Arrange
+    workspace = create_candidate(tmp_path, "candidate-output-suffix")
+
+    # Act and assert
+    with pytest.raises(ValueError, match="result_suffix"):
+        run_bls_on_candidate(workspace, result_suffix=suffix)
+
+
 def test_run_bls_signal_uses_prior_duration_and_preserves_each_signal_output(tmp_path, monkeypatch):
     """Targeted searches use their own prior and cannot overwrite another signal."""
     workspace = create_candidate(tmp_path, "candidate-targeted-bls")
@@ -170,7 +205,9 @@ def test_run_bls_signal_uses_prior_duration_and_preserves_each_signal_output(tmp
             snr=5.0,
         )
 
-    monkeypatch.setattr("exonym.search.load_candidate_light_curve", lambda _: (time, flux))
+    monkeypatch.setattr(
+        "exonym.search.load_candidate_light_curve", lambda _, sectors=None: (time, flux)
+    )
     monkeypatch.setattr("exonym.search.find_transits", fake_find_transits)
 
     first_output = run_bls_on_candidate(workspace, signal=".01")

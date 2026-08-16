@@ -120,6 +120,17 @@ exonym advance <candidate-id>
 
 `exonym advance` only checks whether the required records and checklist items are present. It does not decide whether the science is sound. Check a box only after the candidate evidence supports it, and write caveats in the relevant candidate document.
 
+### Blind-discovery surveys
+
+`exonym survey` records a bounded TESS cohort below
+`candidate/_surveys/<survey-id>/`. Each registered target keeps an explicit
+survey outcome, including novelty-audit blocks and searches without alerts.
+Survey search uses only the manifest's selected sectors and routes a BLS peak
+to human review. It does not set a scientific disposition, make a planet claim,
+or replace the required candidate-local screening sequence. Detection-reliability
+calibration, alternate detrending, null controls, injection-recovery, and
+ephemeris matching remain required before an independent-detection claim.
+
 Pass `--toi <toi>` only when a known TOI is deliberately being analyzed for validation, comparison, or follow-up rather than independent discovery.
 
 ## Candidate lifecycle and gate logic
@@ -226,6 +237,11 @@ All commands accept the global form `exonym [--root <repository-root>] <command>
 | `advance <candidate-id>` | None | Validates the current gate, writes a gate record and lifecycle event, then promotes the workflow when allowed. |
 | `set-state <candidate-id>` | Required `--state`; optional `--reason` | Performs an audit-logged lifecycle transition. A reason is required when leaving `stopped`, `published`, or `archived`. |
 | `freeze <candidate-id>` | `--version` | Creates a candidate-local reproducibility bundle and prints its path. |
+| `survey init <survey-id>` | `--mission tess --sectors <int> [<int> ...] --review-snr <float>` | Creates a bounded survey and freezes its internal BLS triage threshold below `candidate/_surveys/`. |
+| `survey add-target <survey-id> <candidate-id>` | None | Adds one TOI-free TESS workspace to the cohort denominator. |
+| `survey search <survey-id> <candidate-id>` | None | Runs BLS only on the survey sectors using its frozen threshold after a current eligible novelty audit; it records a triage outcome, not a planet claim. |
+| `survey exclude <survey-id> <candidate-id>` | `--reason <text>` | Retains a documented pre-search exclusion without changing the candidate lifecycle. |
+| `survey report <survey-id>` | None | Prints every registered target and its recorded outcome. |
 | `verify` | `--schemas-only` | Runs isolation and schema checks. It exits nonzero when violations are found. |
 
 ### Acquisition, search, and screening commands

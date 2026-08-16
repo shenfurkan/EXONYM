@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/survey-target-1.0.json",
+  "title": "Blind Discovery Survey Target",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "survey_id",
+    "candidate_id",
+    "registered_at",
+    "status",
+    "search_result_path",
+    "reason",
+    "search_reused"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "survey_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "candidate_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "registered_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "status": {
+      "enum": [
+        "pending-eligibility",
+        "blocked-novelty-audit",
+        "searched-no-alert",
+        "alert-for-human-review",
+        "excluded-before-search"
+      ]
+    },
+    "search_result_path": { "type": ["string", "null"] },
+    "reason": { "type": "string", "minLength": 1 },
+    "search_snr": { "type": "number" },
+    "review_snr": { "type": "number", "exclusiveMinimum": 0 },
+    "robustness_result_path": { "type": "string", "minLength": 1 },
+    "robustness_passed": { "type": "boolean" },
+    "search_reused": { "type": "boolean" }
+  }
+}

@@ -27,6 +27,9 @@ def _repo(tmp_path):
         "provenance.schema.json",
         "claim.schema.json",
         "novelty-audit.schema.json",
+        "survey.schema.json",
+        "survey-target.schema.json",
+        "survey-robustness.schema.json",
     ):
         shutil.copy2("schemas/{0}".format(name), tmp_path / "schemas" / name)
     (tmp_path / "requirements-lock.txt").write_text(
@@ -83,6 +86,19 @@ def test_cli_list_filters_by_phase(tmp_path, capsys):
     main(root + ["list", "--phase", "analysis"])
     output = capsys.readouterr().out
     assert "candidate-alpha" not in output
+
+
+def test_cli_survey_registers_a_toi_free_target(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    root = ["--root", str(repo)]
+    main(root + ["survey", "init", "test-survey", "--mission", "tess", "--sectors", "17"])
+    main(root + ["init", "survey-target", "--tic", "123456789", "--mission", "tess"])
+
+    assert main(root + ["survey", "add-target", "test-survey", "survey-target"]) == 0
+    assert main(root + ["survey", "report", "test-survey"]) == 0
+
+    output = capsys.readouterr().out
+    assert "pending-eligibility" in output
 
 
 def test_cli_ingest_requires_tic(tmp_path):

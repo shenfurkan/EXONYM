@@ -13,6 +13,15 @@ venv/
 ENV/
 env/
 .env/
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+credentials.json
+service-account*.json
 .pytest_cache/
 .coverage
 htmlcov/
@@ -45,6 +54,7 @@ candidate/*
 # runtime templates required by installed wheels are deliberate exceptions.
 *.md
 !/README.md
+!/plan.md
 !/SECURITY.md
 !/templates/**/*.md
 !/src/exonym/_resources/templates/**/*.md
@@ -82,3 +92,5 @@ desktop.ini
 .antigravity/
 .cursor/
 .opencode/
+SECURITY.md
+plan.md

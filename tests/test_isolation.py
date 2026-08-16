@@ -320,6 +320,27 @@ def test_candidate_directory_symlink_or_reparse_point_rejected(tmp_path):
     assert any(v.rule == "symlink-or-reparse-point" for v in report.violations)
 
 
+def test_survey_collection_reparse_point_is_rejected(tmp_path, monkeypatch):
+    # Arrange
+    repo = _make_repo(tmp_path)
+    survey_root = repo / "candidate" / "_surveys"
+    survey_root.mkdir()
+    monkeypatch.setattr(
+        isolation,
+        "is_reparse_point",
+        lambda path: Path(path) == survey_root,
+    )
+
+    # Act
+    report = check_repository(repo)
+
+    # Assert
+    assert any(
+        violation.rule == "symlink-or-reparse-point" and Path(violation.path) == survey_root
+        for violation in report.violations
+    )
+
+
 def test_self_check_of_actual_repository():
     import os
 

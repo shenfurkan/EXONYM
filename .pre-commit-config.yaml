@@ -7,3 +7,15 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: compileall
+        name: Python compile check
+        entry: python -m compileall -q src tests
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: bandit
+        name: Bandit security scan
+        entry: python -m bandit -r src -lll
+        language: system
+        pass_filenames: false
+        always_run: true

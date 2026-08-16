@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "exonym"
-version = "1.0.0"
+version = "1.0.1"
 description = "EXONYM: candidate-isolated framework for reproducible TESS exoplanet research"
 license = { file = "LICENSE" }
 requires-python = "==3.9.*"
@@ -26,6 +26,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest==8.4.2", "Pillow==11.3.0", "pre-commit==3.8.0"]
+security = ["bandit==1.8.6"]
 screening = ["triceratops==1.0.20"]
 discovery = ["transitleastsquares==1.32"]
 asteroseismology = ["pysyd==6.10.5", "tess-atl==0.0.3.1"]

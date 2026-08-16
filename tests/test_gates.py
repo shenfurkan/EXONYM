@@ -433,6 +433,15 @@ def test_freeze_builds_manifest_and_locks(tmp_path):
         freeze(candidate, version="v1.0.0")
 
 
+@pytest.mark.parametrize("version", ["../escape", "nested/path", "CON", "release."])
+def test_freeze_rejects_unsafe_release_versions(tmp_path, version):
+    candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha")
+    (tmp_path / "requirements-lock.txt").write_text("numpy==1.26.4\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="release version"):
+        freeze(candidate, version=version)
+
+
 def test_overall_progress_across_documents(tmp_path):
     candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha")
     telemetry = candidate_telemetry(candidate)

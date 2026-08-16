@@ -261,7 +261,9 @@ def _median_bin(time: np.ndarray, flux: np.ndarray, n_bins: int = 4000) -> Tuple
 
 
 def load_candidate_light_curve(
-    workspace: CandidateWorkspace, max_points: int = 4000
+    workspace: CandidateWorkspace,
+    max_points: int = 4000,
+    sectors: Optional[Sequence[int]] = None,
 ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
     """Return (time_btjd, normalized_flux) from candidate FITS data, or None.
 
@@ -272,7 +274,7 @@ def load_candidate_light_curve(
     """
     from .inputs import load_light_curve_table
 
-    table = load_light_curve_table(workspace, max_points=max_points)
+    table = load_light_curve_table(workspace, max_points=max_points, sectors=sectors)
     if table is None:
         return None
     time = np.asarray(table["time"], dtype=float)
@@ -291,11 +293,13 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _input_manifest_records(workspace: CandidateWorkspace) -> List[Dict[str, Any]]:
+def _input_manifest_records(
+    workspace: CandidateWorkspace, sectors: Optional[Sequence[int]] = None
+) -> List[Dict[str, Any]]:
     """Describe the exact light-curve products selected by the input loader."""
     from .inputs import load_light_curve_table
 
-    table = load_light_curve_table(workspace)
+    table = load_light_curve_table(workspace, sectors=sectors)
     if table is None:
         return []
 
@@ -331,6 +335,8 @@ def run_bls_on_candidate(
     signal: Optional[str] = None,
     allow_synthetic: bool = False,
     engine: str = "bls",
+    sectors: Optional[Sequence[int]] = None,
+    result_suffix: Optional[str] = None,
 ) -> Path:
     """Run BLS transit search on candidate data and save JSON summary to outputs/.
 
@@ -386,12 +392,17 @@ def run_bls_on_candidate(
 
     if engine not in ("bls", "tls"):
         raise ValueError("search engine must be 'bls' or 'tls'")
+    if result_suffix is not None:
+        if signal is not None:
+            raise ValueError("result_suffix cannot be combined with a signal search")
+        if not re.fullmatch(r"\.[a-z0-9][a-z0-9-]*", result_suffix):
+            raise ValueError("result_suffix must use the .label format")
 
     tls_errors: Optional[np.ndarray] = None
     if engine == "tls":
         from .inputs import load_light_curve_table
 
-        native_table = load_light_curve_table(workspace, max_points=None)
+        native_table = load_light_curve_table(workspace, max_points=None, sectors=sectors)
         loaded = None
         if native_table is not None:
             loaded = (
@@ -400,7 +411,7 @@ def run_bls_on_candidate(
             )
             tls_errors = np.asarray(native_table["flux_err"], dtype=float)
     else:
-        loaded = load_candidate_light_curve(workspace)
+        loaded = load_candidate_light_curve(workspace, sectors=sectors)
     if loaded is None:
         if not allow_synthetic:
             raise ValueError("no readable candidate light-curve photometry available for BLS transit search")
@@ -412,7 +423,7 @@ def run_bls_on_candidate(
     else:
         time, flux = loaded
         source = "candidate-data"
-        input_records = _input_manifest_records(workspace)
+        input_records = _input_manifest_records(workspace, sectors=sectors)
 
     if engine == "tls":
         if tls_errors is None:
@@ -440,7 +451,7 @@ def run_bls_on_candidate(
 
     outputs_dir = workspace.path / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
-    output_name = "{0}_search_results{1}.json".format(engine, signal or "")
+    output_name = "{0}_search_results{1}.json".format(engine, signal or result_suffix or "")
     output_path = outputs_dir / output_name
     output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
@@ -467,6 +478,7 @@ def run_bls_on_candidate(
             "engine": engine,
             "cadence": "native" if engine == "tls" else "median-binned",
             "use_threads": 1 if engine == "tls" else None,
+            "sectors": list(sectors) if sectors is not None else None,
         },
     }
     if signal_provenance is not None:
@@ -476,7 +488,9 @@ def run_bls_on_candidate(
             "sha256": _sha256(prior_path),
             "search_provenance": signal_provenance,
         }
-    manifest_path = outputs_dir / "{0}_search_manifest{1}.json".format(engine, signal or "")
+    manifest_path = outputs_dir / "{0}_search_manifest{1}.json".format(
+        engine, signal or result_suffix or ""
+    )
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return output_path
 

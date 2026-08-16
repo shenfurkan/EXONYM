@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/survey-1.0.json",
+  "title": "Blind Discovery Survey",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "survey_id",
+    "mission",
+    "sectors",
+    "review_snr",
+    "created_at",
+    "scientific_status",
+    "selection_policy"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "survey_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "mission": { "const": "tess" },
+    "sectors": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "integer", "minimum": 1 }
+    },
+    "review_snr": { "type": "number", "exclusiveMinimum": 0 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "scientific_status": { "const": "unvalidated" },
+    "selection_policy": { "type": "string", "minLength": 1 }
+  }
+}

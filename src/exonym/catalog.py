@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 MISSIONS = ("tess", "kepler", "k2", "plato", "cheops")
-INGEST_FETCHER = "exonym-ingest/1.0.0"
+INGEST_FETCHER = "exonym-ingest/1.0.1"
 
 _PATTERNS = (
     ("toi", "tess", re.compile(r"^(?:TOI)[\s._-]*(\d{1,7}(?:\.\d{1,2})?)$", re.IGNORECASE)),

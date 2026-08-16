@@ -13,10 +13,26 @@ jobs:
         with:
           python-version: "3.9"
       - name: Install
-        run: pip install -e ".[test]"
+        run: pip install -e ".[test,security]"
+      - name: Compile check
+        run: python -m compileall -q src tests
       - name: Unit tests
         run: python -m pytest -q
+      - name: Python security scan
+        run: bandit -r src -lll
+      - name: Static analysis
+        run: pipx run "semgrep==1.136.0" scan --config p/python --severity ERROR --error --metrics=off src
       - name: Isolation audit
         run: python -m exonym --root . verify
       - name: JSON schema validation
         run: python -m exonym --root . verify --schemas-only
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v3
+        env:
+          GITLEAKS_ENABLE_COMMENTS: "false"

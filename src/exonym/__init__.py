@@ -5,7 +5,7 @@ research. Every candidate lives under ``candidate/<candidate-id>/``; shared
 code in this package never contains target constants.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 from .workspace import (
     CandidateWorkspace,

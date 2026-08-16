@@ -92,6 +92,39 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Filter by originating mission.",
     )
 
+    survey_parser = commands.add_parser(
+        "survey", help="Create and operate a bounded independent-discovery survey."
+    )
+    survey_commands = survey_parser.add_subparsers(dest="survey_action", required=True)
+    survey_init_parser = survey_commands.add_parser("init", help="Create a survey manifest.")
+    survey_init_parser.add_argument("survey_id", help="Lowercase survey identifier.")
+    survey_init_parser.add_argument("--mission", choices=("tess",), required=True)
+    survey_init_parser.add_argument("--sectors", nargs="+", type=int, required=True)
+    survey_init_parser.add_argument(
+        "--review-snr", type=float, default=6.0,
+        help="Preregistered BLS SNR for internal human-review routing.",
+    )
+    survey_add_parser = survey_commands.add_parser(
+        "add-target", help="Register a TOI-free candidate workspace in the survey denominator."
+    )
+    survey_add_parser.add_argument("survey_id")
+    survey_add_parser.add_argument("candidate_id")
+    survey_search_parser = survey_commands.add_parser(
+        "search", help="Run a sector-scoped BLS search for an eligible registered target."
+    )
+    survey_search_parser.add_argument("survey_id")
+    survey_search_parser.add_argument("candidate_id")
+    survey_exclude_parser = survey_commands.add_parser(
+        "exclude", help="Record a pre-search exclusion without changing candidate lifecycle."
+    )
+    survey_exclude_parser.add_argument("survey_id")
+    survey_exclude_parser.add_argument("candidate_id")
+    survey_exclude_parser.add_argument("--reason", required=True)
+    survey_report_parser = survey_commands.add_parser(
+        "report", help="Show the survey denominator and recorded outcomes."
+    )
+    survey_report_parser.add_argument("survey_id")
+
     status_parser = commands.add_parser("status", help="Show one candidate record.")
     status_parser.add_argument("candidate_id")
 
@@ -311,6 +344,42 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             _print_json([candidate.metadata for candidate in candidates])
             return 0
+
+        if args.command == "survey":
+            from .survey import (
+                create_survey,
+                exclude_survey_target,
+                load_survey,
+                load_survey_candidate,
+                register_survey_target,
+                run_survey_search,
+                survey_summary,
+            )
+
+            if args.survey_action == "init":
+                survey = create_survey(
+                    repository_root, args.survey_id, args.mission, args.sectors, args.review_snr
+                )
+                _print_json(survey.metadata)
+                return 0
+            survey = load_survey(repository_root, args.survey_id)
+            if args.survey_action == "add-target":
+                candidate = load_survey_candidate(repository_root, args.candidate_id)
+                output = register_survey_target(survey, candidate)
+                print(output.relative_to(repository_root).as_posix())
+                return 0
+            if args.survey_action == "search":
+                candidate = load_survey_candidate(repository_root, args.candidate_id)
+                output = run_survey_search(survey, candidate)
+                print(output.relative_to(repository_root).as_posix())
+                return 0
+            if args.survey_action == "exclude":
+                output = exclude_survey_target(survey, args.candidate_id, args.reason)
+                print(output.relative_to(repository_root).as_posix())
+                return 0
+            if args.survey_action == "report":
+                _print_json(survey_summary(survey))
+                return 0
 
         candidate = load_candidate(repository_root, args.candidate_id)
 
