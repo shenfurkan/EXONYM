@@ -30,6 +30,8 @@ def _repo(tmp_path):
         "survey.schema.json",
         "survey-target.schema.json",
         "survey-robustness.schema.json",
+        "engine-run.schema.json",
+        "automated-triage.schema.json",
     ):
         shutil.copy2("schemas/{0}".format(name), tmp_path / "schemas" / name)
     (tmp_path / "requirements-lock.txt").write_text(

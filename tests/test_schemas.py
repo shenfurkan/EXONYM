@@ -20,6 +20,8 @@ def _make_repo(tmp_path, with_templates=True):
         "survey.schema.json",
         "survey-target.schema.json",
         "survey-robustness.schema.json",
+        "engine-run.schema.json",
+        "automated-triage.schema.json",
     ):
         shutil.copy2(
             "schemas/{0}".format(name), tmp_path / "schemas" / name
@@ -111,6 +113,56 @@ def _valid_novelty_audit():
                 "retrieved_at": "2000-01-01T00:00:00Z",
                 "finding": "A source was reviewed using the recorded method.",
                 "evidence_sha256": "a" * 64,
+            }
+        ],
+    }
+
+
+def _valid_engine_run():
+    return {
+        "schema_version": 1,
+        "candidate_id": "candidate-alpha",
+        "engine": "test-engine",
+        "run_id": "run-001",
+        "status": "succeeded",
+        "started_at": "2000-01-01T00:00:00Z",
+        "completed_at": "2000-01-01T00:01:00Z",
+        "runtime": {"kind": "direct", "version": "test-version"},
+        "inputs": [{"path": "data/raw/input.fits", "sha256": "a" * 64}],
+        "outputs": [{"path": "outputs/test-result.json", "sha256": "b" * 64}],
+    }
+
+
+def _write_engine_run(repo, payload):
+    path = (
+        repo
+        / "candidate"
+        / "candidate-alpha"
+        / "runs"
+        / "test-engine"
+        / "run-001"
+        / "engine-run.json"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _valid_automated_triage():
+    return {
+        "schema_version": 1,
+        "candidate_id": "candidate-alpha",
+        "generated_at": "2000-01-01T00:01:00Z",
+        "policy_id": "test-policy",
+        "policy_version": "test-version",
+        "status": "review-required",
+        "records": [
+            {
+                "engine": "test-engine",
+                "run_manifest_path": "runs/test-engine/run-001/engine-run.json",
+                "run_manifest_sha256": "a" * 64,
+                "status": "review-required",
+                "reason": "Synthetic review condition.",
             }
         ],
     }
@@ -264,6 +316,72 @@ def test_invalid_novelty_audit_is_flagged(tmp_path):
     report = _audit(repo)
     assert not report.ok
     assert any(v.rule == "schema-violation" for v in report.violations)
+
+
+def test_valid_engine_run_passes_schema_validation(tmp_path):
+    # Arrange
+    repo = _make_repo(tmp_path)
+    _write_engine_run(repo, _valid_engine_run())
+
+    # Act and assert
+    assert _audit(repo).ok
+
+
+def test_engine_run_requires_matching_directory_identity(tmp_path):
+    # Arrange
+    repo = _make_repo(tmp_path)
+    artifact = _valid_engine_run()
+    artifact["engine"] = "other-engine"
+    path = _write_engine_run(repo, artifact)
+
+    # Act
+    report = _audit(repo)
+
+    # Assert
+    assert any(violation.path == path.as_posix() for violation in report.violations)
+
+
+def test_engine_run_outside_candidate_is_rejected(tmp_path):
+    # Arrange
+    repo = _make_repo(tmp_path)
+    path = repo / "engine-run.json"
+    path.write_text(json.dumps(_valid_engine_run()), encoding="utf-8")
+
+    # Act
+    report = _audit(repo)
+
+    # Assert
+    assert any(
+        violation.path == path.as_posix() and violation.rule == "engine-run-outside-candidate"
+        for violation in report.violations
+    )
+
+
+def test_valid_automated_triage_passes_schema_validation(tmp_path):
+    # Arrange
+    repo = _make_repo(tmp_path)
+    path = repo / "candidate" / "candidate-alpha" / "decisions" / "automated_triage.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(_valid_automated_triage()), encoding="utf-8")
+
+    # Act and assert
+    assert _audit(repo).ok
+
+
+def test_automated_triage_requires_matching_candidate_identity(tmp_path):
+    # Arrange
+    repo = _make_repo(tmp_path)
+    artifact = _valid_automated_triage()
+    artifact["candidate_id"] = "another-candidate"
+    path = repo / "candidate" / "candidate-alpha" / "decisions" / "automated_triage.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+
+    # Act
+    report = _audit(repo)
+
+    # Assert
+    assert any(violation.path == path.as_posix() for violation in report.violations)
 
 
 def test_legacy_subtree_sidecars_are_skipped(tmp_path):

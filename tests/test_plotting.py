@@ -4,6 +4,7 @@ import hashlib
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 
 from exonym.plotting import generate_candidate_plots, plot_centroid_offsets, plot_phase_folded_lc
 from exonym.workspace import create_candidate
@@ -60,3 +61,37 @@ def test_generate_candidate_plots_uses_requested_signal_config(tmp_path):
     # Assert
     assert phase_plot.call_args.args[2] == 2.25
     assert phase_plot.call_args.args[3] == 1.5
+
+
+def test_plot_mcmc_corner(tmp_path):
+    from exonym.plotting import plot_mcmc_corner
+
+    rng = np.random.default_rng(seed=42)
+    synthetic_chain = rng.normal(size=(100, 7))
+    out = tmp_path / "test_corner.png"
+    result = plot_mcmc_corner(synthetic_chain, output_path=out)
+    assert result.is_file()
+    assert result.stat().st_size > 0
+
+
+def test_generate_candidate_plots_with_corner(tmp_path):
+    workspace = create_candidate(tmp_path, "candidate-test-corner-plots")
+
+    # 1. Without corner
+    plots = generate_candidate_plots(workspace, include_corner=False)
+    assert len(plots) == 2
+
+    # 2. A corner plot requires a real fit chain.
+    with pytest.raises(ValueError, match="corner plot requires an existing MCMC fit chain"):
+        generate_candidate_plots(workspace, include_corner=True)
+    assert not (workspace.path / "figures" / "corner_plot.png").exists()
+
+    # 3. With corner and custom chain
+    chain_file = workspace.path / "outputs" / "mcmc_transit_fit_chain.01.npy"
+    rng = np.random.default_rng(seed=123)
+    np.save(str(chain_file), rng.normal(size=(50, 7)))
+    plots_signal = generate_candidate_plots(workspace, signal=".01", include_corner=True)
+    assert len(plots_signal) == 3
+    signal_names = [p.name for p in plots_signal]
+    assert "corner_plot.01.png" in signal_names
+    assert (workspace.path / "figures" / "corner_plot.01.png").is_file()

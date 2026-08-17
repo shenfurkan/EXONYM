@@ -321,7 +321,8 @@ def run_ttv_analysis(workspace: CandidateWorkspace, signal: Optional[str] = None
     analysis = transit_timing_analysis(
         table["time"], table["flux"], table["flux_err"], ephemeris, a_rs
     )
-    timing_diagram = figures_dir / "ttv_timing_diagram.png"
+    suffix = f".{signal.lstrip('.')}" if signal else ""
+    timing_diagram = figures_dir / f"ttv_timing_diagram{suffix}.png"
     if analysis["n_transits_fit"] > 0:
         plot_timing_diagram(
             analysis["epochs"],
@@ -360,6 +361,7 @@ def run_ttv_analysis(workspace: CandidateWorkspace, signal: Optional[str] = None
         "work_package": "TTV_ANALYSIS",
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "source": source,
+        "signal": signal,
         "ephemeris": {
             "period_days": ephemeris["period_days"],
             "epoch_btjd": ephemeris["epoch_btjd"],
@@ -386,6 +388,6 @@ def run_ttv_analysis(workspace: CandidateWorkspace, signal: Optional[str] = None
             "no TTV detection is claimed without a significance threshold."
         ),
     }
-    output_path = outputs_dir / "ttv_analysis_results.json"
+    output_path = outputs_dir / f"ttv_analysis_results{suffix}.json"
     output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return output_path

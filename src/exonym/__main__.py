@@ -125,6 +125,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     survey_report_parser.add_argument("survey_id")
 
+    engine_parser = commands.add_parser(
+        "engine", help="Inspect and validate analytical and vetting engines."
+    )
+    engine_commands = engine_parser.add_subparsers(dest="engine_action", required=True)
+    engine_list_parser = engine_commands.add_parser(
+        "list", help="List registered analytical engines and runtime availability."
+    )
+    engine_list_parser.add_argument(
+        "--json", action="store_true", help="Format output as JSON."
+    )
+    engine_check_parser = engine_commands.add_parser(
+        "check", help="Check installation and readiness of a named engine."
+    )
+    engine_check_parser.add_argument("engine_name", help="Canonical engine identifier.")
+
     status_parser = commands.add_parser("status", help="Show one candidate record.")
     status_parser.add_argument("candidate_id")
 
@@ -203,6 +218,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--signal",
         default=None,
         help="Per-signal transit config name used for phase folding (for example, .01).",
+    )
+    plot_parser.add_argument(
+        "--corner",
+        action="store_true",
+        help="Generate an MCMC posterior corner plot from the matching fit chain.",
     )
 
     fetch_parser = commands.add_parser("fetch-priors", help="Fetch ExoFOP transit priors.")
@@ -381,6 +401,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 _print_json(survey_summary(survey))
                 return 0
 
+        if args.command == "engine":
+            import dataclasses
+            from .engines import check_engine, iter_engines
+
+            if args.engine_action == "list":
+                engine_statuses = iter_engines()
+                if getattr(args, "json", False):
+                    _print_json([dataclasses.asdict(e) for e in engine_statuses])
+                else:
+                    header = f"{'Engine':<14} {'Capability':<18} {'Installed':<11} {'Version':<12} {'Group':<14}"
+                    print(header)
+                    print("-" * len(header))
+                    for e in engine_statuses:
+                        inst = "yes" if e.installed else "no"
+                        ver = e.version or "-"
+                        print(f"{e.name:<14} {e.capability:<18} {inst:<11} {ver:<12} {e.optional_group:<14}")
+                return 0
+
+            if args.engine_action == "check":
+                ready, message = check_engine(args.engine_name)
+                print(message)
+                return 0 if ready else 1
+
         candidate = load_candidate(repository_root, args.candidate_id)
 
         if args.command == "status":
@@ -471,7 +514,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "plot":
             from .plotting import generate_candidate_plots
 
-            generated = generate_candidate_plots(candidate, signal=args.signal)
+            generated = generate_candidate_plots(
+                candidate, signal=args.signal, include_corner=getattr(args, "corner", False)
+            )
             _print_json([str(path.relative_to(repository_root)).replace("\\", "/") for path in generated])
             return 0
 

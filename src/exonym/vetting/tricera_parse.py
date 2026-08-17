@@ -273,11 +273,11 @@ def run_triceratops_simulation(
         "source": source,
         "triceratops_error": triceratops_error,
     }
-
-    report_path = outputs_dir / "triceratops_report.json"
+    suffix = f".{signal.lstrip('.')}" if signal else ""
+    report_path = outputs_dir / f"triceratops_report{suffix}.json"
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
-    claim_path = claims_dir / "fpp_claim.json"
+    claim_path = claims_dir / f"fpp_claim{suffix}.json"
     if fpp_rounded is not None:
         claim_payload = {
             "parameter": "fpp",

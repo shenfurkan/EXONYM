@@ -515,11 +515,13 @@ def run_mcmc_transit_fit(
             "autocorrelation_times": tau_dict,
         },
         "n_binned_points": int(phase_days.size),
+        "signal": signal,
         "caveat": "Descriptive folded/binned fit; not an adopted native-cadence posterior.",
     }
-    output_path = outputs_dir / "mcmc_transit_fit.json"
+    suffix = f".{signal.lstrip('.')}" if signal else ""
+    output_path = outputs_dir / f"mcmc_transit_fit{suffix}.json"
     output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    np.save(str(outputs_dir / "mcmc_transit_fit_chain.npy"), chain)
+    np.save(str(outputs_dir / f"mcmc_transit_fit_chain{suffix}.npy"), chain)
     return output_path
 
 

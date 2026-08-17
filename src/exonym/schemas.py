@@ -28,6 +28,8 @@ NOVELTY_AUDIT_SCHEMA = "novelty-audit.schema.json"
 SURVEY_SCHEMA = "survey.schema.json"
 SURVEY_TARGET_SCHEMA = "survey-target.schema.json"
 SURVEY_ROBUSTNESS_SCHEMA = "survey-robustness.schema.json"
+ENGINE_RUN_SCHEMA = "engine-run.schema.json"
+AUTOMATED_TRIAGE_SCHEMA = "automated-triage.schema.json"
 LEGACY_SUBTREE = "legacy-project"
 
 
@@ -68,6 +70,8 @@ def _load_schemas(root: Path, report: IsolationReport) -> Dict[str, object]:
         SURVEY_SCHEMA,
         SURVEY_TARGET_SCHEMA,
         SURVEY_ROBUSTNESS_SCHEMA,
+        ENGINE_RUN_SCHEMA,
+        AUTOMATED_TRIAGE_SCHEMA,
     ):
         path = root / SCHEMA_DIRECTORY / name
         try:
@@ -122,6 +126,8 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
         return
 
     survey_robustness_schema = schemas.get(SURVEY_ROBUSTNESS_SCHEMA)
+    engine_run_schema = schemas.get(ENGINE_RUN_SCHEMA)
+    automated_triage_schema = schemas.get(AUTOMATED_TRIAGE_SCHEMA)
     surveys_root = candidate_root / "_surveys"
     for workspace_dir in sorted(candidate_root.iterdir()):
         if not workspace_dir.is_dir() or workspace_dir.name == "_surveys":
@@ -167,6 +173,52 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
                 report.add(novelty_audit_path, "schema-violation", "invalid JSON: {0}".format(exc))
             else:
                 _validate(report, novelty_audit_path, instance, novelty_audit_schema, validate_func)
+
+        if automated_triage_schema is not None:
+            triage_path = workspace_dir / "decisions" / "automated_triage.json"
+            if triage_path.is_file():
+                try:
+                    instance = _read_json(triage_path)
+                except (OSError, UnicodeError, ValueError) as exc:
+                    report.add(triage_path, "schema-violation", "invalid JSON: {0}".format(exc))
+                else:
+                    _validate(report, triage_path, instance, automated_triage_schema, validate_func)
+                    if isinstance(instance, dict) and instance.get("candidate_id") != workspace_dir.name:
+                        report.add(
+                            triage_path,
+                            "schema-violation",
+                            "automated triage candidate_id does not match its workspace",
+                        )
+
+        if engine_run_schema is not None:
+            for run_path in sorted(workspace_dir.glob("runs/*/*/engine-run.json")):
+                try:
+                    instance = _read_json(run_path)
+                except (OSError, UnicodeError, ValueError) as exc:
+                    report.add(run_path, "schema-violation", "invalid JSON: {0}".format(exc))
+                    continue
+                _validate(report, run_path, instance, engine_run_schema, validate_func)
+                if not isinstance(instance, dict):
+                    continue
+                relative = run_path.relative_to(workspace_dir)
+                if instance.get("candidate_id") != workspace_dir.name:
+                    report.add(
+                        run_path,
+                        "schema-violation",
+                        "engine run candidate_id does not match its workspace",
+                    )
+                if instance.get("engine") != relative.parts[1]:
+                    report.add(
+                        run_path,
+                        "schema-violation",
+                        "engine run engine does not match its directory",
+                    )
+                if instance.get("run_id") != relative.parts[2]:
+                    report.add(
+                        run_path,
+                        "schema-violation",
+                        "engine run run_id does not match its directory",
+                    )
 
         if survey_robustness_schema is not None:
             outputs_dir = workspace_dir / "outputs"
@@ -304,4 +356,44 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
                 path,
                 "survey-robustness-outside-candidate",
                 "robustness artifacts must be direct files in candidate/<id>/outputs/",
+            )
+
+    for path in sorted(root.rglob("engine-run.json")):
+        if not path.is_file() or LEGACY_SUBTREE in path.parts:
+            continue
+        try:
+            relative = path.relative_to(candidate_root)
+        except ValueError:
+            relative = Path()
+        is_candidate_local = (
+            len(relative.parts) == 5
+            and relative.parts[0] != "_surveys"
+            and relative.parts[1] == "runs"
+            and relative.parts[4] == "engine-run.json"
+        )
+        if not is_candidate_local:
+            report.add(
+                path,
+                "engine-run-outside-candidate",
+                "engine manifests must be direct files in candidate/<id>/runs/<engine>/<run-id>/",
+            )
+
+    for path in sorted(root.rglob("automated_triage.json")):
+        if not path.is_file() or LEGACY_SUBTREE in path.parts:
+            continue
+        try:
+            relative = path.relative_to(candidate_root)
+        except ValueError:
+            relative = Path()
+        is_candidate_local = (
+            len(relative.parts) == 3
+            and relative.parts[0] != "_surveys"
+            and relative.parts[1] == "decisions"
+            and relative.parts[2] == "automated_triage.json"
+        )
+        if not is_candidate_local:
+            report.add(
+                path,
+                "automated-triage-outside-candidate",
+                "automated triage records must be direct files in candidate/<id>/decisions/",
             )
