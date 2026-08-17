@@ -139,6 +139,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "check", help="Check installation and readiness of a named engine."
     )
     engine_check_parser.add_argument("engine_name", help="Canonical engine identifier.")
+    engine_run_parser = engine_commands.add_parser(
+        "run", help="Execute an analytical engine and record a candidate-local run manifest."
+    )
+    engine_run_parser.add_argument("engine_name", help="Canonical engine identifier.")
+    engine_run_parser.add_argument("candidate_id", help="Target candidate identifier.")
+    engine_run_parser.add_argument("--signal", default=None, help="Optional signal prior identifier.")
+    engine_report_parser = engine_commands.add_parser(
+        "report", help="Report candidate-local engine execution history."
+    )
+    engine_report_parser.add_argument("candidate_id", help="Target candidate identifier.")
+
+    triage_parser = commands.add_parser(
+        "triage", help="Aggregate pre-vetting findings into an automated decision record."
+    )
+    triage_parser.add_argument("candidate_id", help="Target candidate identifier.")
+    triage_parser.add_argument("--policy-id", default="default-pre-vetting-triage", help="Triage policy identifier.")
+    triage_parser.add_argument("--policy-version", default="1.0.0", help="Triage policy version.")
 
     status_parser = commands.add_parser("status", help="Show one candidate record.")
     status_parser.add_argument("candidate_id")
@@ -424,7 +441,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(message)
                 return 0 if ready else 1
 
+            if args.engine_action == "run":
+                from .engines import run_engine
+
+                cand = load_candidate(repository_root, args.candidate_id)
+                manifest = run_engine(cand, args.engine_name, signal=getattr(args, "signal", None))
+                print(manifest.relative_to(repository_root).as_posix())
+                return 0
+
+            if args.engine_action == "report":
+                from .engines import report_candidate_engines
+
+                cand = load_candidate(repository_root, args.candidate_id)
+                runs = report_candidate_engines(cand)
+                _print_json(runs)
+                return 0
+
         candidate = load_candidate(repository_root, args.candidate_id)
+
+        if args.command == "triage":
+            from .engines import run_automated_triage
+
+            triage_path = run_automated_triage(
+                candidate,
+                policy_id=getattr(args, "policy_id", "default-pre-vetting-triage"),
+                policy_version=getattr(args, "policy_version", "1.0.0"),
+            )
+            print(triage_path.relative_to(repository_root).as_posix())
+            return 0
 
         if args.command == "status":
             result = dict(candidate.metadata)
