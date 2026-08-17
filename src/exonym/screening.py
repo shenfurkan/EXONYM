@@ -1,11 +1,25 @@
-"""Fixed-ephemeris photometric screening for candidate-owned light curves.
+"""Fixed-ephemeris photometric screening suite for candidate transit verification.
 
-This module deliberately produces a screening artifact rather than a planet
-validation claim.  It measures the primary depth, an odd-even consistency
-check, a half-period control, and a doubled-period alternating-event
-diagnostic at a declared ephemeris.  The uncertainty is an approximate
-scatter-based standard error and does not model correlated
-photometric noise.
+Applies deterministic physical checks on candidate light curves at a declared ephemeris (P, T_0, T_14)
+to rapidly identify eclipsing binaries, centroid contaminants, and period aliases before
+computationally expensive MCMC or TRICERATOPS runs:
+
+1. Odd-Even Depth Consistency Check:
+   Computes depth significance difference:
+       z = |delta_odd - delta_even| / sqrt(sigma_odd^2 + sigma_even^2)
+   Flags candidates with z >= 3.0 sigma as probable Eclipsing Binaries (EB) whose true
+   orbital period is doubled (P_true = 2 * P_trial).
+
+2. Half-Phase Secondary Eclipse Screen (phi = 0.5):
+   Measures flux deficit at the anti-transit phase to detect companion occultations (depth_sec).
+   Significant secondary eclipses (> 3 sigma) rule out planetary nature unless proven thermal emission.
+
+3. Doubled-Period Screen (2 * P):
+   Evaluates alternating primary and secondary events at double the declared period.
+
+Note:
+    Produces a screening diagnostic artifact only, NOT a statistical validation claim.
+    Scatter-based uncertainties do not fully model correlated red noise.
 """
 
 from __future__ import annotations
@@ -22,13 +36,12 @@ from .inputs import load_light_curve_table, load_transit_ephemeris
 from .lightcurve import phase_hours
 from .workspace import CandidateWorkspace
 
-
-MIN_SAMPLES_PER_WINDOW = 3
-ODD_EVEN_CONSISTENCY_THRESHOLD_SIGMA = 3.0
-SCREENING_MAX_POINTS_PER_PRODUCT = 12000
-OUT_OF_TRANSIT_INNER_DURATIONS = 1.2
-OUT_OF_TRANSIT_OUTER_DURATIONS = 2.5
-DOUBLE_PERIOD_HARMONIC_MULTIPLIER = 2.0
+MIN_SAMPLES_PER_WINDOW = 3                      # Minimum in-transit cadences required for depth evaluation
+ODD_EVEN_CONSISTENCY_THRESHOLD_SIGMA = 3.0      # Significance threshold (sigma) for odd-even depth difference
+SCREENING_MAX_POINTS_PER_PRODUCT = 12000        # Maximum cadences loaded per product to bound memory
+OUT_OF_TRANSIT_INNER_DURATIONS = 1.2            # Inner buffer boundary for out-of-transit baseline
+OUT_OF_TRANSIT_OUTER_DURATIONS = 2.5            # Outer buffer boundary for out-of-transit baseline
+DOUBLE_PERIOD_HARMONIC_MULTIPLIER = 2.0         # Period multiplier for harmonic sub-harmonic check
 
 
 def _finite_float(value: object) -> Optional[float]:

@@ -1,9 +1,22 @@
-"""Target-neutral spectral energy distribution engine.
+"""Target-neutral spectral energy distribution (SED) engine.
 
-Fits Gaia DR3 + 2MASS + WISE broadband photometry against either a generic
-BT-Settl/Kurucz-style atmosphere grid CSV (``data/external/atmosphere_grid.csv``)
-or a reddened Planck blackbody model, and derives host star posteriors for
-Teff, log g and [Fe/H] via ensemble MCMC. No target data is hardcoded.
+Fits multi-band broadband photometry (Gaia DR3 G/BP/RP, 2MASS J/H/Ks, AllWISE W1-W4)
+against synthetic stellar atmosphere models (BT-Settl / Kurucz) or a reddened
+Planck blackbody model to derive fundamental host star parameters:
+- Effective temperature (Teff)
+- Surface gravity (log g)
+- Metallicity ([Fe/H])
+- Angular diameter / scaled radius (R_star / d)
+- Visual interstellar extinction (A_V)
+
+Physical Model:
+    Observed flux density at Earth:
+        F_nu = pi * B_nu(Teff) * (R_star / d)^2 * 10^(-0.4 * A_lambda)
+    where A_lambda is computed via standard interstellar extinction laws
+    (Cardelli, Clayton & Mathis 1989, Fitzpatrick 1999) with R_V = 3.1.
+
+Contains zero target-specific identifiers or constants; all catalog magnitudes and
+parallaxes are loaded dynamically from the candidate workspace.
 """
 
 from __future__ import annotations
@@ -21,24 +34,25 @@ from scipy.special import logsumexp
 from .inputs import load_photometry, load_stellar_parameters
 from .workspace import CandidateWorkspace
 
-RSUN_M = 6.957e8
-PC_M = 3.085677581491367e16
-TEFF_SUN_K = 5772.0
-LOGG_SUN_CGS = 4.438
-MAG_SYSTEMATIC_FLOOR = 0.05
+# Physical constants (SI units)
+RSUN_M = 6.957e8                        # Solar radius in meters (IAU 2015 nominal value)
+PC_M = 3.085677581491367e16             # Parsec in meters
+TEFF_SUN_K = 5772.0                     # Solar effective temperature (Kelvin)
+LOGG_SUN_CGS = 4.438                    # Solar surface gravity log10(g [cm s^-2])
+MAG_SYSTEMATIC_FLOOR = 0.05             # Minimum systematic magnitude uncertainty floor
 
-# Generic 2MASS + AllWISE bandpass zero points (wavelength micron, zero flux Jy).
+# 2MASS (Cohen et al. 2003) & AllWISE (Wright et al. 2010) bandpass pivot wavelengths and Vega zero-point fluxes (Jy)
 BAND_ZERO_POINTS: Dict[str, Tuple[float, float]] = {
-    "J": (1.235, 1594.0),
-    "H": (1.662, 1024.0),
-    "Ks": (2.159, 666.7),
-    "W1": (3.3526, 309.540),
-    "W2": (4.6028, 171.787),
-    "W3": (11.5608, 31.674),
-    "W4": (22.0883, 8.363),
+    "J": (1.235, 1594.0),               # 2MASS J-band (pivot: 1.235 um, F_0: 1594.0 Jy)
+    "H": (1.662, 1024.0),               # 2MASS H-band (pivot: 1.662 um, F_0: 1024.0 Jy)
+    "Ks": (2.159, 666.7),               # 2MASS Ks-band (pivot: 2.159 um, F_0: 666.7 Jy)
+    "W1": (3.3526, 309.540),            # WISE W1-band (pivot: 3.35 um, F_0: 309.54 Jy)
+    "W2": (4.6028, 171.787),            # WISE W2-band (pivot: 4.60 um, F_0: 171.79 Jy)
+    "W3": (11.5608, 31.674),            # WISE W3-band (pivot: 11.56 um, F_0: 31.67 Jy)
+    "W4": (22.0883, 8.363),             # WISE W4-band (pivot: 22.09 um, F_0: 8.36 Jy)
 }
 
-# Generic interstellar extinction ratios A_lambda / A_V.
+# Standard Milky Way interstellar extinction ratios A_lambda / A_V (Fitzpatrick 1999, R_V = 3.1)
 EXTINCTION_RATIOS: Dict[str, float] = {
     "J": 0.282,
     "H": 0.190,

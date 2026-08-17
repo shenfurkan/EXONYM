@@ -1,10 +1,16 @@
 """Target-neutral MCMC transit light curve fitter.
 
-Fits phase-folded transit light curves with batman: free Kipping (2013) limb
-darkening, stellar-density locking (a/Rs derived from the sampled stellar
-density and orbital period), and optional eccentric orbit parameters
-(sqrt(e) cos(omega), sqrt(e) sin(omega)). Posteriors and chain diagnostics are
-written to the candidate outputs directory.
+Fits phase-folded transit light curves with batman (Mandel & Agol 2002):
+- Free Kipping (2013) limb darkening (q1, q2 uninformative triangular sampling).
+- Stellar-density locking: a/Rs derived directly from Kepler's third law
+  (Seager & Mallen-Ornelas 2003, Sozzetti et al. 2007) and orbital period.
+- Parameterized eccentric orbits via (sqrt(e)*cos(omega), sqrt(e)*sin(omega))
+  to avoid coordinate singularities at e=0 (Eastman et al. 2013).
+- Gaussian log-likelihood with per-cadence photometric jitter parameter.
+- Posterior sampling via Goodman & Weare (2010) affine-invariant ensemble sampler (emcee).
+
+Contains no target constants or hardcoded candidate parameters; all stellar priors,
+ephemerides, and photometric time-series are loaded dynamically from the candidate workspace.
 """
 
 from __future__ import annotations
@@ -25,27 +31,48 @@ from .inputs import (
 from .lightcurve import bin_phase_folded_flux, kipping_to_quadratic_limb_darkening
 from .workspace import CandidateWorkspace
 
-G_CGS = 6.67430e-8
-RHO_SUN_GCM3 = 1.408
-WINDOW_HALF_HOURS = 13.0
-BIN_MINUTES = 8.0
-SUPERSAMPLE_FACTOR = 7
-EXPTIME_SECONDS = 120.0
+# Physical constants in CGS units
+G_CGS = 6.67430e-8          # Gravitational constant (cm^3 g^-1 s^-2)
+RHO_SUN_GCM3 = 1.408        # Mean solar density (g cm^-3)
+WINDOW_HALF_HOURS = 13.0    # Folded light curve crop window half-width (hours)
+BIN_MINUTES = 8.0           # Default phase-binning resolution (minutes)
+SUPERSAMPLE_FACTOR = 7      # Numerical exposure integration sub-sampling factor
+EXPTIME_SECONDS = 120.0     # Nominal TESS 2-minute SPOC cadence (seconds)
 
+# Parameter vectors for circular and eccentric orbits
 PARAMETER_NAMES_CIRCULAR = (
-    "rp_rs",
-    "log_rho_star",
-    "impact_parameter",
-    "baseline",
-    "log_jitter",
-    "q1",
-    "q2",
+    "rp_rs",             # Planet-to-star radius ratio (R_p / R_star)
+    "log_rho_star",      # log10(rho_star / rho_sun), stellar density proxy
+    "impact_parameter",  # Transit impact parameter b = (a/R_star) * cos(i)
+    "baseline",          # Out-of-transit flux normalization baseline
+    "log_jitter",        # log(sigma_jitter), added in quadrature to flux uncertainties
+    "q1",                # Kipping (2013) limb-darkening parameter 1
+    "q2",                # Kipping (2013) limb-darkening parameter 2
 )
-PARAMETER_NAMES_ECCENTRIC = PARAMETER_NAMES_CIRCULAR + ("sqe_cosw", "sqe_sinw")
+PARAMETER_NAMES_ECCENTRIC = PARAMETER_NAMES_CIRCULAR + (
+    "sqe_cosw",          # sqrt(e) * cos(omega), Lagrangian eccentricity component
+    "sqe_sinw",          # sqrt(e) * sin(omega), Lagrangian eccentricity component
+)
 
 
 def stellar_density_a_rs(rho_solar: float, period_days: float) -> float:
-    """Scaled semimajor axis from Kepler's third law at a given density."""
+    """Calculate scaled semimajor axis (a/R_star) from mean stellar density and orbital period.
+
+    From Kepler's Third Law (Seager & Mallen-Ornelas 2003):
+        (a / R_star)^3 = (G * P^2 * rho_star) / (3 * pi)
+    
+    Parameters
+    ----------
+    rho_solar : float
+        Mean stellar density normalized to solar density (rho_star / rho_sun).
+    period_days : float
+        Orbital period in days.
+
+    Returns
+    -------
+    float
+        Scaled semimajor axis dimensionless ratio (a / R_star).
+    """
     if rho_solar <= 0 or period_days <= 0:
         raise ValueError("stellar density and period must be positive")
     rho_gcm3 = rho_solar * RHO_SUN_GCM3

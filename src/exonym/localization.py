@@ -1,10 +1,26 @@
-"""Target-neutral sub-pixel PRF transit source localization.
+"""Target-neutral sub-pixel PRF transit source localization engine.
 
-Fits the in-transit depth map of a TESS target pixel file as a non-negative
-linear combination of Gaussian PRF templates centered on the catalog target and
-nearby Gaia sources, and reports the precise RA/Dec offset of the transit flux
-deficit centroid. All target positions are read from file headers or workspace
-data, never hardcoded.
+Determines the spatial origin of the transit signal on TESS Target Pixel Files (TPF)
+to distinguish true planetary transits from off-target Background Eclipsing Binaries (BEB)
+and Nearby Eclipsing Binaries (NEB) (Bryson et al. 2013, Twicken et al. 2018).
+
+Key Methodological Steps:
+1. In-Transit vs Out-of-Transit Difference Imaging:
+   Computes the flux deficit map Delta_I(x, y) = <I_oot(x, y)> - <I_in(x, y)>.
+2. Non-Negative Least Squares (NNLS) PRF Decomposition:
+   Models Delta_I(x, y) as a linear superposition of Gaussian Pixel Response Function (PRF)
+   templates centered on the target and all Gaia DR3 sources within the field of view:
+       Delta_I(x, y) = sum_k A_k * PRF(x - x_k, y - y_k)   with A_k >= 0.
+3. Sub-pixel Centroid Offset & Significance:
+   Computes the astrometric offset (Delta_RA, Delta_Dec) and its 3-sigma localization
+   confidence ellipse relative to the nominal host star position.
+
+Instrument Constants:
+- TESS Pixel Scale: 21.0 arcseconds / pixel (Ricker et al. 2015).
+- TESS Nominal PRF FWHM: ~0.75 pixels.
+
+Contains zero target-specific constants; all celestial positions and TPF cubes are
+loaded dynamically from candidate-local workspace files.
 """
 
 from __future__ import annotations
@@ -22,10 +38,10 @@ from .inputs import load_tpf_cubes, load_transit_ephemeris
 from .lightcurve import phase_hours
 from .workspace import CandidateWorkspace
 
-PIXEL_SCALE_ARCSEC = 21.0
-PRF_FWHM_PIXELS = 0.75
-QUALITY_HARD_MASK = 24319
-MIN_DEPTH_CORE_PIXELS = 3
+PIXEL_SCALE_ARCSEC = 21.0       # TESS spatial plate scale (arcseconds per detector pixel)
+PRF_FWHM_PIXELS = 0.75          # Nominal isotropic Gaussian PRF Full-Width at Half-Maximum
+QUALITY_HARD_MASK = 24319       # TESS bitmask rejecting severe momentum dumps, desat, and cosmic rays
+MIN_DEPTH_CORE_PIXELS = 3       # Minimum core pixel threshold for reliable difference-image fitting
 
 
 def _finite_float(value: Any) -> Optional[float]:

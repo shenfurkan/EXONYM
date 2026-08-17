@@ -1,10 +1,22 @@
 """Target-neutral asteroseismology engine.
 
-Estimates the stellar oscillation envelope (nu_max, Delta-nu) from high-cadence
-light curves via whitened Lomb-Scargle power spectral densities, optionally
-cross-checks with pySYD when installed, and derives asteroseismic stellar mass
-and radius from the classic scaling relations. No target identifiers or
-ephemerides are hardcoded here.
+Estimates solar-like p-mode stellar oscillation envelope parameters:
+- Frequency of maximum oscillation power (nu_max)
+- Large frequency separation (Delta_nu)
+
+From high-cadence light curves via background-whitened Lomb-Scargle power spectral
+densities (PSD), and derives fundamental stellar properties (M_star, R_star, rho_star, log_g)
+using canonical asteroseismic scaling relations (Kjeldsen & Bedding 1995, Huber et al. 2011,
+Chaplin et al. 2014).
+
+Scaling Relations:
+    (R / R_sun) = (nu_max / nu_max_sun) * (Delta_nu / Delta_nu_sun)^-2 * (Teff / Teff_sun)^(1/2)
+    (M / M_sun) = (nu_max / nu_max_sun)^3 * (Delta_nu / Delta_nu_sun)^-4 * (Teff / Teff_sun)^(3/2)
+    (g / g_sun) = (nu_max / nu_max_sun) * (Teff / Teff_sun)^(1/2)
+    (rho / rho_sun) = (Delta_nu / Delta_nu_sun)^2
+
+Optionally cross-checks with pySYD when installed. Contains no target identifiers
+or hardcoded candidate constants.
 """
 
 from __future__ import annotations
@@ -25,15 +37,16 @@ from .inputs import (
 from .lightcurve import phase_hours
 from .workspace import CandidateWorkspace
 
-NUMAX_SUN_UHZ = 3090.0
-DNU_SUN_UHZ = 135.1
-TEFF_SUN_K = 5772.0
+# Canonical Solar Asteroseismic Reference Values (Huber et al. 2011, Chaplin et al. 2014)
+NUMAX_SUN_UHZ = 3090.0      # Solar frequency of maximum oscillation power (microHz)
+DNU_SUN_UHZ = 135.1         # Solar large frequency separation (microHz)
+TEFF_SUN_K = 5772.0         # Solar effective temperature (Kelvin)
 
-PSD_MIN_UHZ = 100.0
-PSD_MAX_UHZ = 2000.0
-DNU_MIN_UHZ = 30.0
-DNU_MAX_UHZ = 70.0
-MICROHZ_PER_CPD = 0.0864
+PSD_MIN_UHZ = 100.0         # Default minimum frequency for stellar PSD search (microHz)
+PSD_MAX_UHZ = 2000.0        # Default maximum frequency for stellar PSD search (microHz)
+DNU_MIN_UHZ = 30.0          # Minimum trial Delta-nu lag (microHz)
+DNU_MAX_UHZ = 70.0          # Maximum trial Delta-nu lag (microHz)
+MICROHZ_PER_CPD = 0.0864    # Unit conversion factor: cycles per day to microHz (1 c/d = 11.574 microHz)
 
 
 def _odd_bins(value: float) -> int:

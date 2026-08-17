@@ -1,9 +1,21 @@
 """Target-neutral stellar rotational activity engine.
 
-Computes Generalized Lomb-Scargle periodograms on out-of-transit light curve
-segments to derive the host star rotation period and starspot modulation
-amplitude. All period bounds are function parameters; no target values are
-hardcoded.
+Measures stellar rotation periods ($P_{\\mathrm{rot}}$) and active region (starspot)
+modulation amplitudes from out-of-transit photometric time-series.
+
+Key Scientific Steps:
+1. Planetary Transit Masking: Masks all primary transit windows ($\pm 0.75 \times T_{14}$)
+   to prevent transit box harmonics from creating spurious rotation signals.
+2. Generalized Lomb-Scargle (GLS) Periodogram (Zechmeister & Kürster 2009):
+   Fits a floating-mean sinusoid across trial periods $P \\in [1, 20]$ days.
+3. Analytic False Alarm Probability (FAP) via Baluev (2008) extreme-value statistics:
+   Evaluates peak significance against red-noise and white-noise false-alarm thresholds.
+4. Harmonic Modulation Semi-Amplitude:
+   Fits out-of-transit flux $y(t) = A_1 \\cos(2\\pi t / P) + A_2 \\sin(2\\pi t / P) + C$,
+   extracting total starspot amplitude $A = \\sqrt{A_1^2 + A_2^2}$ in ppm.
+
+Contains zero candidate-specific identifiers or constants; all searches operate
+strictly within candidate-provided photometric inputs.
 """
 
 from __future__ import annotations
@@ -20,10 +32,10 @@ from .inputs import load_light_curve_table, load_transit_ephemeris
 from .lightcurve import phase_hours
 from .workspace import CandidateWorkspace
 
-PERIOD_MIN_DAYS = 1.0
-PERIOD_MAX_DAYS = 20.0
-SAMPLES_PER_PEAK = 10
-TRANSIT_MASK_HALF_DURATIONS = 0.75
+PERIOD_MIN_DAYS = 1.0               # Minimum rotation period for GLS search grid (days)
+PERIOD_MAX_DAYS = 20.0              # Maximum rotation period for GLS search grid (days)
+SAMPLES_PER_PEAK = 10               # Frequency oversampling factor per Rayleigh peak
+TRANSIT_MASK_HALF_DURATIONS = 0.75  # Planetary transit exclusion window half-width
 
 
 def gls_periodogram(

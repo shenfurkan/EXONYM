@@ -1,7 +1,23 @@
-"""Target-neutral Box Least Squares (BLS) transit search engine.
+"""Target-neutral transit search engine supporting BLS and native TLS.
 
-Search routines evaluate transit candidate periodograms across light curves without
-hardcoding target designations or ephemerides.
+Implements blind and targeted periodic transit detection algorithms across photometric
+time-series without hardcoded candidate designations or ephemerides:
+
+1. Box Least Squares (BLS) Search (Kovács, Zucker & Mazeh 2002):
+   Models transits as periodic step functions (top-hat boxes) defined by:
+   - Trial period P in [P_min, P_max] days
+   - Fractional transit duration q = T_14 / P
+   - Transit epoch / center time T_0 (BTJD)
+   - Transit depth delta = <y_out> - <y_in>
+   - Signal-to-Noise Ratio (SNR) = (delta * sqrt(n_in * n_out / (n_in + n_out))) / sigma_out
+
+2. Grid Refinement & Alias Resolution:
+   - Coarse-to-fine two-pass frequency grid to prevent peak smearing over multi-sector baselines.
+   - Harmonic and sub-harmonic screening (P/2, 2*P) to resolve alias ambiguities and eclipsing binary harmonics.
+
+3. Optional Transit Least Squares (TLS) (Hippke & Heller 2019):
+   Integrates realistic physical limb-darkened transit shapes (Mandel & Agol 2002) with ingress/egress
+   morphology, yielding higher sensitivity for shallow small-planet transits.
 """
 
 from __future__ import annotations
@@ -21,11 +37,13 @@ from .workspace import CandidateWorkspace
 
 @dataclass
 class BLSSearchResult:
-    best_period: float
-    best_epoch: float
-    best_depth_ppm: float
-    best_duration_hours: float
-    snr: float
+    """Standardized result container for periodic transit searches."""
+
+    best_period: float          # Optimal orbital period (days)
+    best_epoch: float           # Optimal transit epoch (BTJD)
+    best_depth_ppm: float       # Optimal transit depth (parts per million)
+    best_duration_hours: float  # Optimal total transit duration T_14 (hours)
+    snr: float                  # Detection signal-to-noise ratio
 
     def to_dict(self) -> Dict[str, Any]:
         return {

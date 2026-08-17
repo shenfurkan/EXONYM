@@ -1,9 +1,24 @@
-"""Target-neutral transit timing variation (O-C) engine.
+"""Target-neutral transit timing variation (TTV / O-C) engine.
 
-Fits individual transit epoch central times against a fixed batman transit
-template, computes (O - C) timing residuals in minutes, renders a timing
-diagram, and evaluates resonant companion super-periods when a companion
-period is declared in the candidate config.
+Measures per-transit timing deviations (O - C) from a linear ephemeris to detect
+gravitational perturbations from non-transiting companions and resonant multi-planet systems
+(Agol et al. 2005, Holman & Murray 2005):
+
+1. Linear Ephemeris Reference:
+   T_calc(N) = T_0 + N * P_orb
+   where N is the integer transit epoch cycle.
+
+2. Observed-minus-Calculated (O - C) Residuals:
+   (O - C)_N = (T_obs(N) - T_calc(N)) * 1440.0   [minutes]
+   derived via template cross-correlation with a Mandel & Agol (2002) transit profile.
+
+3. First-Order Mean Motion Resonance (MMR) Super-Periods (Lithwick, Xie & Wu 2012):
+   When two planets orbit near a j:(j-1) resonance, gravitational interactions induce
+   sinusoidal TTVs with super-period:
+       P_super = 1 / | j / P_outer - (j - 1) / P_inner |   [days]
+
+Contains zero candidate-specific identifiers; all timing fits operate dynamically
+on the candidate's light curve table and declared ephemeris priors.
 """
 
 from __future__ import annotations
@@ -22,10 +37,10 @@ from .search import calculate_ttv_super_period
 from .transit_fit import stellar_density_a_rs
 from .workspace import CandidateWorkspace
 
-MIN_POINTS_PER_TRANSIT = 30
-WINDOW_DAYS = 0.35
-GRID_HALF_WINDOW_DAYS = 0.02
-GRID_STEP_DAYS = 0.001
+MIN_POINTS_PER_TRANSIT = 30     # Minimum photometric cadences required to fit a single transit epoch
+WINDOW_DAYS = 0.35              # Half-width of individual transit isolation window (days)
+GRID_HALF_WINDOW_DAYS = 0.02    # Local grid search range around calculated transit time (days)
+GRID_STEP_DAYS = 0.001          # Fine grid resolution for initial transit center search (days)
 
 
 def transit_template_parameters(

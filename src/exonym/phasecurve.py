@@ -1,9 +1,22 @@
 """Target-neutral phase curve and secondary eclipse engine.
 
-Decomposes out-of-transit light curves into reflection/emission, Doppler
-beaming, ellipsoidal, and harmonic control components via weighted linear
-regression with a block-clustered sandwich covariance, and reports the
-significance of a fixed-phase secondary eclipse box.
+Decomposes out-of-transit photometric time-series into physical orbital harmonic
+components based on the BEER (Beaming, Ellipsoidal, and Reflection/emission) model
+(Faigler & Mazeh 2011, Shporer 2017):
+1. Reflection / Thermal Day-Night Emission: A_refl * cos(phi)
+   Peaks at secondary eclipse (phi = 0.5) when the illuminated planetary day-side faces the observer.
+2. Doppler Beaming / Boosting: A_beam * sin(phi)
+   Relativistic modulation proportional to radial velocity K_RV / c (Loeb & Gaudi 2003).
+3. Tidal Ellipsoidal Variations: -A_ellip * cos(2*phi)
+   Tidal distortion of the host star by the companion, producing double-frequency modulation
+   with minima at quadrature (phi = 0.25, 0.75) and maxima at conjunctions.
+4. Second Harmonic Sine Control: A_sin2 * sin(2*phi)
+   Astrophysically forbidden symmetric component used as a systematic / stellar activity null control.
+5. Fixed-Phase Secondary Eclipse Box: Delta_sec at phi = 0.5.
+
+Uncertainties and covariances are estimated via a Generalized Estimating Equations (GEE)
+Huber-White cluster-sandwich covariance estimator (Liang & Zeger 1986) grouped into 0.5-day
+time blocks to remain robust against correlated red noise and stellar granulation.
 """
 
 from __future__ import annotations
@@ -20,8 +33,8 @@ from .inputs import load_light_curve_table, load_transit_ephemeris
 from .lightcurve import phase_hours
 from .workspace import CandidateWorkspace
 
-PRIMARY_MASK_HALF_DURATIONS = 0.65
-BLOCK_DAYS = 0.5
+PRIMARY_MASK_HALF_DURATIONS = 0.65  # Masking width around primary transit (fraction of duration)
+BLOCK_DAYS = 0.5                    # Time cluster block size for sandwich covariance (days)
 
 PHYSICAL_COMPONENTS = (
     "reflection_semiamplitude",
@@ -38,12 +51,15 @@ def cluster_sandwich_covariance(
     sigma: np.ndarray,
     cluster: np.ndarray,
 ) -> Tuple[np.ndarray, int]:
-    """Return a finite-sample-corrected cluster-sandwich covariance.
+    """Calculate finite-sample-corrected cluster-sandwich covariance (Huber-White / Liang-Zeger).
 
-    The bread matrix uses a pseudo-inverse so collinear design columns (e.g.
-    duplicate sector offsets when the same TESS sector appears in more than
-    one product) do not raise a singular-matrix error. With fewer than two
-    clusters the finite-sample correction degrades to the HC1 form.
+    Computes:
+        V = (X^T W X)^-1 [ sum_g (X_g^T W_g r_g r_g^T W_g X_g) ] (X^T W X)^-1
+    with finite-sample degree-of-freedom correction:
+        c = (G / (G - 1)) * ((N - 1) / (N - P))
+    
+    The 'bread' matrix uses a Moore-Penrose pseudo-inverse (np.linalg.pinv) to safely
+    handle collinear design columns (e.g. duplicate baseline offsets across overlapping sectors).
     """
     weighted_design = design / sigma[:, None]
     weighted_residual = residual / sigma

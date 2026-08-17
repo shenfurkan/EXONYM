@@ -1,9 +1,24 @@
 """Target-neutral aperture robustness and dilution engine.
 
-Evaluates transit depth stability across small, medium, and large photometric
-apertures built around the pipeline aperture, and calculates the Gaia DR3
-neighborhood flux contamination factor C_contam from the optional
-``data/external/gaia_neighbors.csv`` catalog.
+Evaluates transit depth stability and third-light flux contamination across spatial
+photometric extraction apertures on TESS Target Pixel Files (TPF):
+
+1. Multi-Size Box Aperture Sensitivity (3x3, 5x5, 7x7 pixels):
+   Tests whether transit depth delta(r) varies with aperture size:
+   - On-target planetary transits maintain stable depth across expanding apertures.
+   - Off-target background blends (BEB/NEB) exhibit increasing depth in larger apertures
+     as the contaminating star enters the extraction mask.
+
+2. Gaia DR3 Neighborhood Contamination & Dilution Correction:
+   Computes the flux contamination ratio:
+       C_contam = (sum_k F_neighbor,k) / F_target
+   and the corresponding photometric dilution factor:
+       r_dil = F_target / (F_target + sum_k F_neighbor,k) = 1 / (1 + C_contam)
+   allowing conversion from observed depth to true undiluted depth:
+       delta_true = delta_observed * (1 + C_contam) = delta_observed / r_dil.
+
+Contains zero target-specific constants; all calculations operate dynamically on
+candidate TPF data cubes and archival neighbor tables.
 """
 
 from __future__ import annotations
@@ -21,8 +36,8 @@ from .inputs import load_tpf_cubes, load_transit_ephemeris
 from .lightcurve import phase_hours, robust_transit_depth
 from .workspace import CandidateWorkspace
 
-QUALITY_HARD_MASK = 24319
-APERTURE_HALF_SIZES = (1, 2, 3)  # 3x3, 5x5, 7x7 pixel boxes
+QUALITY_HARD_MASK = 24319        # TESS quality bitmask rejecting severe cadences
+APERTURE_HALF_SIZES = (1, 2, 3)  # Half-widths for 3x3, 5x5, and 7x7 pixel bounding boxes
 
 
 def _box_apertures(
