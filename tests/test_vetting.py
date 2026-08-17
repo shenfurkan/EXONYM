@@ -160,7 +160,8 @@ def test_run_triceratops_falls_back_when_signal_config_missing(tmp_path):
 
     stub, _ = _vet_workspace_stub(tmp_path)
     # No TIC → Monte Carlo cannot run; allow_fallback=True required.
-    report_path = run_triceratops_simulation(stub, signal=".99", allow_fallback=True)
+    with pytest.warns(UserWarning, match="could not read signal transit config"):
+        report_path = run_triceratops_simulation(stub, signal=".99", allow_fallback=True)
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["ephemeris"]["source"] == "defaults"
     assert report["ephemeris"]["period_days"] == pytest.approx(2.5)

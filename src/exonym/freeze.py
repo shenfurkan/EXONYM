@@ -3,6 +3,11 @@
 ``exonym freeze`` builds a frozen reproducibility bundle under
 ``candidate/<id>/releases/<version>/`` containing pinned dependency locks,
 container image definitions, and a content-addressed manifest.
+
+The manifest records every engine-run.json generated during the candidate
+analysis, every transit configuration hash, and the repository pyproject.toml
+hash so that the full analysis chain is reproductively traceable from a single
+``manifest.json`` file.
 """
 
 from __future__ import annotations
@@ -100,8 +105,76 @@ def _validate_release_version(version: str) -> str:
     return normalized
 
 
+def _collect_engine_manifests(workspace: CandidateWorkspace) -> List[Dict]:
+    """Scan candidate runs/ and return a sorted list of engine-run manifest records.
+
+    Each record contains:
+    - ``engine``: the engine name from the manifest
+    - ``run_id``: the run identifier
+    - ``status``: succeeded / failed
+    - ``manifest_path``: relative posix path from workspace root
+    - ``sha256``: content hash of the manifest file
+
+    Records are ordered by ``started_at`` ascending so that the release manifest
+    reflects the full chronological analysis chain.
+    """
+    records: List[Dict] = []
+    runs_dir = workspace.path / "runs"
+    if not runs_dir.is_dir():
+        return records
+
+    for manifest_path in sorted(runs_dir.glob("*/*/engine-run.json")):
+        if not manifest_path.is_file():
+            continue
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        records.append({
+            "engine": data.get("engine", "unknown"),
+            "run_id": data.get("run_id", ""),
+            "status": data.get("status", "unknown"),
+            "started_at": data.get("started_at", ""),
+            "manifest_path": manifest_path.relative_to(workspace.path).as_posix(),
+            "sha256": _sha256(manifest_path),
+        })
+
+    # Sort by started_at timestamp so the chain is chronological
+    records.sort(key=lambda r: r.get("started_at", ""))
+    return records
+
+
+def _collect_config_hashes(workspace: CandidateWorkspace) -> Dict[str, str]:
+    """Hash every JSON file under candidate config/ and return a path→sha256 mapping.
+
+    Config files contain the transit ephemeris priors that were active during the
+    analysis. Including their hashes in the freeze manifest makes it possible to
+    detect any ephemeris drift between the original run and a replay attempt.
+    """
+    hashes: Dict[str, str] = {}
+    config_dir = workspace.path / "config"
+    if not config_dir.is_dir():
+        return hashes
+    for p in sorted(config_dir.rglob("*.json")):
+        if p.is_file():
+            rel = p.relative_to(workspace.path).as_posix()
+            hashes[rel] = _sha256(p)
+    return hashes
+
+
 def freeze(workspace: CandidateWorkspace, version: Optional[str] = None) -> Path:
-    """Build the reproducibility bundle and return its directory."""
+    """Build the reproducibility bundle and return its directory.
+
+    The release manifest includes:
+    - Pinned dependency lock file hashes
+    - Git commit at freeze time
+    - candidate.json hash
+    - Engine run manifest index (all runs/<engine>/<run-id>/engine-run.json)
+    - Transit config file hashes (config/**/*.json)
+    - pyproject.toml hash (repository-level package definition)
+    """
     version = _validate_release_version(version or _default_version())
     release_dir = workspace.path / "releases" / version
     if release_dir.exists():
@@ -141,6 +214,15 @@ def freeze(workspace: CandidateWorkspace, version: Optional[str] = None) -> Path
                     "sha256": _sha256(path),
                 }
             )
+
+    # Collect engine manifests and config hashes for full analysis chain traceability
+    engine_manifests = _collect_engine_manifests(workspace)
+    config_hashes = _collect_config_hashes(workspace)
+
+    # Hash the repository-level package definition for reproducibility context
+    pyproject_path = repository_root / "pyproject.toml"
+    pyproject_sha256 = _sha256(pyproject_path) if pyproject_path.is_file() else None
+
     manifest = {
         "schema": "exonym-freeze-1",
         "version": version,
@@ -148,9 +230,20 @@ def freeze(workspace: CandidateWorkspace, version: Optional[str] = None) -> Path
         "frozen_at": _now(),
         "git_commit": _git_commit(repository_root),
         "candidate_json_sha256": _sha256(metadata_path),
+        # Engine analysis chain: all recorded engine runs in chronological order.
+        # An empty list means no exonym engine run was recorded before freeze.
+        "engine_manifests": engine_manifests,
+        # Transit ephemeris configuration hashes active at freeze time.
+        # Allows detection of any config drift between the original run and a replay.
+        "config_hashes": config_hashes,
+        # Repository package definition hash for environment reproducibility.
+        "pyproject_toml_sha256": pyproject_sha256,
+        # Lock file hash (also copied as requirements.lock.txt into this release dir).
+        "requirements_lock_sha256": _sha256(lock_source),
         "files": files,
     }
     (release_dir / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     return release_dir
+

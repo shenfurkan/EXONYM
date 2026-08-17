@@ -86,7 +86,8 @@ def test_triceratops_signal_suffix(tmp_path):
     assert (workspace.path / "claims" / "fpp_claim.json").is_file()
 
     # 2. Suffixed run (.01)
-    report_signal = run_triceratops_simulation(workspace, n_draws=100, signal=".01", allow_fallback=True)
+    with pytest.warns(UserWarning, match="could not read signal transit config"):
+        report_signal = run_triceratops_simulation(workspace, n_draws=100, signal=".01", allow_fallback=True)
     assert report_signal.name == "triceratops_report.01.json"
     assert report_signal.is_file()
     assert (workspace.path / "claims" / "fpp_claim.01.json").is_file()

@@ -50,3 +50,6 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-ra"
+filterwarnings = [
+    "ignore:.*the tpfmodel submodule is not available.*:UserWarning",
+]

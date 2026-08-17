@@ -448,3 +448,78 @@ def test_overall_progress_across_documents(tmp_path):
     checked, total, fraction = overall_progress(telemetry.values())
     assert checked == 0 and total == 5
     assert fraction == 0.0
+
+
+def test_freeze_manifest_includes_engine_manifests_when_runs_exist(tmp_path):
+    """engine_manifests in manifest.json lists every recorded engine-run.json."""
+    candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha")
+    lock = tmp_path / "requirements-lock.txt"
+    lock.write_text("numpy==1.26.4\n", encoding="utf-8")
+
+    # Synthesise a minimal valid engine-run.json below runs/
+    run_dir = candidate.path / "runs" / "bls" / "20260101t000000z-bls"
+    run_dir.mkdir(parents=True)
+    engine_run = {
+        "schema_version": 1,
+        "candidate_id": "candidate-alpha",
+        "engine": "bls",
+        "run_id": "20260101t000000z-bls",
+        "status": "succeeded",
+        "started_at": "2026-01-01T00:00:00+00:00",
+        "completed_at": "2026-01-01T00:01:00+00:00",
+        "runtime": {"kind": "direct", "version": "1.0.0", "executable": "astropy.timeseries"},
+        "inputs": [{"path": "candidate.json", "sha256": "a" * 64}],
+        "outputs": [],
+    }
+    (run_dir / "engine-run.json").write_text(json.dumps(engine_run), encoding="utf-8")
+
+    release_dir = freeze(candidate, version="v1.0.0")
+    manifest = json.loads((release_dir / "manifest.json").read_text(encoding="utf-8"))
+
+    assert "engine_manifests" in manifest
+    assert len(manifest["engine_manifests"]) == 1
+    em = manifest["engine_manifests"][0]
+    assert em["engine"] == "bls"
+    assert em["run_id"] == "20260101t000000z-bls"
+    assert em["status"] == "succeeded"
+    assert len(em["sha256"]) == 64
+    assert em["manifest_path"].startswith("runs/bls/")
+
+
+def test_freeze_manifest_includes_config_hashes_when_config_exists(tmp_path):
+    """config_hashes in manifest.json maps every config/*.json to its sha256."""
+    candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha")
+    lock = tmp_path / "requirements-lock.txt"
+    lock.write_text("numpy==1.26.4\n", encoding="utf-8")
+
+    # Write a synthetic transit config
+    config_dir = candidate.path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    transit_cfg = {
+        "signal": None,
+        "transit": {"period_days": 5.0, "t0_btjd": 2000.0, "depth_ppm": 500.0, "duration_hours": 2.0},
+    }
+    (config_dir / "transit_config.json").write_text(json.dumps(transit_cfg), encoding="utf-8")
+
+    release_dir = freeze(candidate, version="v1.0.0")
+    manifest = json.loads((release_dir / "manifest.json").read_text(encoding="utf-8"))
+
+    assert "config_hashes" in manifest
+    assert "config/transit_config.json" in manifest["config_hashes"]
+    sha = manifest["config_hashes"]["config/transit_config.json"]
+    assert len(sha) == 64  # valid SHA-256 hex string
+
+
+def test_freeze_manifest_bare_workspace_has_empty_engine_manifests_and_config_hashes(tmp_path):
+    """A workspace with no runs or config still produces a valid manifest."""
+    candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha")
+    (tmp_path / "requirements-lock.txt").write_text("numpy==1.26.4\n", encoding="utf-8")
+
+    release_dir = freeze(candidate, version="v1.0.0")
+    manifest = json.loads((release_dir / "manifest.json").read_text(encoding="utf-8"))
+
+    assert manifest["engine_manifests"] == []
+    assert manifest["config_hashes"] == {}
+    assert "requirements_lock_sha256" in manifest
+    assert len(manifest["requirements_lock_sha256"]) == 64
+
