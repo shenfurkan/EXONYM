@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -104,6 +105,7 @@ def test_automated_triage_pass_verdict(tmp_path: Path):
     _setup_synthetic_workspace(tmp_path, "synth-triage-pass")
     cand = load_candidate(tmp_path, "synth-triage-pass")
 
+    run_engine(cand, "screen")
     triage_path = run_automated_triage(cand)
     assert triage_path.is_file()
 
@@ -121,6 +123,7 @@ def test_automated_triage_pass_verdict(tmp_path: Path):
 def test_automated_triage_review_required_on_odd_even_anomaly(tmp_path: Path):
     cand_path = _setup_synthetic_workspace(tmp_path, "synth-triage-anomaly")
     cand = load_candidate(tmp_path, "synth-triage-anomaly")
+    manifest_path = run_engine(cand, "screen")
 
     # Manually plant an odd-even failure in screening outputs
     outputs_dir = cand_path / "outputs"
@@ -134,9 +137,13 @@ def test_automated_triage_review_required_on_odd_even_anomaly(tmp_path: Path):
             }
         }
     }
-    (outputs_dir / "fixed_ephemeris_screening.json").write_text(
+    screen_path = cand_path / "outputs" / "fixed_ephemeris_screen.json"
+    screen_path.write_text(
         json.dumps(screen_artifact, indent=2), encoding="utf-8"
     )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["outputs"][0]["sha256"] = hashlib.sha256(screen_path.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
     triage_path = run_automated_triage(cand)
     triage_data = json.loads(triage_path.read_text(encoding="utf-8"))
@@ -168,3 +175,27 @@ def test_cli_engine_run_and_triage(tmp_path: Path, capsys: pytest.CaptureFixture
     assert rc_tri == 0
     captured_tri = capsys.readouterr().out
     assert "automated_triage.json" in captured_tri
+
+
+def test_engine_run_failure_is_recorded_and_returns_nonzero(tmp_path: Path, capsys: pytest.CaptureFixture):
+    create_candidate(tmp_path, "synth-engine-failure", tic="123456789", mission="tess")
+
+    rc = main(["--root", str(tmp_path), "engine", "run", "screen", "synth-engine-failure"])
+
+    assert rc == 1
+    output = capsys.readouterr().out.strip()
+    manifest_path = tmp_path / output
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["status"] == "failed"
+    assert manifest["failure"]["code"]
+
+
+def test_automated_triage_blocks_without_manifest_backed_evidence(tmp_path: Path):
+    _setup_synthetic_workspace(tmp_path, "synth-triage-blocked")
+    cand = load_candidate(tmp_path, "synth-triage-blocked")
+
+    triage_path = run_automated_triage(cand)
+
+    triage_data = json.loads(triage_path.read_text(encoding="utf-8"))
+    assert triage_data["status"] == "blocked"
+    assert triage_data["records"][0]["status"] == "blocked"

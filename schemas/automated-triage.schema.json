@@ -32,13 +32,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "engine",
-          "run_manifest_path",
-          "run_manifest_sha256",
-          "status",
-          "reason"
-        ],
+        "required": ["engine", "status", "reason"],
         "properties": {
           "engine": {
             "type": "string",
@@ -52,9 +46,30 @@
             "type": "string",
             "pattern": "^[a-f0-9]{64}$"
           },
+          "artifact_path": {
+            "type": "string",
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"
+          },
+          "artifact_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
           "status": { "enum": ["pass", "review-required", "blocked"] },
           "reason": { "type": "string", "minLength": 1 }
-        }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "status": { "enum": ["pass", "review-required"] } } },
+            "then": {
+              "required": [
+                "run_manifest_path",
+                "run_manifest_sha256",
+                "artifact_path",
+                "artifact_sha256"
+              ]
+            }
+          }
+        ]
       }
     }
   }

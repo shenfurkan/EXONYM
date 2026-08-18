@@ -1,3 +1,4 @@
+import hashlib
 import json
 import shutil
 
@@ -133,6 +134,10 @@ def _valid_engine_run():
     }
 
 
+def _sha256(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _write_engine_run(repo, payload):
     path = (
         repo
@@ -144,6 +149,14 @@ def _write_engine_run(repo, payload):
         / "engine-run.json"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
+    input_path = repo / "candidate" / "candidate-alpha" / "data" / "raw" / "input.fits"
+    output_path = repo / "candidate" / "candidate-alpha" / "outputs" / "test-result.json"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_bytes(b"synthetic input")
+    output_path.write_text('{"synthetic": true}\n', encoding="utf-8")
+    payload["inputs"][0]["sha256"] = _sha256(input_path)
+    payload["outputs"][0]["sha256"] = _sha256(output_path)
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
 
@@ -341,6 +354,18 @@ def test_engine_run_requires_matching_directory_identity(tmp_path):
     assert any(violation.path == path.as_posix() for violation in report.violations)
 
 
+def test_engine_run_requires_matching_artifact_hashes(tmp_path):
+    repo = _make_repo(tmp_path)
+    artifact = _valid_engine_run()
+    path = _write_engine_run(repo, artifact)
+    artifact["outputs"][0]["sha256"] = "0" * 64
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+
+    report = _audit(repo)
+
+    assert any(violation.rule == "artifact-hash-mismatch" for violation in report.violations)
+
+
 def test_engine_run_outside_candidate_is_rejected(tmp_path):
     # Arrange
     repo = _make_repo(tmp_path)
@@ -360,9 +385,16 @@ def test_engine_run_outside_candidate_is_rejected(tmp_path):
 def test_valid_automated_triage_passes_schema_validation(tmp_path):
     # Arrange
     repo = _make_repo(tmp_path)
+    manifest_path = _write_engine_run(repo, _valid_engine_run())
+    triage = _valid_automated_triage()
+    triage["records"][0]["run_manifest_sha256"] = _sha256(manifest_path)
+    triage["records"][0]["artifact_path"] = "outputs/test-result.json"
+    triage["records"][0]["artifact_sha256"] = _sha256(
+        repo / "candidate" / "candidate-alpha" / "outputs" / "test-result.json"
+    )
     path = repo / "candidate" / "candidate-alpha" / "decisions" / "automated_triage.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_valid_automated_triage()), encoding="utf-8")
+    path.write_text(json.dumps(triage), encoding="utf-8")
 
     # Act and assert
     assert _audit(repo).ok
@@ -371,8 +403,14 @@ def test_valid_automated_triage_passes_schema_validation(tmp_path):
 def test_automated_triage_requires_matching_candidate_identity(tmp_path):
     # Arrange
     repo = _make_repo(tmp_path)
+    manifest_path = _write_engine_run(repo, _valid_engine_run())
     artifact = _valid_automated_triage()
     artifact["candidate_id"] = "another-candidate"
+    artifact["records"][0]["run_manifest_sha256"] = _sha256(manifest_path)
+    artifact["records"][0]["artifact_path"] = "outputs/test-result.json"
+    artifact["records"][0]["artifact_sha256"] = _sha256(
+        repo / "candidate" / "candidate-alpha" / "outputs" / "test-result.json"
+    )
     path = repo / "candidate" / "candidate-alpha" / "decisions" / "automated_triage.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(artifact), encoding="utf-8")
@@ -384,6 +422,22 @@ def test_automated_triage_requires_matching_candidate_identity(tmp_path):
     assert any(violation.path == path.as_posix() for violation in report.violations)
 
 
+def test_automated_triage_requires_matching_manifest_hash(tmp_path):
+    repo = _make_repo(tmp_path)
+    _write_engine_run(repo, _valid_engine_run())
+    triage = _valid_automated_triage()
+    triage["records"][0]["run_manifest_sha256"] = "0" * 64
+    triage["records"][0]["artifact_path"] = "outputs/test-result.json"
+    triage["records"][0]["artifact_sha256"] = _sha256(
+        repo / "candidate" / "candidate-alpha" / "outputs" / "test-result.json"
+    )
+    path = repo / "candidate" / "candidate-alpha" / "decisions" / "automated_triage.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(triage), encoding="utf-8")
+
+    report = _audit(repo)
+
+    assert any(violation.rule == "triage-provenance-invalid" for violation in report.violations)
 def test_legacy_subtree_sidecars_are_skipped(tmp_path):
     repo = _make_repo(tmp_path)
     legacy = repo / "candidate" / "candidate-alpha" / "legacy-project" / "data"

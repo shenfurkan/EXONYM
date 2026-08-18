@@ -11,11 +11,12 @@ it predates the schema system and is preserved as-is.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from functools import partial
 from pathlib import Path
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 
 from .isolation import IsolationReport
 from .resources import ResourceUnavailableError, read_schema_text
@@ -58,6 +59,102 @@ def _parse_json(content: str) -> object:
 def _read_json(path: Path) -> object:
     """Read one UTF-8 JSON file with strict finite-number parsing."""
     return _parse_json(path.read_text(encoding="utf-8"))
+
+
+def _file_sha256(path: Path) -> str:
+    """Return the SHA-256 digest for one regular candidate-local file."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(65536)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _candidate_artifact_path(workspace_dir: Path, relative_path: object) -> Optional[Path]:
+    """Resolve a manifest path only when it remains inside its owning workspace."""
+    if not isinstance(relative_path, str):
+        return None
+    workspace_root = workspace_dir.resolve()
+    artifact_path = (workspace_root / relative_path).resolve()
+    try:
+        artifact_path.relative_to(workspace_root)
+    except ValueError:
+        return None
+    return artifact_path
+
+
+def _validate_artifacts(
+    report: IsolationReport,
+    record_path: Path,
+    workspace_dir: Path,
+    artifacts: object,
+    label: str,
+) -> None:
+    """Ensure every manifest artifact exists in the workspace with its recorded hash."""
+    if not isinstance(artifacts, list):
+        return
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        artifact_path = _candidate_artifact_path(workspace_dir, artifact.get("path"))
+        if artifact_path is None or not artifact_path.is_file():
+            report.add(record_path, "artifact-reference-invalid", "{0} artifact does not exist in the candidate workspace".format(label))
+            continue
+        if artifact.get("sha256") != _file_sha256(artifact_path):
+            report.add(record_path, "artifact-hash-mismatch", "{0} artifact SHA-256 does not match its manifest".format(label))
+
+
+def _validate_triage_records(
+    report: IsolationReport,
+    triage_path: Path,
+    workspace_dir: Path,
+    instance: object,
+    engine_run_schema: object,
+    validate_func: Callable[[object, object], None],
+) -> None:
+    """Verify that non-blocked triage records reference exact successful run outputs."""
+    if not isinstance(instance, dict) or not isinstance(instance.get("records"), list):
+        return
+    for record in instance["records"]:
+        if not isinstance(record, dict) or record.get("status") == "blocked":
+            continue
+        manifest_path = _candidate_artifact_path(workspace_dir, record.get("run_manifest_path"))
+        artifact_path = _candidate_artifact_path(workspace_dir, record.get("artifact_path"))
+        if manifest_path is None or not manifest_path.is_file() or artifact_path is None or not artifact_path.is_file():
+            report.add(triage_path, "triage-provenance-invalid", "triage record references a missing candidate-local artifact")
+            continue
+        if record.get("run_manifest_sha256") != _file_sha256(manifest_path):
+            report.add(triage_path, "triage-provenance-invalid", "triage run manifest SHA-256 does not match")
+            continue
+        if record.get("artifact_sha256") != _file_sha256(artifact_path):
+            report.add(triage_path, "triage-provenance-invalid", "triage evidence artifact SHA-256 does not match")
+            continue
+        try:
+            manifest = _read_json(manifest_path)
+        except (OSError, UnicodeError, ValueError) as exc:
+            report.add(triage_path, "triage-provenance-invalid", "triage run manifest is unreadable: {0}".format(exc))
+            continue
+        _validate(report, manifest_path, manifest, engine_run_schema, validate_func)
+        if not isinstance(manifest, dict):
+            continue
+        artifact_relative = artifact_path.relative_to(workspace_dir.resolve()).as_posix()
+        outputs = manifest.get("outputs")
+        if (
+            manifest.get("candidate_id") != workspace_dir.name
+            or manifest.get("engine") != record.get("engine")
+            or manifest.get("status") != "succeeded"
+            or not isinstance(outputs, list)
+            or not any(
+                isinstance(output, dict)
+                and output.get("path") == artifact_relative
+                and output.get("sha256") == record.get("artifact_sha256")
+                for output in outputs
+            )
+        ):
+            report.add(triage_path, "triage-provenance-invalid", "triage evidence is not a successful output of the referenced engine run")
 
 
 def _load_schemas(root: Path, report: IsolationReport) -> Dict[str, object]:
@@ -189,6 +286,15 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
                             "schema-violation",
                             "automated triage candidate_id does not match its workspace",
                         )
+                    if engine_run_schema is not None:
+                        _validate_triage_records(
+                            report,
+                            triage_path,
+                            workspace_dir,
+                            instance,
+                            engine_run_schema,
+                            validate_func,
+                        )
 
         if engine_run_schema is not None:
             for run_path in sorted(workspace_dir.glob("runs/*/*/engine-run.json")):
@@ -219,6 +325,8 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
                         "schema-violation",
                         "engine run run_id does not match its directory",
                     )
+                _validate_artifacts(report, run_path, workspace_dir, instance.get("inputs"), "input")
+                _validate_artifacts(report, run_path, workspace_dir, instance.get("outputs"), "output")
 
         if survey_robustness_schema is not None:
             outputs_dir = workspace_dir / "outputs"
@@ -347,9 +455,9 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
         except ValueError:
             relative = Path()
         is_candidate_local = (
-            len(relative.parts) == 3
-            and relative.parts[0] != "_surveys"
-            and relative.parts[1] == "outputs"
+            len(relative.parts) >= 3
+            and relative.parts[-2] == "outputs"
+            and not any(p.startswith("_") for p in relative.parts[:-2])
         )
         if not is_candidate_local:
             report.add(
@@ -366,10 +474,10 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
         except ValueError:
             relative = Path()
         is_candidate_local = (
-            len(relative.parts) == 5
-            and relative.parts[0] != "_surveys"
-            and relative.parts[1] == "runs"
-            and relative.parts[4] == "engine-run.json"
+            len(relative.parts) >= 5
+            and relative.parts[-4] == "runs"
+            and relative.parts[-1] == "engine-run.json"
+            and not any(p.startswith("_") for p in relative.parts[:-4])
         )
         if not is_candidate_local:
             report.add(
@@ -386,10 +494,10 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
         except ValueError:
             relative = Path()
         is_candidate_local = (
-            len(relative.parts) == 3
-            and relative.parts[0] != "_surveys"
-            and relative.parts[1] == "decisions"
-            and relative.parts[2] == "automated_triage.json"
+            len(relative.parts) >= 3
+            and relative.parts[-2] == "decisions"
+            and relative.parts[-1] == "automated_triage.json"
+            and not any(p.startswith("_") for p in relative.parts[:-2])
         )
         if not is_candidate_local:
             report.add(

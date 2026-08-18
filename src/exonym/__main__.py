@@ -447,7 +447,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 cand = load_candidate(repository_root, args.candidate_id)
                 manifest = run_engine(cand, args.engine_name, signal=getattr(args, "signal", None))
                 print(manifest.relative_to(repository_root).as_posix())
-                return 0
+                data = json.loads(manifest.read_text(encoding="utf-8"))
+                return 0 if data.get("status") == "succeeded" else 1
 
             if args.engine_action == "report":
                 from .engines import report_candidate_engines

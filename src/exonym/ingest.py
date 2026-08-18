@@ -1,8 +1,8 @@
 """Candidate data ingestion: network fetch plus offline provenance recording.
 
-The network fetcher (``fetch_tess_products``) downloads SPOC products from
-MAST via lightkurve. ``ingest_products`` is a pure function that copies the
-downloaded products into ``candidate/<id>/data/raw/`` and writes
+The network fetchers retrieve selected SPOC or TESSCut light curves from MAST
+via lightkurve. ``ingest_products`` is a pure function that copies downloaded
+products into ``candidate/<id>/data/raw/`` and writes
 ``.provenance.json`` sidecars, satisfying the acquisition gate.
 """
 
@@ -17,6 +17,30 @@ from .catalog import write_provenance_sidecar
 from .workspace import CandidateWorkspace
 
 Product = Tuple[Path, str]  # (local product path, source URI)
+_PROVIDERS = ("spoc", "tesscut")
+
+
+def _validate_provider(provider: str) -> str:
+    if provider not in _PROVIDERS:
+        raise ValueError(
+            "unsupported TESS data provider {0!r}; choose 'spoc' or 'tesscut'".format(provider)
+        )
+    return provider
+
+
+def _sector_value(row: object) -> Optional[int]:
+    try:
+        return int(row["sequence_number"]) or None  # type: ignore[index]
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _mast_product_uri(row: object) -> str:
+    columns = getattr(row, "colnames", ())
+    obs_id = str(row["obs_id"]) if "obs_id" in columns else str(row["productFilename"])
+    return "https://mast.stsci.edu/api/v0.1/Download/file?uri=mast:TESS/product/{0}".format(
+        obs_id
+    )
 
 
 def ingest_products(
@@ -46,12 +70,16 @@ def fetch_tess_products(
     workspace: CandidateWorkspace,
     sectors: Optional[Sequence[int]] = None,
     exptime: int = 120,
+    provider: str = "spoc",
 ) -> List[Product]:
-    """Download SPOC light curves from MAST (network access required).
+    """Download light curves from the selected MAST provider.
 
     Returns ``(local_path, source_uri)`` pairs staged in a temporary
-    directory. The caller passes them to ``ingest_products``.
+    directory. ``provider`` must be ``"spoc"`` or ``"tesscut"``; exposure
+    time selection applies only to SPOC. The caller passes products to
+    ``ingest_products``.
     """
+    provider = _validate_provider(provider)
     try:
         import lightkurve as lk
     except ImportError as exc:  # pragma: no cover - optional dependency
@@ -62,30 +90,43 @@ def fetch_tess_products(
         raise ValueError("a TIC identifier is required for TESS ingestion")
     target = "TIC {0}".format(tic)
 
+    products: List[Product] = []
+    if provider == "tesscut":
+        staging = Path(tempfile.mkdtemp(prefix="exonym-ingest-"))
+        requested_sectors = tuple(dict.fromkeys(sectors)) if sectors is not None else (None,)
+        for requested_sector in requested_sectors:
+            search = lk.search_tesscut(target, sector=requested_sector)
+            if not search:
+                continue
+            for index in range(len(search)):
+                row = search.table[index]
+                sector_value = _sector_value(row)
+                if sectors is not None and sector_value is not None and sector_value not in sectors:
+                    continue
+
+                tpf = search[index].download()
+                light_curve = tpf.to_lightcurve()
+                filename_sector = sector_value if sector_value is not None else requested_sector
+                fits_path = staging / "s{0:04d}_lc.fits".format(filename_sector or index)
+                light_curve.to_fits(path=fits_path, overwrite=True)
+                products.append((fits_path, _mast_product_uri(row)))
+        return products
+
     search = lk.search_lightcurve(target, author="SPOC", exptime=exptime)
     if not search:
         return []
 
-    products: List[Product] = []
     staging = Path(tempfile.mkdtemp(prefix="exonym-ingest-"))
     for index in range(len(search)):
         row = search.table[index]
-        sector_value = None
-        try:
-            sector_value = int(row["sequence_number"]) or None
-        except (KeyError, TypeError, ValueError):
-            sector_value = None
-        if sectors is not None and sector_value is not None and sector_value not in set(sectors):
+        sector_value = _sector_value(row)
+        if sectors is not None and sector_value is not None and sector_value not in sectors:
             continue
 
         light_curve = search[index].download()
         fits_path = staging / "s{0:04d}_lc.fits".format(sector_value or index)
         light_curve.to_fits(path=fits_path, overwrite=True)
-        obs_id = str(row["obs_id"]) if "obs_id" in row.colnames else str(row["productFilename"])
-        source_uri = "https://mast.stsci.edu/api/v0.1/Download/file?uri=mast:TESS/product/{0}".format(
-            obs_id
-        )
-        products.append((fits_path, source_uri))
+        products.append((fits_path, _mast_product_uri(row)))
     return products
 
 
@@ -93,6 +134,7 @@ def fetch_tess_tpfs(
     workspace: CandidateWorkspace,
     sectors: Optional[Sequence[int]] = None,
     exptime: int = 120,
+    provider: str = "spoc",
 ) -> List[Product]:
     """Download SPOC target pixel files from MAST (network access required).
 
@@ -101,6 +143,9 @@ def fetch_tess_tpfs(
     exactly like light curves — the ``tp`` stem marker is also what
     ``inputs.load_tpf_cubes`` uses to distinguish TPFs from light curves.
     """
+    provider = _validate_provider(provider)
+    if provider == "tesscut":
+        raise ValueError("TESSCut supports light-curve ingestion only; request TPFs from 'spoc'")
     try:
         import lightkurve as lk
     except ImportError as exc:  # pragma: no cover - optional dependency
@@ -119,20 +164,12 @@ def fetch_tess_tpfs(
     staging = Path(tempfile.mkdtemp(prefix="exonym-ingest-"))
     for index in range(len(search)):
         row = search.table[index]
-        sector_value = None
-        try:
-            sector_value = int(row["sequence_number"]) or None
-        except (KeyError, TypeError, ValueError):
-            sector_value = None
-        if sectors is not None and sector_value is not None and sector_value not in set(sectors):
+        sector_value = _sector_value(row)
+        if sectors is not None and sector_value is not None and sector_value not in sectors:
             continue
 
         tpf = search[index].download()
         fits_path = staging / "s{0:04d}_tp.fits".format(sector_value or index)
         tpf.to_fits(str(fits_path), overwrite=True)
-        obs_id = str(row["obs_id"]) if "obs_id" in row.colnames else str(row["productFilename"])
-        source_uri = "https://mast.stsci.edu/api/v0.1/Download/file?uri=mast:TESS/product/{0}".format(
-            obs_id
-        )
-        products.append((fits_path, source_uri))
+        products.append((fits_path, _mast_product_uri(row)))
     return products

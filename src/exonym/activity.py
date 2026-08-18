@@ -1,18 +1,18 @@
-"""Target-neutral stellar rotational activity engine.
+r"""Target-neutral stellar rotational activity engine.
 
-Measures stellar rotation periods ($P_{\\mathrm{rot}}$) and active region (starspot)
+Measures stellar rotation periods ($P_{\mathrm{rot}}$) and active region (starspot)
 modulation amplitudes from out-of-transit photometric time-series.
 
 Key Scientific Steps:
 1. Planetary Transit Masking: Masks all primary transit windows ($\pm 0.75 \times T_{14}$)
    to prevent transit box harmonics from creating spurious rotation signals.
 2. Generalized Lomb-Scargle (GLS) Periodogram (Zechmeister & Kürster 2009):
-   Fits a floating-mean sinusoid across trial periods $P \\in [1, 20]$ days.
+   Fits a floating-mean sinusoid across trial periods $P \in [1, 20]$ days.
 3. Analytic False Alarm Probability (FAP) via Baluev (2008) extreme-value statistics:
    Evaluates peak significance against red-noise and white-noise false-alarm thresholds.
 4. Harmonic Modulation Semi-Amplitude:
-   Fits out-of-transit flux $y(t) = A_1 \\cos(2\\pi t / P) + A_2 \\sin(2\\pi t / P) + C$,
-   extracting total starspot amplitude $A = \\sqrt{A_1^2 + A_2^2}$ in ppm.
+   Fits out-of-transit flux $y(t) = A_1 \cos(2\pi t / P) + A_2 \sin(2\pi t / P) + C$,
+   extracting total starspot amplitude $A = \sqrt{A_1^2 + A_2^2}$ in ppm.
 
 Contains zero candidate-specific identifiers or constants; all searches operate
 strictly within candidate-provided photometric inputs.

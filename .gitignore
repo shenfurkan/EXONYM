@@ -94,3 +94,5 @@ desktop.ini
 .opencode/
 SECURITY.md
 plan.md
+templates/notebooks/evidence_review.ipynb
+.gitignore

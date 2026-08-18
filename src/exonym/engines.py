@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-from .workspace import CandidateWorkspace
+from .workspace import CandidateWorkspace, load_candidate
 
 
 @dataclass(frozen=True)
@@ -271,6 +271,28 @@ def _file_sha256(path: Path) -> str:
     return hasher.hexdigest()
 
 
+_RUNNABLE_ENGINES = {
+    "bls",
+    "screen",
+    "batman",
+    "localization",
+    "activity",
+    "sed",
+    "dilution",
+    "ttv",
+    "phasecurve",
+    "asteroseismology",
+}
+
+
+def _trusted_workspace(workspace: CandidateWorkspace) -> CandidateWorkspace:
+    """Reload a workspace before an engine runner writes candidate-local artifacts."""
+    trusted = load_candidate(workspace.repository_root, workspace.candidate_id)
+    if workspace.path.resolve() != trusted.path.resolve():
+        raise ValueError("engine runs require the registered candidate workspace path")
+    return trusted
+
+
 def _collect_input_artifacts(workspace: CandidateWorkspace) -> List[Dict[str, str]]:
     """Gather candidate-local input files and their SHA-256 hashes."""
     inputs: List[Dict[str, str]] = []
@@ -308,23 +330,6 @@ def _collect_input_artifacts(workspace: CandidateWorkspace) -> List[Dict[str, st
                     "role": "photometric_input",
                 })
 
-    if not inputs and cand_json.is_file():
-        inputs.append({
-            "path": "candidate.json",
-            "sha256": _file_sha256(cand_json),
-            "role": "candidate_identity",
-        })
-    elif not inputs:
-        # Create minimal valid input entry if candidate is empty
-        dummy_path = workspace.path / "candidate.json"
-        if not dummy_path.exists():
-            dummy_path.write_text("{}", encoding="utf-8")
-        inputs.append({
-            "path": "candidate.json",
-            "sha256": _file_sha256(dummy_path),
-            "role": "candidate_identity",
-        })
-
     return inputs
 
 
@@ -339,6 +344,7 @@ def run_engine(
     Complies with schemas/engine-run.schema.json.
     Writes: candidate/<id>/runs/<engine>/<run_id>/engine-run.json
     """
+    workspace = _trusted_workspace(workspace)
     engine_status = get_engine(engine_name)
     if engine_status is None:
         raise ValueError(f"Unknown engine '{engine_name}'.")
@@ -346,12 +352,18 @@ def run_engine(
     if not engine_status.installed:
         raise RuntimeError(f"Engine '{engine_name}' ({engine_status.module_name}) is not installed.")
 
+    engine_name = engine_status.name
+    if engine_name not in _RUNNABLE_ENGINES:
+        if engine_name == "triceratops":
+            raise ValueError("TRICERATOPS must run through 'exonym vet' after the pre-vetting workflow.")
+        raise ValueError(f"Engine '{engine_name}' has no candidate-local runner.")
+
     started_at = datetime.now(timezone.utc).isoformat()
-    timestamp_slug = datetime.now(timezone.utc).strftime("%Y%m%dt%H%M%Sz").lower()
+    timestamp_slug = datetime.now(timezone.utc).strftime("%Y%m%dt%H%M%S%f").lower()
     run_id = f"{timestamp_slug}-{engine_name}"
 
     runs_dir = workspace.path / "runs" / engine_name / run_id
-    runs_dir.mkdir(parents=True, exist_ok=True)
+    runs_dir.mkdir(parents=True)
 
     input_artifacts = _collect_input_artifacts(workspace)
     output_files: List[Path] = []
@@ -369,7 +381,7 @@ def run_engine(
             out = run_fixed_ephemeris_screen(workspace, signal=signal)
             if out is not None:
                 output_files.append(out)
-        elif engine_name in ("fit", "batman"):
+        elif engine_name == "batman":
             from .transit_fit import run_mcmc_transit_fit
             out = run_mcmc_transit_fit(workspace, signal=signal, **kwargs)
             if out is not None:
@@ -413,15 +425,6 @@ def run_engine(
             out = run_asteroseismology(workspace, **kwargs)
             if out is not None:
                 output_files.append(out)
-        elif engine_name in ("vet", "triceratops"):
-            from .vetting.tricera_parse import run_triceratops_simulation
-            out = run_triceratops_simulation(workspace, signal=signal, **kwargs)
-            if out is not None:
-                output_files.append(out)
-        elif engine_name == "plot":
-            from .plotting import generate_candidate_plots
-            plots = generate_candidate_plots(workspace, signal=signal, **kwargs)
-            output_files.extend(plots)
         else:
             raise NotImplementedError(f"Engine '{engine_name}' runner is not yet configured.")
     except Exception as exc:
@@ -431,12 +434,28 @@ def run_engine(
             "message": str(exc),
         }
 
+    if status == "succeeded" and not output_files:
+        status = "blocked"
+        failure_info = {
+            "code": "no-output-artifacts",
+            "message": "The engine completed without producing a candidate-local output artifact.",
+        }
+
     completed_at = datetime.now(timezone.utc).isoformat()
 
     output_artifacts: List[Dict[str, str]] = []
     for out_path in output_files:
         if out_path.is_file():
-            rel_out = out_path.relative_to(workspace.path).as_posix()
+            try:
+                rel_out = out_path.resolve().relative_to(workspace.path.resolve()).as_posix()
+            except ValueError:
+                status = "failed"
+                failure_info = {
+                    "code": "output-outside-workspace",
+                    "message": "An engine returned an output outside the candidate workspace.",
+                }
+                output_artifacts = []
+                break
             output_artifacts.append({
                 "path": rel_out,
                 "sha256": _file_sha256(out_path),
@@ -493,6 +512,72 @@ def report_candidate_engines(workspace: CandidateWorkspace) -> List[Dict[str, An
     return runs
 
 
+def _load_json_object(path: Path) -> Optional[Dict[str, Any]]:
+    """Read one JSON object, returning None for malformed or non-object content."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _producing_manifest(
+    workspace: CandidateWorkspace,
+    engine_name: str,
+    artifact_path: Path,
+) -> Optional[Tuple[Path, str]]:
+    """Return the successful manifest that records the exact output artifact hash."""
+    try:
+        artifact_rel = artifact_path.resolve().relative_to(workspace.path.resolve()).as_posix()
+    except ValueError:
+        return None
+    artifact_sha = _file_sha256(artifact_path)
+    for manifest_path in sorted((workspace.path / "runs" / engine_name).glob("*/engine-run.json")):
+        manifest = _load_json_object(manifest_path)
+        if manifest is None:
+            continue
+        if (
+            manifest.get("candidate_id") != workspace.candidate_id
+            or manifest.get("engine") != engine_name
+            or manifest.get("status") != "succeeded"
+        ):
+            continue
+        outputs = manifest.get("outputs")
+        if not isinstance(outputs, list):
+            continue
+        for output in outputs:
+            if isinstance(output, dict) and output.get("path") == artifact_rel and output.get("sha256") == artifact_sha:
+                return manifest_path, artifact_sha
+    return None
+
+
+def _triage_record(
+    workspace: CandidateWorkspace,
+    engine_name: str,
+    artifact_path: Path,
+    status: str,
+    reason: str,
+) -> Dict[str, str]:
+    """Build one triage record only when its scientific artifact is traceable."""
+    producer = _producing_manifest(workspace, engine_name, artifact_path)
+    if producer is None:
+        return {
+            "engine": engine_name,
+            "status": "blocked",
+            "reason": "No successful engine manifest records the exact output artifact.",
+        }
+    manifest_path, artifact_sha = producer
+    return {
+        "engine": engine_name,
+        "run_manifest_path": manifest_path.relative_to(workspace.path).as_posix(),
+        "run_manifest_sha256": _file_sha256(manifest_path),
+        "artifact_path": artifact_path.relative_to(workspace.path).as_posix(),
+        "artifact_sha256": artifact_sha,
+        "status": status,
+        "reason": reason,
+    }
+
+
 def run_automated_triage(
     workspace: CandidateWorkspace,
     policy_id: str = "default-pre-vetting-triage",
@@ -500,32 +585,15 @@ def run_automated_triage(
 ) -> Path:
     """Aggregate pre-vetting findings into an automated triage decision.
 
-    Evaluates:
-    - Fixed-ephemeris odd-even and secondary eclipse screening
-    - PRF difference-image centroid source localization
-    - Stellar rotational activity period match
-    - Third-light aperture dilution sensitivity
+    Evaluates only existing, manifest-backed fixed-ephemeris and PRF localization
+    outputs. Missing, malformed, or unprovenanced evidence is blocked rather than
+    inferred as a scientific pass.
 
     Output is strictly validated against schemas/automated-triage.schema.json
     and written to candidate/<id>/decisions/automated_triage.json.
     """
-    records: List[Dict[str, Any]] = []
-    overall_status = "pass"
-
-    # Ensure at least one engine run manifest exists for triage traceability
-    runs_dir = workspace.path / "runs"
-    latest_run_manifest: Optional[Path] = None
-    if runs_dir.is_dir():
-        all_runs = sorted(runs_dir.glob("*/*/engine-run.json"))
-        if all_runs:
-            latest_run_manifest = all_runs[-1]
-
-    # If no run manifest exists yet, execute a fast screening engine run
-    if latest_run_manifest is None:
-        latest_run_manifest = run_engine(workspace, "screen")
-
-    run_manifest_rel = latest_run_manifest.relative_to(workspace.path).as_posix()
-    run_manifest_sha = _file_sha256(latest_run_manifest)
+    workspace = _trusted_workspace(workspace)
+    records: List[Dict[str, str]] = []
 
     # 1. Screening Evaluation
     screen_path = workspace.path / "outputs" / "fixed_ephemeris_screening.json"
@@ -536,65 +604,63 @@ def run_automated_triage(
             break
 
     if screen_path.is_file():
-        try:
-            screen_data = json.loads(screen_path.read_text(encoding="utf-8"))
-            screen_obj = screen_data.get("screen", screen_data)
-            odd_even = screen_obj.get("odd_even", {})
-            if odd_even.get("consistent_at_threshold") is False:
-                records.append({
-                    "engine": "screen",
-                    "run_manifest_path": run_manifest_rel,
-                    "run_manifest_sha256": run_manifest_sha,
-                    "status": "review-required",
-                    "reason": "Significant odd-even transit depth asymmetry (probable eclipsing binary).",
-                })
-                overall_status = "review-required"
-            else:
-                records.append({
-                    "engine": "screen",
-                    "run_manifest_path": run_manifest_rel,
-                    "run_manifest_sha256": run_manifest_sha,
-                    "status": "pass",
-                    "reason": "Odd-even depths are statistically consistent.",
-                })
-        except Exception:
-            pass
+        screen_data = _load_json_object(screen_path)
+        screen_obj = screen_data.get("screen", screen_data) if screen_data else None
+        odd_even = screen_obj.get("odd_even") if isinstance(screen_obj, dict) else None
+        consistent = odd_even.get("consistent_at_threshold") if isinstance(odd_even, dict) else None
+        if consistent is False:
+            records.append(_triage_record(
+                workspace, "screen", screen_path, "review-required",
+                "Significant odd-even transit depth asymmetry requires human review.",
+            ))
+        elif consistent is True:
+            records.append(_triage_record(
+                workspace, "screen", screen_path, "pass",
+                "Odd-even depths are statistically consistent.",
+            ))
+        else:
+            records.append({
+                "engine": "screen",
+                "status": "blocked",
+                "reason": "Screening output lacks a conclusive odd-even consistency result.",
+            })
 
     # 2. Centroid PRF Localization Evaluation
     prf_path = workspace.path / "outputs" / "prf_localization_report.json"
     if prf_path.is_file():
-        try:
-            prf_data = json.loads(prf_path.read_text(encoding="utf-8"))
-            is_on_target = prf_data.get("on_target", True)
-            if not is_on_target:
-                records.append({
-                    "engine": "localization",
-                    "run_manifest_path": run_manifest_rel,
-                    "run_manifest_sha256": run_manifest_sha,
-                    "status": "review-required",
-                    "reason": "Transit flux deficit centroid is significantly offset from target.",
-                })
-                overall_status = "review-required"
-            else:
-                records.append({
-                    "engine": "localization",
-                    "run_manifest_path": run_manifest_rel,
-                    "run_manifest_sha256": run_manifest_sha,
-                    "status": "pass",
-                    "reason": "Centroid is consistent with on-target transit.",
-                })
-        except Exception:
-            pass
+        prf_data = _load_json_object(prf_path)
+        is_on_target = prf_data.get("on_target") if prf_data else None
+        if is_on_target is False:
+            records.append(_triage_record(
+                workspace, "localization", prf_path, "review-required",
+                "Transit flux deficit centroid is significantly offset from the target.",
+            ))
+        elif is_on_target is True:
+            records.append(_triage_record(
+                workspace, "localization", prf_path, "pass",
+                "Centroid is consistent with an on-target signal.",
+            ))
+        else:
+            records.append({
+                "engine": "localization",
+                "status": "blocked",
+                "reason": "Localization output lacks a conclusive on-target result.",
+            })
 
-    # 3. Default base record if no individual scientific modules were evaluated
     if not records:
         records.append({
             "engine": "screen",
-            "run_manifest_path": run_manifest_rel,
-            "run_manifest_sha256": run_manifest_sha,
-            "status": "pass",
-            "reason": "Initial screening baseline verified.",
+            "status": "blocked",
+            "reason": "No manifest-backed screening or localization evidence is available.",
         })
+
+    statuses = {record["status"] for record in records}
+    if "blocked" in statuses:
+        overall_status = "blocked"
+    elif "review-required" in statuses:
+        overall_status = "review-required"
+    else:
+        overall_status = "pass"
 
     decisions_dir = workspace.path / "decisions"
     decisions_dir.mkdir(parents=True, exist_ok=True)

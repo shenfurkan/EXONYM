@@ -117,6 +117,14 @@ class _FakeSearch:
         return _FakeDownload(self._light_curves[index])
 
 
+class _FakeTessCut:
+    def __init__(self, light_curve):
+        self._light_curve = light_curve
+
+    def to_lightcurve(self):
+        return self._light_curve
+
+
 def test_fetch_tess_products_writes_fits_and_ingests(tmp_path, monkeypatch):
     import lightkurve as lk
     from astropy.table import Table
@@ -137,6 +145,11 @@ def test_fetch_tess_products_writes_fits_and_ingests(tmp_path, monkeypatch):
     fake_search = _FakeSearch(table, [light_curve])
 
     monkeypatch.setattr(lk, "search_lightcurve", lambda *args, **kwargs: fake_search)
+    monkeypatch.setattr(
+        lk,
+        "search_tesscut",
+        lambda *args, **kwargs: pytest.fail("TESSCut must not be queried for a SPOC request"),
+    )
 
     products = fetch_tess_products(candidate, exptime=120)
     assert len(products) == 1
@@ -154,6 +167,68 @@ def test_fetch_tess_products_writes_fits_and_ingests(tmp_path, monkeypatch):
     record = json.loads(sidecar.read_text(encoding="utf-8"))
     assert record["source_uri"] == source_uri
     assert len(record["sha256"]) == 64
+
+
+def test_fetch_tesscut_lightcurves_uses_only_requested_provider(tmp_path, monkeypatch):
+    import lightkurve as lk
+    from astropy.table import Table
+
+    from exonym.ingest import fetch_tess_products, ingest_products
+
+    create_candidate(tmp_path, "candidate-tesscut", tic="123456789")
+    candidate = [
+        c for c in discover_candidates(tmp_path) if c.candidate_id == "candidate-tesscut"
+    ][0]
+    table = Table(
+        rows=[("s0037", "tesscut-s0037")], names=("sequence_number", "obs_id")
+    )
+    time = np.linspace(2459000.0, 2459030.0, 600)
+    tesscut = _FakeTessCut(lk.LightCurve(time=time, flux=np.ones_like(time)))
+    fake_search = _FakeSearch(table, [tesscut])
+    calls = []
+
+    def search_tesscut(target, sector=None):
+        calls.append((target, sector))
+        return fake_search
+
+    def unexpected_spoc(*args, **kwargs):
+        pytest.fail("SPOC must not be queried for a TESSCut request")
+
+    monkeypatch.setattr(lk, "search_tesscut", search_tesscut)
+    monkeypatch.setattr(lk, "search_lightcurve", unexpected_spoc)
+
+    products = fetch_tess_products(candidate, sectors=[37], provider="tesscut")
+    assert calls == [("TIC 123456789", 37)]
+    assert products[0][0].name == "s0037_lc.fits"
+
+    written = ingest_products(candidate, products)
+    sidecar = written[0].with_name(written[0].stem + ".provenance.json")
+    record = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert record["source_uri"] == products[0][1]
+
+
+def test_tesscut_rejects_tpf_requests_without_a_network_call(tmp_path):
+    from exonym.ingest import fetch_tess_tpfs
+
+    create_candidate(tmp_path, "candidate-tesscut-tpf", tic="123456789")
+    candidate = [
+        c for c in discover_candidates(tmp_path) if c.candidate_id == "candidate-tesscut-tpf"
+    ][0]
+
+    with pytest.raises(ValueError, match="light-curve ingestion only"):
+        fetch_tess_tpfs(candidate, provider="tesscut")
+
+
+def test_fetch_tess_products_rejects_an_unknown_provider_before_network_access(tmp_path):
+    from exonym.ingest import fetch_tess_products
+
+    create_candidate(tmp_path, "candidate-provider", tic="123456789")
+    candidate = [
+        c for c in discover_candidates(tmp_path) if c.candidate_id == "candidate-provider"
+    ][0]
+
+    with pytest.raises(ValueError, match="unsupported TESS data provider"):
+        fetch_tess_products(candidate, provider="other")
 
 
 class _FakeTPF:

@@ -97,7 +97,20 @@ def validate_candidate_id(candidate_id: str) -> str:
 
 
 def _candidate_path(repository_root: Path, candidate_id: str) -> Path:
-    return repository_root.resolve() / CANDIDATE_DIRECTORY / validate_candidate_id(candidate_id)
+    root = repository_root.resolve() / CANDIDATE_DIRECTORY
+    normalized = validate_candidate_id(candidate_id)
+    direct = root / normalized
+    if direct.is_dir() and (direct / METADATA_FILENAME).is_file():
+        return direct
+    if root.is_dir():
+        for meta in root.rglob(METADATA_FILENAME):
+            parent = meta.parent
+            rel_parts = parent.relative_to(root).parts
+            if any(part.startswith("_") for part in rel_parts):
+                continue
+            if parent.name.lower() == normalized:
+                return parent
+    return direct
 
 
 def _created_at() -> str:
@@ -314,9 +327,20 @@ def discover_candidates(repository_root: Path) -> List[CandidateWorkspace]:
     if not candidate_root.is_dir():
         return []
     candidates = []
-    for path in sorted(candidate_root.iterdir(), key=lambda item: item.name):
-        if path.is_dir() and (path / METADATA_FILENAME).is_file():
-            candidates.append(load_candidate(repository_root, path.name))
+    seen = set()
+    for meta in sorted(candidate_root.rglob(METADATA_FILENAME), key=lambda item: item.parent.name):
+        path = meta.parent
+        rel_parts = path.relative_to(candidate_root).parts
+        if any(part.startswith("_") for part in rel_parts):
+            continue
+        cid = path.name.lower()
+        if cid in seen:
+            continue
+        seen.add(cid)
+        try:
+            candidates.append(load_candidate(repository_root, cid))
+        except Exception:
+            continue
     return candidates
 
 

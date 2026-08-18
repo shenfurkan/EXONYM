@@ -73,6 +73,16 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "succeeded" } } },
+      "then": {
+        "properties": { "outputs": { "minItems": 1 } },
+        "not": { "required": ["failure"] }
+      },
+      "else": { "required": ["failure"] }
+    }
+  ],
   "$defs": {
     "artifact": {
       "type": "object",

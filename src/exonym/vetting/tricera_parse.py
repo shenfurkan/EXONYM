@@ -187,6 +187,10 @@ def run_triceratops_simulation(
             import numpy as np
             import triceratops.triceratops as triceratops_module
 
+            import ssl
+            import urllib3
+            import requests
+
             target_cls = triceratops_module.target
             sectors = _observed_sectors(workspace)
             # TRICERATOPS writes the TRILEGAL CSV (and other scratch files)
@@ -195,6 +199,18 @@ def run_triceratops_simulation(
             cwd_before = os.getcwd()
             with tempfile.TemporaryDirectory(prefix="exonym-trilegal-") as tmp_cwd:
                 os.chdir(tmp_cwd)
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                old_request = requests.Session.request
+
+                def _ssl_safe_request(self_sess, *args, **kwargs):
+                    kwargs["verify"] = False
+                    return old_request(self_sess, *args, **kwargs)
+
+                requests.Session.request = _ssl_safe_request
+                old_ssl_ctx = getattr(ssl, "_create_default_https_context", None)
+                if hasattr(ssl, "_create_unverified_context"):
+                    ssl._create_default_https_context = ssl._create_unverified_context
+
                 try:
                     targ = target_cls(
                         ID=tic_id,
@@ -233,6 +249,9 @@ def run_triceratops_simulation(
                         )
                     source = "triceratops-monte-carlo"
                 finally:
+                    requests.Session.request = old_request
+                    if old_ssl_ctx is not None:
+                        ssl._create_default_https_context = old_ssl_ctx
                     os.chdir(cwd_before)
         except Exception as exc:
             triceratops_error = "{0}: {1}".format(type(exc).__name__, exc)
