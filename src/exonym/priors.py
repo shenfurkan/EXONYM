@@ -22,7 +22,7 @@ def fetch_exofop_priors(workspace: CandidateWorkspace) -> List[Path]:
         raise ValueError("candidate lacks a TIC identifier")
 
     url = "https://exofop.ipac.caltech.edu/tess/download_toi.php?sort=toi&output=csv"
-    req = urllib.request.Request(url, headers={"User-Agent": "exonym/1.0.1"})
+    req = urllib.request.Request(url, headers={"User-Agent": "exonym/1.1.0"})
 
     with urllib.request.urlopen(req, timeout=30) as response:
         if response.status != 200:

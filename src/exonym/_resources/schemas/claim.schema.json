@@ -16,8 +16,8 @@
       "enum": ["period_days", "radius_earth", "mass_earth", "fpp"]
     },
     "value": { "type": "number" },
-    "uncertainty_upper": { "type": "number" },
-    "uncertainty_lower": { "type": "number" },
+    "uncertainty_upper": { "type": ["number", "null"] },
+    "uncertainty_lower": { "type": ["number", "null"] },
     "unit": { "type": "string" },
     "method": { "type": "string" }
   }

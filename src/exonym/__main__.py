@@ -24,6 +24,7 @@ Scientific analysis commands:
   activity          Stellar rotation periodogram analysis
   dilution          Aperture robustness and dilution sensitivity
   archive           Query Gaia EDR3 and NASA ExoFOP for archival vetting
+  rv                Ingest candidate-local RV data and fit a Keplerian model
 """
 
 from __future__ import annotations
@@ -150,12 +151,45 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     engine_report_parser.add_argument("candidate_id", help="Target candidate identifier.")
 
+    catalog_parser = commands.add_parser(
+        "catalog", help="Capture candidate-local evidence from reviewed catalog providers."
+    )
+    catalog_commands = catalog_parser.add_subparsers(dest="catalog_action", required=True)
+    catalog_fetch_parser = catalog_commands.add_parser(
+        "fetch", help="Fetch allowlisted catalog templates into append-only retrieval records."
+    )
+    catalog_fetch_parser.add_argument("candidate_id", help="Target candidate identifier.")
+    catalog_fetch_parser.add_argument(
+        "--providers", nargs="+", required=True,
+        help="Allowlisted providers: mast, gaia, simbad, vizier, nasa-exoplanet-archive, irsa, ztf, exofop, lamost-dr11, smoka, mast-hubble-jwst.",
+    )
+    catalog_refresh_parser = catalog_commands.add_parser(
+        "refresh", help="Create new retrievals only for expired catalog evidence."
+    )
+    catalog_refresh_parser.add_argument("candidate_id", help="Target candidate identifier.")
+    catalog_report_parser = catalog_commands.add_parser(
+        "report", help="Report catalog availability, ambiguity, staleness, and citations."
+    )
+    catalog_report_parser.add_argument("candidate_id", help="Target candidate identifier.")
+
     triage_parser = commands.add_parser(
         "triage", help="Aggregate pre-vetting findings into an automated decision record."
     )
     triage_parser.add_argument("candidate_id", help="Target candidate identifier.")
     triage_parser.add_argument("--policy-id", default="default-pre-vetting-triage", help="Triage policy identifier.")
     triage_parser.add_argument("--policy-version", default="1.0.0", help="Triage policy version.")
+
+    rejection_parser = commands.add_parser(
+        "record-rejection",
+        help="Record candidate-local decisive evidence that makes TRICERATOPS inapplicable.",
+    )
+    rejection_parser.add_argument("candidate_id", help="Target candidate identifier.")
+    rejection_parser.add_argument("--reason", required=True, help="Evidence-based reason to stop before vetting.")
+    rejection_parser.add_argument(
+        "--evidence",
+        required=True,
+        help="Existing candidate-local evidence path, relative to the candidate workspace.",
+    )
 
     status_parser = commands.add_parser("status", help="Show one candidate record.")
     status_parser.add_argument("candidate_id")
@@ -279,6 +313,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Per-signal transit config name (e.g. .01 -> config/signals/transit_config.01.json).",
     )
+    vet_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass automated triage gate and run TRICERATOPS Monte Carlo directly.",
+    )
 
     asteroseismology_parser = commands.add_parser(
         "asteroseismology", help="Estimate stellar oscillation envelope and seismic M*/R*."
@@ -310,7 +349,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     fit_parser.add_argument("candidate_id")
     fit_parser.add_argument(
-        "--n-samples", type=int, default=5000, help="MCMC production steps per walker."
+        "--n-samples",
+        type=int,
+        default=5000,
+        help="Emcee production steps per walker or dynesty maximum likelihood calls.",
+    )
+    fit_parser.add_argument(
+        "--sampler",
+        choices=("emcee", "dynesty"),
+        default="emcee",
+        help="Posterior sampler; dynesty uses its optional inference dependency.",
     )
     fit_parser.add_argument(
         "--eccentric", action="store_true", help="Sample eccentric orbit parameters."
@@ -361,6 +409,38 @@ def _build_parser() -> argparse.ArgumentParser:
         default=10.0,
         help="Gaia neighbor search radius in arcseconds.",
     )
+
+    rv_parser = commands.add_parser(
+        "rv", help="Ingest candidate-local radial velocities and fit descriptive Keplerian evidence."
+    )
+    rv_commands = rv_parser.add_subparsers(dest="rv_action", required=True)
+    rv_ingest_parser = rv_commands.add_parser(
+        "ingest", help="Validate and copy a finite RV observation JSON file into the candidate workspace."
+    )
+    rv_ingest_parser.add_argument("candidate_id")
+    rv_ingest_parser.add_argument("source", type=Path, help="Observation JSON source file.")
+    rv_fit_parser = rv_commands.add_parser(
+        "fit", help="Compare constant and eccentric Keplerian RV models at a fixed period."
+    )
+    rv_fit_parser.add_argument("candidate_id")
+    rv_fit_parser.add_argument("--period-days", type=float, required=True, help="Fixed orbital period in days.")
+    rv_fit_parser.add_argument(
+        "--period-uncertainty-days",
+        type=float,
+        default=None,
+        help="Optional uncertainty of the fixed input period in days.",
+    )
+
+    planetsynth_parser = commands.add_parser(
+        "planetsynth",
+        help="Run opt-in giant-planet cooling interpretation from data/external/planetsynth_characterization.json.",
+    )
+    planetsynth_parser.add_argument("candidate_id")
+    pyppluss_parser = commands.add_parser(
+        "pyppluss",
+        help="Test a declared anomalous-transit hypothesis from data/external/anomalous_transit_hypothesis.json.",
+    )
+    pyppluss_parser.add_argument("candidate_id")
     return parser
 
 
@@ -485,6 +565,46 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 _print_json(runs)
                 return 0
 
+        if args.command == "catalog":
+            from .catalog_federation import catalog_report, fetch_catalog, refresh_catalog
+
+            candidate = load_candidate(repository_root, args.candidate_id)
+            if args.catalog_action == "fetch":
+                manifests = fetch_catalog(candidate, args.providers)
+                _print_json([path.relative_to(repository_root).as_posix() for path in manifests])
+                return 0
+            if args.catalog_action == "refresh":
+                manifests = refresh_catalog(candidate)
+                _print_json([path.relative_to(repository_root).as_posix() for path in manifests])
+                return 0
+            if args.catalog_action == "report":
+                _print_json(catalog_report(candidate))
+                return 0
+
+        if args.command == "rv":
+            from .radial_velocity import fit_radial_velocity, ingest_radial_velocity_observations
+
+            candidate = load_candidate(repository_root, args.candidate_id)
+            if args.rv_action == "ingest":
+                output = ingest_radial_velocity_observations(candidate, args.source)
+            else:
+                output = fit_radial_velocity(
+                    candidate,
+                    period_days=args.period_days,
+                    period_uncertainty_days=args.period_uncertainty_days,
+                )
+            print(output.relative_to(repository_root).as_posix())
+            return 0
+
+        if args.command in ("planetsynth", "pyppluss"):
+            from .specialized_models import run_planetsynth, run_pyppluss
+
+            candidate = load_candidate(repository_root, args.candidate_id)
+            result = run_planetsynth(candidate) if args.command == "planetsynth" else run_pyppluss(candidate)
+            output = result.report_path or result.manifest_path
+            print(output.relative_to(repository_root).as_posix())
+            return 0 if result.status == "succeeded" else 1
+
         candidate = load_candidate(repository_root, args.candidate_id)
 
         if args.command == "triage":
@@ -496,6 +616,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 policy_version=getattr(args, "policy_version", "1.0.0"),
             )
             print(triage_path.relative_to(repository_root).as_posix())
+            return 0
+
+        if args.command == "record-rejection":
+            from .statistical_vetting import record_decisive_rejection
+
+            output = record_decisive_rejection(candidate, args.reason, args.evidence)
+            print(output.relative_to(repository_root).as_posix())
             return 0
 
         if args.command == "status":
@@ -628,7 +755,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.command == "vet":
             from .vetting.tricera_parse import run_triceratops_simulation
+            from .statistical_vetting import require_vetting_readiness
 
+            if not getattr(args, "force", False):
+                require_vetting_readiness(candidate, signal=args.signal)
             output = run_triceratops_simulation(
                 candidate, n_draws=args.n_draws, signal=args.signal
             )
@@ -667,6 +797,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 eccentric=args.eccentric,
                 signal=args.signal,
                 use_ldtk_prior=args.ldtk_prior,
+                sampler=args.sampler,
             )
             print(output.relative_to(repository_root).as_posix())
             return 0

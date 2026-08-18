@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/anomalous-transit-hypothesis-1.0.json",
+  "title": "Candidate-local Anomalous Transit Hypothesis Input",
+  "description": "Declared normalized light curve and one ringed or oblate transit hypothesis for pyPplusS comparison.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "candidate_id", "purpose", "observation", "hypothesis", "provenance"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "candidate_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "purpose": { "const": "anomalous-transit-hypothesis-test" },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["time_days", "normalized_flux"],
+      "properties": {
+        "time_days": { "$ref": "#/$defs/time-series" },
+        "normalized_flux": { "$ref": "#/$defs/flux-series" }
+      }
+    },
+    "hypothesis": {
+      "oneOf": [
+        { "$ref": "#/$defs/ringed" },
+        { "$ref": "#/$defs/oblate" }
+      ]
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_description", "recorded_at"],
+      "properties": {
+        "source_description": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "recorded_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "$defs": {
+    "time-series": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["values", "unit"],
+      "properties": { "values": { "type": "array", "minItems": 5, "maxItems": 10000, "items": { "type": "number" } }, "unit": { "const": "days" } }
+    },
+    "flux-series": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["values", "unit"],
+      "properties": { "values": { "type": "array", "minItems": 5, "maxItems": 10000, "items": { "type": "number" } }, "unit": { "const": "relative_flux" } }
+    },
+    "ringed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "planet_radius_ratio", "impact_parameter", "ring_inner_radius_ratio", "ring_outer_radius_ratio", "ring_obliquity_deg"],
+      "properties": {
+        "model": { "const": "ringed-planet" },
+        "planet_radius_ratio": { "type": "number", "exclusiveMinimum": 0, "maximum": 0.3 },
+        "impact_parameter": { "type": "number", "minimum": 0, "maximum": 1.5 },
+        "ring_inner_radius_ratio": { "type": "number", "exclusiveMinimum": 0, "maximum": 1.5 },
+        "ring_outer_radius_ratio": { "type": "number", "exclusiveMinimum": 0, "maximum": 1.5 },
+        "ring_obliquity_deg": { "type": "number", "minimum": -90, "maximum": 90 }
+      }
+    },
+    "oblate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "planet_radius_ratio", "impact_parameter", "oblateness", "obliquity_deg"],
+      "properties": {
+        "model": { "const": "oblate-planet" },
+        "planet_radius_ratio": { "type": "number", "exclusiveMinimum": 0, "maximum": 0.3 },
+        "impact_parameter": { "type": "number", "minimum": 0, "maximum": 1.5 },
+        "oblateness": { "type": "number", "minimum": 0, "exclusiveMaximum": 0.5 },
+        "obliquity_deg": { "type": "number", "minimum": -90, "maximum": 90 }
+      }
+    }
+  }
+}

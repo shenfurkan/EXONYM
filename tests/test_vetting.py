@@ -1,4 +1,6 @@
 import json
+import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -83,6 +85,39 @@ def test_fpp_missing_value_raises(tmp_path):
     path.write_text(json.dumps({"note": "no fpp"}), encoding="utf-8")
     with pytest.raises(ValueError, match="no FPP"):
         fpp_gate(load_fpp_report(path))
+
+
+def test_fpp_report_rejects_non_object_json(tmp_path):
+    path = tmp_path / "triceratops.json"
+    path.write_text("[]", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="JSON object"):
+        load_fpp_report(path)
+
+
+def test_observed_sector_parser_prefers_products_then_uses_holdings_fallback(tmp_path):
+    from exonym.vetting.tricera_parse import _observed_sectors
+
+    workspace = type("Workspace", (), {"path": tmp_path})()
+    raw = tmp_path / "data" / "raw"
+    raw.mkdir(parents=True)
+    (raw / "s0007_lc.fits").write_bytes(b"synthetic")
+    (raw / "s0021_tp.fz").write_bytes(b"synthetic")
+    holdings = tmp_path / "data" / "external" / "tess_holdings.json"
+    holdings.parent.mkdir(parents=True)
+    holdings.write_text(
+        json.dumps({"pipelines": {"synthetic": [{"sector": 99}]}}), encoding="utf-8"
+    )
+
+    assert _observed_sectors(workspace) == [7, 21]
+
+    for path in raw.iterdir():
+        path.unlink()
+    holdings.write_text(
+        json.dumps({"pipelines": {"synthetic": [{"sector": 4}, {"sector": "5"}]}}),
+        encoding="utf-8",
+    )
+    assert _observed_sectors(workspace) == [4]
 
 
 def _vet_workspace_stub(tmp_path, candidate_id="vet-stub", tic=None):
@@ -221,10 +256,8 @@ def test_run_triceratops_does_not_monkeypatch_tls_client(tmp_path, monkeypatch):
     assert module.query_TRILEGAL is query_trilegal
 
 
-def test_run_triceratops_allow_fallback_writes_null_fpp(tmp_path):
-    """allow_fallback=True writes a report and sentinel claim with FPP=null
-    rather than a passing numeric value that would satisfy the gate.
-    """
+def test_run_triceratops_allow_fallback_writes_null_fpp_without_claim(tmp_path):
+    """A non-Monte-Carlo fallback never creates an FPP claim."""
     from exonym.vetting.tricera_parse import run_triceratops_simulation
 
     stub, outputs = _vet_workspace_stub(tmp_path)  # no TIC
@@ -235,9 +268,7 @@ def test_run_triceratops_allow_fallback_writes_null_fpp(tmp_path):
     assert report["triceratops_error"] is None  # no error — just no TIC
 
     claim_path = tmp_path / "claims" / "fpp_claim.json"
-    claim = json.loads(claim_path.read_text(encoding="utf-8"))
-    assert claim["value"] is None, "claim value must be null, not a hardcoded 0.0012"
-    assert "error" in claim
+    assert not claim_path.exists()
 
 
 def test_run_triceratops_config_parse_error_emits_warning(tmp_path):
@@ -353,6 +384,78 @@ def test_seismic_sanity_check_rejects_unphysical_scaling():
     synthetic_source = seismic_sanity_check(implausible)
     assert synthetic_source["plausible"] is False
     assert synthetic_source["reasons"] == ["mass outside plausible range"]
+
+
+def test_asteroseismic_optional_adapters_write_hashed_candidate_local_manifests(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    import exonym.asteroseismology as asteroseismology
+    from exonym.isolation import IsolationReport
+    from exonym.schemas import validate_schemas
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "astero-adapter-test")
+    time = np.linspace(0.0, 1.0, 100)
+    flux = np.zeros_like(time)
+
+    def write_estimates(arguments):
+        assert arguments[0] == "-f"
+        assert Path(arguments[1]).is_file()
+        (Path.cwd() / "estimates.csv").write_text("numax,dnu\n250,40\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        asteroseismology.importlib,
+        "import_module",
+        lambda name: SimpleNamespace(main=write_estimates, __version__="synthetic"),
+    )
+    succeeded = asteroseismology._run_pysyd_adapter(workspace, time, flux, 100.0, 500.0)
+
+    assert succeeded["status"] == "succeeded"
+    assert succeeded["crosscheck"]["estimates"] == [{"numax": 250.0, "dnu": 40.0}]
+    manifest = json.loads(succeeded["manifest_path"].read_text(encoding="utf-8"))
+    assert manifest["engine"] == "pysyd"
+    assert manifest["status"] == "succeeded"
+    assert len(manifest["inputs"]) == 1
+    assert len(manifest["outputs"]) == 1
+    for artifact in manifest["inputs"] + manifest["outputs"]:
+        artifact_path = workspace.path / artifact["path"]
+        assert artifact_path.is_file()
+        assert asteroseismology._sha256(artifact_path) == artifact["sha256"]
+
+    def missing_pysyd(_name):
+        raise ModuleNotFoundError("synthetic missing pySYD")
+
+    monkeypatch.setattr(asteroseismology.importlib, "import_module", missing_pysyd)
+    unavailable = asteroseismology._run_pysyd_adapter(workspace, time, flux, 100.0, 500.0)
+    unavailable_manifest = json.loads(unavailable["manifest_path"].read_text(encoding="utf-8"))
+    assert unavailable["status"] == "unavailable"
+    assert unavailable_manifest["failure"]["code"] == "module-unavailable"
+    assert unavailable_manifest["outputs"] == []
+
+    def fail_pysyd(_arguments):
+        raise RuntimeError("synthetic adapter failure")
+
+    monkeypatch.setattr(
+        asteroseismology.importlib,
+        "import_module",
+        lambda name: SimpleNamespace(main=fail_pysyd),
+    )
+    failed = asteroseismology._run_pysyd_adapter(workspace, time, flux, 100.0, 500.0)
+    failed_manifest = json.loads(failed["manifest_path"].read_text(encoding="utf-8"))
+    assert failed["status"] == "failed"
+    assert failed_manifest["failure"]["code"] == "adapter-execution-failed"
+
+    monkeypatch.setattr(asteroseismology.importlib.util, "find_spec", lambda name: None)
+    tess_atl = asteroseismology._record_tess_atl_adapter(workspace)
+    tess_manifest = json.loads(tess_atl["manifest_path"].read_text(encoding="utf-8"))
+    assert tess_atl["status"] == "unavailable"
+    assert tess_manifest["engine"] == "tess-atl"
+    assert tess_manifest["failure"]["code"] == "module-unavailable"
+    assert tess_manifest["outputs"] == []
+
+    report = IsolationReport()
+    validate_schemas(tmp_path, report)
+    assert report.violations == []
 
 
 # ---------------------------------------------------------------------------
@@ -510,6 +613,62 @@ def test_transit_fit_eccentric_mode_runs(tmp_path):
     assert "eccentricity" in payload["posterior"]
     assert "omega_deg" in payload["posterior"]
     assert payload["posterior"]["eccentricity"]["median"] < 0.3
+
+
+def test_dynesty_fit_writes_evidence_and_reproducible_compatibility_chain(tmp_path):
+    from exonym.transit_fit import run_mcmc_transit_fit
+    from exonym.workspace import create_candidate
+
+    class FakeDynamicNestedSampler:
+        def __init__(self, log_likelihood, prior_transform, ndim, rstate):
+            probe = prior_transform(np.full(ndim, 0.5))
+            assert np.isfinite(log_likelihood(probe))
+            samples = np.tile(probe, (4, 1))
+            samples[:, 0] += np.array([-0.001, 0.0, 0.001, 0.002])
+            self.results = SimpleNamespace(
+                samples=samples,
+                logwt=np.array([-5.0, -3.0, -1.0, 0.0]),
+                logz=np.array([-5.0, -2.5, -0.5, 0.0]),
+                logzerr=np.array([0.5, 0.3, 0.2, 0.1]),
+                niter=4,
+                ncall=np.array([3, 3, 3, 3]),
+                eff=75.0,
+            )
+
+        def run_nested(self, **kwargs):
+            assert kwargs["print_progress"] is False
+            assert kwargs["nlive_init"] > 0
+
+    workspace = create_candidate(tmp_path, "fit-dynesty-test")
+    fake_dynesty = SimpleNamespace(DynamicNestedSampler=FakeDynamicNestedSampler, __version__="test")
+
+    with patch.dict(sys.modules, {"dynesty": fake_dynesty}):
+        output = run_mcmc_transit_fit(workspace, n_samples=40, sampler="dynesty", seed=5)
+        first_chain = np.load(workspace.path / "outputs" / "mcmc_transit_fit_chain.npy")
+        run_mcmc_transit_fit(workspace, n_samples=40, sampler="dynesty", seed=5)
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    chain = np.load(workspace.path / "outputs" / "mcmc_transit_fit_chain.npy")
+    assert output.name == "mcmc_transit_fit.json"
+    assert payload["sampler"] == "dynesty"
+    assert payload["evidence"]["log_z"] == pytest.approx(0.0)
+    assert payload["diagnostics"]["resampling"] == "systematic equal-weight resampling"
+    assert payload["diagnostics"]["resampling_seed"] == 5
+    assert chain.shape == (4, 7)
+    assert np.array_equal(chain, first_chain)
+
+
+def test_dynesty_dependency_failure_writes_no_fit_output(tmp_path):
+    from exonym.transit_fit import run_mcmc_transit_fit
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "fit-dynesty-missing")
+    with patch.dict(sys.modules, {"dynesty": None}):
+        with pytest.raises(RuntimeError, match=r"\[inference\]"):
+            run_mcmc_transit_fit(workspace, sampler="dynesty")
+
+    assert not (workspace.path / "outputs" / "mcmc_transit_fit.json").exists()
+    assert not (workspace.path / "outputs" / "mcmc_transit_fit_chain.npy").exists()
 
 
 def test_stellar_density_a_rs_monotonic():

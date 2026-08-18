@@ -23,6 +23,23 @@ def _make_repo(tmp_path, with_templates=True):
         "survey-robustness.schema.json",
         "engine-run.schema.json",
         "automated-triage.schema.json",
+        "radial-velocity-observations.schema.json",
+        "rv-keplerian-fit.schema.json",
+        "planetsynth-characterization.schema.json",
+        "anomalous-transit-hypothesis.schema.json",
+        "planetsynth-interpretation.schema.json",
+        "pyppluss-hypothesis-test.schema.json",
+        "statistical-vetting-evidence.schema.json",
+        "decisive-rejection.schema.json",
+        "catalog-query-manifest.schema.json",
+        "catalog-raw-response-metadata.schema.json",
+        "catalog-snapshot.schema.json",
+        "catalog-stellar-parameters.schema.json",
+        "catalog-stellar-photometry.schema.json",
+        "catalog-archive-discovery.schema.json",
+        "catalog-contrast-curves.schema.json",
+        "catalog-context.schema.json",
+        "catalog-cross-match.schema.json",
     ):
         shutil.copy2(
             "schemas/{0}".format(name), tmp_path / "schemas" / name
@@ -65,6 +82,28 @@ def test_invalid_provenance_sidecar_is_flagged(tmp_path):
     report = _audit(repo)
     assert not report.ok
     assert any(v.rule == "schema-violation" for v in report.violations)
+
+
+def test_statistical_vetting_evidence_requires_candidate_owned_artifacts(tmp_path):
+    repo = _make_repo(tmp_path)
+    path = repo / "candidate" / "candidate-alpha" / "outputs" / "statistical_vetting_evidence.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "candidate_id": "another-candidate",
+                "generated_at": "2000-01-01T00:00:00Z",
+                "signal": None,
+                "status": "pass",
+                "diagnostics": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = _audit(repo)
+
+    assert any(violation.path == path.as_posix() for violation in report.violations)
 
 
 def test_valid_provenance_sidecar_passes(tmp_path):

@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/catalog-contrast-curves-1.0.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "candidate_id", "provider", "retrieval_id", "status", "snapshot_path", "snapshot_sha256", "record_type", "records"],
+  "properties": {"schema_version": {"const": 1}, "candidate_id": {"$ref": "#/$defs/id"}, "provider": {"$ref": "#/$defs/provider"}, "retrieval_id": {"$ref": "#/$defs/id"}, "status": {"enum": ["available", "empty", "unavailable", "ambiguous", "requires-authentication"]}, "snapshot_path": {"$ref": "#/$defs/path"}, "snapshot_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "record_type": {"const": "contrast-curves"}, "records": {"type": "array", "items": {"type": "object"}}},
+  "$defs": {"id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"}, "provider": {"enum": ["mast", "gaia", "simbad", "vizier", "nasa-exoplanet-archive", "irsa", "ztf", "exofop", "lamost-dr11", "smoka", "mast-hubble-jwst"]}, "path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"}}
+}

@@ -21,8 +21,13 @@ or hardcoded candidate constants.
 
 from __future__ import annotations
 
+import csv
+import hashlib
+import importlib
+import importlib.util
 import json
 import math
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -279,49 +284,233 @@ def _highpass_segments(
     return time[finite], residual[finite]
 
 
-def _try_pysyd_crosscheck(
+def _sha256(path: Path) -> str:
+    """Return the SHA-256 digest of one candidate-local artifact."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _adapter_run_dir(workspace: CandidateWorkspace, engine: str) -> Tuple[str, Path]:
+    """Create one unique candidate-local directory for an optional adapter run."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dt%H%M%S%f").lower()
+    run_id = "{0}-{1}".format(timestamp, engine)
+    run_dir = workspace.path / "runs" / engine / run_id
+    suffix = 1
+    while run_dir.exists():
+        run_id = "{0}-{1}-{2}".format(timestamp, engine, suffix)
+        run_dir = workspace.path / "runs" / engine / run_id
+        suffix += 1
+    run_dir.mkdir(parents=True)
+    return run_id, run_dir
+
+
+def _adapter_artifact(workspace: CandidateWorkspace, path: Path, role: Optional[str] = None) -> Dict[str, str]:
+    """Build a schema-compatible artifact record for a file below a workspace."""
+    relative = path.resolve().relative_to(workspace.path.resolve()).as_posix()
+    artifact = {"path": relative, "sha256": _sha256(path)}
+    if role is not None:
+        artifact["role"] = role
+    return artifact
+
+
+def _adapter_outputs(run_dir: Path, input_path: Path) -> List[Path]:
+    """Return adapter-produced files, excluding the generated adapter input."""
+    return sorted(
+        path for path in run_dir.rglob("*") if path.is_file() and path != input_path
+    )
+
+
+def _write_adapter_manifest(
+    workspace: CandidateWorkspace,
+    engine: str,
+    run_id: str,
+    run_dir: Path,
+    started_at: str,
+    runtime: Dict[str, str],
+    input_path: Path,
+    status: str,
+    failure: Optional[Dict[str, str]] = None,
+) -> Path:
+    """Write the engine-run record after hashing all candidate-local adapter files."""
+    output_paths = _adapter_outputs(run_dir, input_path)
+    manifest: Dict[str, Any] = {
+        "schema_version": 1,
+        "candidate_id": workspace.candidate_id,
+        "engine": engine,
+        "run_id": run_id,
+        "status": status,
+        "started_at": started_at,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "runtime": runtime,
+        "inputs": [_adapter_artifact(workspace, input_path, "adapter-input")],
+        "outputs": [_adapter_artifact(workspace, path) for path in output_paths],
+    }
+    if failure is not None:
+        manifest["failure"] = failure
+    manifest_path = run_dir / "engine-run.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return manifest_path
+
+
+def _runtime_version(module: Any, distribution: str) -> str:
+    """Return installed package metadata when available without requiring a dependency pin."""
+    try:
+        from importlib.metadata import version
+
+        return version(distribution)
+    except Exception:
+        module_version = getattr(module, "__version__", None)
+        return str(module_version) if module_version else "unknown"
+
+
+def _read_pysyd_estimates(path: Path) -> List[Dict[str, Any]]:
+    """Read pySYD's CSV result without adding a pandas runtime requirement."""
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        rows = []
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames:
+            raise ValueError("pySYD estimates have no CSV header")
+        for row in reader:
+            parsed: Dict[str, Any] = {}
+            for key, value in row.items():
+                if value is None or not value.strip():
+                    parsed[key] = None
+                    continue
+                try:
+                    number = float(value)
+                except ValueError:
+                    parsed[key] = value
+                    continue
+                if not math.isfinite(number):
+                    raise ValueError("pySYD estimates contain a non-finite value")
+                parsed[key] = number
+            rows.append(parsed)
+    return rows
+
+
+def _run_pysyd_adapter(
+    workspace: CandidateWorkspace,
     time: np.ndarray,
     flux: np.ndarray,
     numax_min_uhz: float,
     numax_max_uhz: float,
-    working_dir: Path,
-) -> Optional[Dict[str, Any]]:
-    """Best-effort pySYD block cross-check; None when pySyD is unavailable."""
+) -> Dict[str, Any]:
+    """Run pySYD in a candidate-local directory and normalize its adapter status."""
+    started_at = datetime.now(timezone.utc).isoformat()
+    run_id, run_dir = _adapter_run_dir(workspace, "pysyd")
+    input_path = run_dir / "asteroseismic_input_LC.txt"
+    np.savetxt(
+        input_path,
+        np.column_stack((time, np.asarray(flux) / 1e6)),
+        fmt="%.10f %.12f",
+    )
+    runtime = {"kind": "direct", "version": "unavailable", "executable": "pysyd"}
     try:
-        import pysyd
-    except ImportError:
-        return None
-    try:
-        working_dir.mkdir(parents=True, exist_ok=True)
-        input_path = working_dir / "asteroseismic_input_LC.txt"
-        np.savetxt(
-            input_path,
-            np.column_stack((time, np.asarray(flux) / 1e6)),
-            fmt="%.10f %.12f",
+        pysyd = importlib.import_module("pysyd")
+    except ModuleNotFoundError as exc:
+        manifest_path = _write_adapter_manifest(
+            workspace, "pysyd", run_id, run_dir, started_at, runtime, input_path,
+            "unavailable", {"code": "module-unavailable", "message": str(exc)},
         )
-        main_func = getattr(pysyd, "main", None)
-        if not callable(main_func):
-            return None
-        main_func(["-f", str(input_path)])
-        estimates_path = working_dir / "estimates.csv"
-        if not estimates_path.is_file():
-            return None
-        import pandas as pd
+        return {"status": "unavailable", "manifest_path": manifest_path, "crosscheck": None}
+    except Exception as exc:
+        manifest_path = _write_adapter_manifest(
+            workspace, "pysyd", run_id, run_dir, started_at, runtime, input_path,
+            "failed", {"code": "module-import-failed", "message": str(exc)},
+        )
+        return {"status": "failed", "manifest_path": manifest_path, "crosscheck": None}
 
-        frame = pd.read_csv(estimates_path)
-        rows = json.loads(frame.to_json(orient="records"))
-        return {
+    runtime["version"] = _runtime_version(pysyd, "pysyd")
+    main_func = getattr(pysyd, "main", None)
+    if not callable(main_func):
+        manifest_path = _write_adapter_manifest(
+            workspace, "pysyd", run_id, run_dir, started_at, runtime, input_path,
+            "unavailable", {
+                "code": "unsupported-interface",
+                "message": "The installed pySYD module does not expose a callable main entry point.",
+            },
+        )
+        return {"status": "unavailable", "manifest_path": manifest_path, "crosscheck": None}
+
+    try:
+        previous_directory = Path.cwd()
+        try:
+            os.chdir(run_dir)
+            main_func(["-f", str(input_path)])
+        finally:
+            os.chdir(previous_directory)
+        estimates_path = run_dir / "estimates.csv"
+        if not estimates_path.is_file():
+            manifest_path = _write_adapter_manifest(
+                workspace, "pysyd", run_id, run_dir, started_at, runtime, input_path,
+                "unavailable", {
+                    "code": "unsupported-output-interface",
+                    "message": "pySYD completed without its documented estimates.csv output.",
+                },
+            )
+            return {"status": "unavailable", "manifest_path": manifest_path, "crosscheck": None}
+        crosscheck = {
             "pipeline": "pysyd",
-            "estimates": rows,
+            "estimates": _read_pysyd_estimates(estimates_path),
             "search_range_uhz": [float(numax_min_uhz), float(numax_max_uhz)],
         }
     except Exception as exc:
-        import warnings
-        warnings.warn(
-            "pySYD crosscheck failed: {0!r} — falling back to whitened-GLS result".format(exc),
-            stacklevel=2,
+        manifest_path = _write_adapter_manifest(
+            workspace, "pysyd", run_id, run_dir, started_at, runtime, input_path,
+            "failed", {"code": "adapter-execution-failed", "message": str(exc)},
         )
-        return None
+        return {"status": "failed", "manifest_path": manifest_path, "crosscheck": None}
+
+    manifest_path = _write_adapter_manifest(
+        workspace, "pysyd", run_id, run_dir, started_at, runtime, input_path, "succeeded"
+    )
+    return {"status": "succeeded", "manifest_path": manifest_path, "crosscheck": crosscheck}
+
+
+def _record_tess_atl_adapter(workspace: CandidateWorkspace) -> Dict[str, Any]:
+    """Record tess-atl availability without querying or inventing stellar values."""
+    started_at = datetime.now(timezone.utc).isoformat()
+    run_id, run_dir = _adapter_run_dir(workspace, "tess-atl")
+    input_path = run_dir / "adapter-request.json"
+    input_path.write_text(
+        json.dumps(
+            {
+                "adapter": "tess-atl",
+                "purpose": "availability and interface provenance only",
+                "network_requests": "not-attempted",
+            },
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    runtime = {"kind": "external", "version": "unavailable", "executable": "tess-atl"}
+    try:
+        module_spec = importlib.util.find_spec("tess_atl")
+    except Exception as exc:
+        manifest_path = _write_adapter_manifest(
+            workspace, "tess-atl", run_id, run_dir, started_at, runtime, input_path,
+            "failed", {"code": "availability-check-failed", "message": str(exc)},
+        )
+        return {"status": "failed", "manifest_path": manifest_path}
+    if module_spec is None:
+        failure = {
+            "code": "module-unavailable",
+            "message": "No local tess-atl module is installed; no request was attempted.",
+        }
+    else:
+        failure = {
+            "code": "unsupported-interface",
+            "message": "A tess-atl module is present, but no supported local analysis interface is configured; no request was attempted.",
+        }
+        runtime["version"] = _runtime_version(None, "tess-atl")
+    manifest_path = _write_adapter_manifest(
+        workspace, "tess-atl", run_id, run_dir, started_at, runtime, input_path,
+        "unavailable", failure,
+    )
+    return {"status": "unavailable", "manifest_path": manifest_path}
 
 
 def _synthetic_oscillation_table() -> Dict[str, np.ndarray]:
@@ -407,10 +596,11 @@ def run_asteroseismology(
         prior_is_catalog=stellar_params.get("source") == "candidate-data",
     )
 
-    pysyd_dir = outputs_dir / "pysyd"
-    pysyd_result = _try_pysyd_crosscheck(
-        detrended_time, detrended_flux, numax_min_uhz, numax_max_uhz, pysyd_dir
+    pysyd_adapter = _run_pysyd_adapter(
+        workspace, detrended_time, detrended_flux, numax_min_uhz, numax_max_uhz
     )
+    tess_atl_adapter = _record_tess_atl_adapter(workspace)
+    pysyd_result = pysyd_adapter["crosscheck"]
 
     payload = {
         "schema_version": "1.0",
@@ -445,6 +635,16 @@ def run_asteroseismology(
             "validity": sanity,
         },
         "pysyd_crosscheck": pysyd_result,
+        "external_adapters": {
+            "pysyd": {
+                "status": pysyd_adapter["status"],
+                "manifest_path": pysyd_adapter["manifest_path"].relative_to(workspace.path).as_posix(),
+            },
+            "tess-atl": {
+                "status": tess_atl_adapter["status"],
+                "manifest_path": tess_atl_adapter["manifest_path"].relative_to(workspace.path).as_posix(),
+            },
+        },
         "caveat": (
             "Candidate envelope peaks and spacing correlations are preliminary "
             "diagnostics; calibrated detection probabilities require null "

@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/catalog-context-1.0.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "candidate_id", "generated_at", "retrievals"],
+  "properties": {"schema_version": {"const": 1}, "candidate_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"}, "generated_at": {"type": "string", "format": "date-time"}, "retrievals": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["provider", "retrieval_id", "status", "retrieved_at", "expires_at", "citation", "manifest_path", "manifest_sha256"], "properties": {"provider": {"type": "string"}, "retrieval_id": {"type": "string"}, "status": {"enum": ["available", "empty", "unavailable", "ambiguous", "requires-authentication"]}, "retrieved_at": {"type": "string", "format": "date-time"}, "expires_at": {"type": "string", "format": "date-time"}, "citation": {"type": "string"}, "manifest_path": {"type": "string"}, "manifest_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}}}}
+}

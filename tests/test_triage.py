@@ -69,6 +69,75 @@ def _setup_synthetic_workspace(tmp_path: Path, candidate_id: str = "synth-triage
     return cand_path
 
 
+def _write_passing_pre_vetting_artifacts(candidate_path: Path, candidate_id: str) -> None:
+    """Write minimal candidate-data diagnostic reports for routing tests."""
+    outputs = candidate_path / "outputs"
+    outputs.mkdir(parents=True, exist_ok=True)
+    (outputs / "fixed_ephemeris_screen.json").write_text(
+        json.dumps(
+            {
+                "candidate_id": candidate_id,
+                "source": "candidate-data",
+                "ephemeris": {"period_days": 2.5},
+                "screen": {
+                    "primary": {"status": "measured"},
+                    "odd_even": {
+                        "z": 0.2,
+                        "consistent_at_threshold": True,
+                        "consistency_threshold_sigma": 3.0,
+                    },
+                    "half_phase_control": {"depth_significance_sigma": 0.1},
+                    "double_period_hypothesis": {
+                        "alternating_event": {"depth_significance_sigma": 0.1}
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (outputs / "archival_vetting_report.json").write_text(
+        json.dumps(
+            {
+                "candidate_id": candidate_id,
+                "gaia_astrometry": {"validated": True, "query_status": "ok", "ruwe": 1.0},
+                "scientific_assessment": {
+                    "1_is_hidden_binary": {"answer": False},
+                    "2_has_nearby_contaminants": {"answer": False},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (outputs / "prf_localization_results.json").write_text(
+        json.dumps(
+            {
+                "source": "candidate-data",
+                "summary": {
+                    "conclusion": "target_dominant_among_modeled_sources",
+                    "median_target_to_other_ratio": 2.0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (outputs / "stellar_activity_results.json").write_text(
+        json.dumps(
+            {"source": "candidate-data", "rotation_period_days": 7.0, "rotation_period_std_days": 0.2}
+        ),
+        encoding="utf-8",
+    )
+    (outputs / "dilution_sensitivity_results.json").write_text(
+        json.dumps(
+            {
+                "source": "candidate-data",
+                "depth_stability": {"interpretation": "stable", "max_variation_relative_to_median": 0.1},
+                "contamination": {"availability": "available", "contamination_factor": 0.01},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_engine_run_generates_valid_schema_manifest(tmp_path: Path):
     _setup_synthetic_workspace(tmp_path, "synth-engine-manifest")
     cand = load_candidate(tmp_path, "synth-engine-manifest")
@@ -102,10 +171,10 @@ def test_engine_report_lists_completed_runs(tmp_path: Path):
 
 
 def test_automated_triage_pass_verdict(tmp_path: Path):
-    _setup_synthetic_workspace(tmp_path, "synth-triage-pass")
+    candidate_path = _setup_synthetic_workspace(tmp_path, "synth-triage-pass")
     cand = load_candidate(tmp_path, "synth-triage-pass")
 
-    run_engine(cand, "screen")
+    _write_passing_pre_vetting_artifacts(candidate_path, cand.candidate_id)
     triage_path = run_automated_triage(cand)
     assert triage_path.is_file()
 
@@ -113,7 +182,14 @@ def test_automated_triage_pass_verdict(tmp_path: Path):
     assert triage_data["schema_version"] == 1
     assert triage_data["candidate_id"] == "synth-triage-pass"
     assert triage_data["status"] == "pass"
-    assert len(triage_data["records"]) >= 1
+    assert len(triage_data["records"]) == 5
+    evidence = json.loads(
+        (candidate_path / "outputs" / "statistical_vetting_evidence.json").read_text(encoding="utf-8")
+    )
+    assert evidence["status"] == "pass"
+    assert {item["name"] for item in evidence["diagnostics"]} == {
+        "screening", "archive", "localization", "activity", "dilution"
+    }
 
     report = IsolationReport()
     validate_schemas(tmp_path, report)
@@ -124,16 +200,21 @@ def test_automated_triage_review_required_on_odd_even_anomaly(tmp_path: Path):
     cand_path = _setup_synthetic_workspace(tmp_path, "synth-triage-anomaly")
     cand = load_candidate(tmp_path, "synth-triage-anomaly")
     manifest_path = run_engine(cand, "screen")
+    _write_passing_pre_vetting_artifacts(cand_path, cand.candidate_id)
 
     # Manually plant an odd-even failure in screening outputs
     outputs_dir = cand_path / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
     screen_artifact = {
+        "candidate_id": cand.candidate_id,
+        "source": "candidate-data",
         "screen": {
+            "primary": {"status": "measured"},
             "odd_even": {
                 "status": "measured",
                 "z": 4.5,
                 "consistent_at_threshold": False,
+                "consistency_threshold_sigma": 3.0,
             }
         }
     }
@@ -190,6 +271,21 @@ def test_engine_run_failure_is_recorded_and_returns_nonzero(tmp_path: Path, caps
     assert manifest["failure"]["code"]
 
 
+def test_engine_run_with_no_output_is_blocked_without_scientific_artifacts(tmp_path: Path, monkeypatch):
+    _setup_synthetic_workspace(tmp_path, "synth-engine-no-output")
+    cand = load_candidate(tmp_path, "synth-engine-no-output")
+    monkeypatch.setattr("exonym.screening.run_fixed_ephemeris_screen", lambda *args, **kwargs: None)
+
+    manifest_path = run_engine(cand, "screen")
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["status"] == "blocked"
+    assert manifest["outputs"] == []
+    assert manifest["failure"]["code"] == "no-output-artifacts"
+    assert not (cand.path / "outputs" / "fixed_ephemeris_screen.json").exists()
+    assert not list((cand.path / "claims").glob("*.json"))
+
+
 def test_automated_triage_blocks_without_manifest_backed_evidence(tmp_path: Path):
     _setup_synthetic_workspace(tmp_path, "synth-triage-blocked")
     cand = load_candidate(tmp_path, "synth-triage-blocked")
@@ -199,3 +295,75 @@ def test_automated_triage_blocks_without_manifest_backed_evidence(tmp_path: Path
     triage_data = json.loads(triage_path.read_text(encoding="utf-8"))
     assert triage_data["status"] == "blocked"
     assert triage_data["records"][0]["status"] == "blocked"
+
+
+def test_activity_harmonic_requires_human_review(tmp_path: Path):
+    from exonym.statistical_vetting import build_statistical_vetting_evidence
+
+    candidate_path = _setup_synthetic_workspace(tmp_path, "synth-activity-harmonic")
+    cand = load_candidate(tmp_path, "synth-activity-harmonic")
+    _write_passing_pre_vetting_artifacts(candidate_path, cand.candidate_id)
+    (candidate_path / "outputs" / "stellar_activity_results.json").write_text(
+        json.dumps(
+            {
+                "source": "candidate-data",
+                "rotation_period_days": 5.0,
+                "rotation_period_std_days": 0.2,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    evidence = json.loads(build_statistical_vetting_evidence(cand).read_text(encoding="utf-8"))
+
+    activity = next(record for record in evidence["diagnostics"] if record["name"] == "activity")
+    assert activity["status"] == "review-required"
+    assert evidence["status"] == "review-required"
+
+
+def test_vetting_readiness_refuses_review_required_evidence_without_claims(tmp_path: Path):
+    from exonym.statistical_vetting import require_vetting_readiness
+
+    candidate_path = _setup_synthetic_workspace(tmp_path, "synth-vet-review")
+    cand = load_candidate(tmp_path, "synth-vet-review")
+    run_engine(cand, "screen")
+    _write_passing_pre_vetting_artifacts(candidate_path, cand.candidate_id)
+    localization = candidate_path / "outputs" / "prf_localization_results.json"
+    localization.write_text(
+        json.dumps({"source": "candidate-data", "summary": {"conclusion": "inconclusive_no_competing_sources_modeled"}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="current routing is review-required"):
+        require_vetting_readiness(cand)
+
+    triage = json.loads((candidate_path / "decisions" / "automated_triage.json").read_text(encoding="utf-8"))
+    assert triage["status"] == "review-required"
+    assert not list((candidate_path / "claims").glob("*.json"))
+
+
+def test_decisive_rejection_prohibits_triceratops(tmp_path: Path):
+    from exonym.statistical_vetting import record_decisive_rejection, require_vetting_readiness
+
+    candidate_path = _setup_synthetic_workspace(tmp_path, "synth-vet-rejection")
+    cand = load_candidate(tmp_path, "synth-vet-rejection")
+    evidence = candidate_path / "outputs" / "decisive.json"
+    evidence.write_text('{"result": "synthetic rejection"}\n', encoding="utf-8")
+    record_decisive_rejection(cand, "Synthetic decisive alias.", "outputs/decisive.json")
+
+    with pytest.raises(RuntimeError, match="decisive rejection"):
+        require_vetting_readiness(cand)
+
+
+def test_decisive_rejection_rejects_evidence_outside_the_candidate_workspace(tmp_path: Path):
+    from exonym.statistical_vetting import record_decisive_rejection
+
+    candidate_path = _setup_synthetic_workspace(tmp_path, "synth-rejection-boundary")
+    cand = load_candidate(tmp_path, "synth-rejection-boundary")
+    outside_evidence = tmp_path / "outside.json"
+    outside_evidence.write_text('{"synthetic": true}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="inside the candidate workspace"):
+        record_decisive_rejection(cand, "Synthetic boundary check.", "../outside.json")
+
+    assert not (candidate_path / "decisions" / "decisive_rejection.json").exists()

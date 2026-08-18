@@ -32,6 +32,23 @@ def _repo(tmp_path):
         "survey-robustness.schema.json",
         "engine-run.schema.json",
         "automated-triage.schema.json",
+        "radial-velocity-observations.schema.json",
+        "rv-keplerian-fit.schema.json",
+        "planetsynth-characterization.schema.json",
+        "anomalous-transit-hypothesis.schema.json",
+        "planetsynth-interpretation.schema.json",
+        "pyppluss-hypothesis-test.schema.json",
+        "statistical-vetting-evidence.schema.json",
+        "decisive-rejection.schema.json",
+        "catalog-query-manifest.schema.json",
+        "catalog-raw-response-metadata.schema.json",
+        "catalog-snapshot.schema.json",
+        "catalog-stellar-parameters.schema.json",
+        "catalog-stellar-photometry.schema.json",
+        "catalog-archive-discovery.schema.json",
+        "catalog-contrast-curves.schema.json",
+        "catalog-context.schema.json",
+        "catalog-cross-match.schema.json",
     ):
         shutil.copy2("schemas/{0}".format(name), tmp_path / "schemas" / name)
     (tmp_path / "requirements-lock.txt").write_text(
@@ -129,11 +146,33 @@ def test_cli_vet_command(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(
         "exonym.vetting.tricera_parse.run_triceratops_simulation", fake_run_triceratops
     )
+    monkeypatch.setattr(
+        "exonym.statistical_vetting.require_vetting_readiness", lambda candidate, signal=None: candidate.path
+    )
 
     assert main(root + ["vet", "candidate-alpha", "--n-draws", "100"]) == 0
     assert calls == [{"candidate": "candidate-alpha", "n_draws": 100, "signal": None}]
     output = capsys.readouterr().out
     assert "triceratops_report.json" in output
+
+
+def test_cli_vet_blocks_before_triceratops_without_required_evidence(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    root = ["--root", str(repo)]
+    main(root + ["init", "candidate-alpha", "--tic", "123456789"])
+    called = []
+    monkeypatch.setattr(
+        "exonym.vetting.tricera_parse.run_triceratops_simulation",
+        lambda *args, **kwargs: called.append(True),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(root + ["vet", "candidate-alpha"])
+
+    assert exc_info.value.code == 2
+    assert called == []
+    assert (repo / "candidate" / "candidate-alpha" / "outputs" / "statistical_vetting_evidence.json").is_file()
+    assert (repo / "candidate" / "candidate-alpha" / "decisions" / "automated_triage.json").is_file()
 
 
 def test_cli_search_forwards_tls_engine(tmp_path, capsys, monkeypatch):
@@ -233,6 +272,18 @@ def test_cli_fit_command(tmp_path, capsys):
     root = ["--root", str(repo)]
     main(_init_alpha(repo))
     assert main(root + ["fit", "candidate-alpha", "--n-samples", "200"]) == 0
+    assert "mcmc_transit_fit.json" in capsys.readouterr().out
+
+
+def test_cli_fit_passes_dynesty_sampler(tmp_path, capsys, mocker):
+    repo = _repo(tmp_path)
+    root = ["--root", str(repo)]
+    main(_init_alpha(repo))
+    output = repo / "candidate" / "candidate-alpha" / "outputs" / "mcmc_transit_fit.json"
+    mock_fit = mocker.patch("exonym.transit_fit.run_mcmc_transit_fit", return_value=output)
+
+    assert main(root + ["fit", "candidate-alpha", "--sampler", "dynesty"]) == 0
+    assert mock_fit.call_args.kwargs["sampler"] == "dynesty"
     assert "mcmc_transit_fit.json" in capsys.readouterr().out
 
 

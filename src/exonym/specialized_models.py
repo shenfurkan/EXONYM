@@ -1,0 +1,527 @@
+"""Candidate-local adapters for optional specialized physical models.
+
+``planetsynth`` is limited to descriptive giant-planet cooling and evolution
+interpretation. ``pyPplusS`` is limited to testing a declared anomalous-transit
+hypothesis. Neither adapter writes claims, changes lifecycle state, or creates a
+scientific disposition.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import importlib
+import importlib.util
+import json
+import math
+import numbers
+import os
+import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from importlib import metadata
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+
+from .resources import read_schema_text
+from .workspace import CandidateWorkspace
+
+
+PLANETSYNTH_ENGINE = "planetsynth"
+PYPPLUSS_ENGINE = "pyppluss"
+PLANETSYNTH_INPUT = Path("data/external/planetsynth_characterization.json")
+PYPPLUSS_INPUT = Path("data/external/anomalous_transit_hypothesis.json")
+PLANETSYNTH_OUTPUT_PREFIX = "planetsynth_interpretation"
+PYPPLUSS_OUTPUT_PREFIX = "pyppluss_hypothesis_test"
+MAX_INPUT_BYTES = 5 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class AdapterRun:
+    """Paths and final status for one optional adapter invocation."""
+
+    status: str
+    manifest_path: Path
+    report_path: Optional[Path]
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _reject_nonfinite_constant(value: str) -> object:
+    raise ValueError("non-finite JSON number: {0}".format(value))
+
+
+def _parse_finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite JSON number")
+    return parsed
+
+
+def _reject_duplicate_keys(pairs: Sequence[Tuple[str, object]]) -> Dict[str, object]:
+    parsed: Dict[str, object] = {}
+    for key, value in pairs:
+        if key in parsed:
+            raise ValueError("duplicate JSON key: {0}".format(key))
+        parsed[key] = value
+    return parsed
+
+
+def _read_input(workspace: CandidateWorkspace, relative_path: Path, schema_name: str) -> Tuple[Path, Dict[str, Any]]:
+    """Load one fixed candidate-owned JSON input after strict schema validation."""
+    path = workspace.path / relative_path
+    if not path.is_file() or path.is_symlink():
+        raise FileNotFoundError("missing candidate-owned adapter input: {0}".format(relative_path.as_posix()))
+    if path.stat().st_size > MAX_INPUT_BYTES:
+        raise ValueError("adapter input exceeds the maximum supported JSON size")
+    try:
+        payload = json.loads(
+            path.read_text(encoding="utf-8"),
+            parse_constant=_reject_nonfinite_constant,
+            parse_float=_parse_finite_float,
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("adapter input is not valid finite UTF-8 JSON: {0}".format(exc)) from exc
+    try:
+        import jsonschema
+    except ImportError as exc:
+        raise RuntimeError("jsonschema is required to validate specialized-model inputs") from exc
+    schema = json.loads(read_schema_text(workspace.repository_root, schema_name))
+    try:
+        jsonschema.validate(payload, schema, format_checker=jsonschema.FormatChecker())
+    except jsonschema.ValidationError as exc:
+        raise ValueError("adapter input schema violation: {0}".format(exc.message)) from exc
+    if not isinstance(payload, dict) or payload.get("candidate_id") != workspace.candidate_id:
+        raise ValueError("adapter input candidate_id does not match the workspace")
+    return path, payload
+
+
+def _finite_value(value: object, label: str) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("{0} must be a finite number".format(label)) from exc
+    if not math.isfinite(numeric):
+        raise ValueError("{0} must be a finite number".format(label))
+    return numeric
+
+
+def _validate_planetsynth_applicability(payload: Mapping[str, Any]) -> None:
+    """Reject characterization outside the declared giant-planet model domain.
+
+    The adapter accepts masses from 0.1 to 20 Jupiter masses, radii from 0.5 to
+    2.5 Jupiter radii, ages from 0.001 to 20 Gyr, and equilibrium temperatures
+    from 0 to 3000 K. These conservative bounds prevent extrapolation from being
+    presented as a model result.
+    """
+    characterization = payload["characterization"]
+    mass_mjup = _finite_value(characterization["mass_mjup"]["value"], "mass_mjup")
+    radius_rjup = _finite_value(characterization["radius_rjup"]["value"], "radius_rjup")
+    age_gyr = _finite_value(characterization["age_gyr"]["value"], "age_gyr")
+    temperature_k = _finite_value(
+        characterization["equilibrium_temperature_k"]["value"], "equilibrium_temperature_k"
+    )
+    if not 0.1 <= mass_mjup <= 20.0:
+        raise ValueError("planetsynth applicability requires mass_mjup between 0.1 and 20")
+    if not 0.5 <= radius_rjup <= 2.5:
+        raise ValueError("planetsynth applicability requires radius_rjup between 0.5 and 2.5")
+    if not 0.001 <= age_gyr <= 20.0:
+        raise ValueError("planetsynth applicability requires age_gyr between 0.001 and 20")
+    if not 0.0 <= temperature_k <= 3000.0:
+        raise ValueError("planetsynth applicability requires equilibrium_temperature_k between 0 and 3000")
+
+
+def _validate_pyppluss_applicability(payload: Mapping[str, Any]) -> None:
+    """Reject data and geometry outside this adapter's transit-model domain."""
+    observation = payload["observation"]
+    time_days = observation["time_days"]["values"]
+    flux = observation["normalized_flux"]["values"]
+    if len(time_days) != len(flux):
+        raise ValueError("anomalous-transit time and normalized-flux arrays must have equal length")
+    previous: Optional[float] = None
+    for index, value in enumerate(time_days):
+        current = _finite_value(value, "time_days[{0}]".format(index))
+        if previous is not None and current <= previous:
+            raise ValueError("anomalous-transit time_days values must be strictly increasing")
+        previous = current
+    for index, value in enumerate(flux):
+        current = _finite_value(value, "normalized_flux[{0}]".format(index))
+        if not 0.5 <= current <= 1.5:
+            raise ValueError("pyPplusS applicability requires normalized flux between 0.5 and 1.5")
+    hypothesis = payload["hypothesis"]
+    if hypothesis["model"] == "ringed-planet":
+        planet_radius = _finite_value(hypothesis["planet_radius_ratio"], "planet_radius_ratio")
+        ring_inner = _finite_value(hypothesis["ring_inner_radius_ratio"], "ring_inner_radius_ratio")
+        ring_outer = _finite_value(hypothesis["ring_outer_radius_ratio"], "ring_outer_radius_ratio")
+        if not planet_radius < ring_inner < ring_outer:
+            raise ValueError("ringed-transit applicability requires planet_radius_ratio < ring_inner_radius_ratio < ring_outer_radius_ratio")
+
+
+def _finite_json(value: Any) -> Any:
+    """Return a finite JSON-compatible external result or reject it before writing."""
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, numbers.Real):
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            raise ValueError("external adapter result contains a non-finite number")
+        return numeric
+    if isinstance(value, Mapping):
+        return {str(key): _finite_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite_json(item) for item in value]
+    raise ValueError("external adapter result is not JSON-compatible")
+
+
+def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
+
+
+def _create_run_dir(workspace: CandidateWorkspace, engine: str) -> Tuple[str, Path]:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dt%H%M%S%f").lower()
+    run_id = "{0}-{1}".format(timestamp, engine)
+    run_dir = workspace.path / "runs" / engine / run_id
+    suffix = 1
+    while run_dir.exists():
+        run_id = "{0}-{1}-{2}".format(timestamp, engine, suffix)
+        run_dir = workspace.path / "runs" / engine / run_id
+        suffix += 1
+    run_dir.mkdir(parents=True)
+    return run_id, run_dir
+
+
+def _artifact(workspace: CandidateWorkspace, path: Path, role: str) -> Dict[str, str]:
+    return {
+        "path": path.resolve().relative_to(workspace.path.resolve()).as_posix(),
+        "sha256": _sha256(path),
+        "role": role,
+    }
+
+
+def _run_in_directory(run_dir: Path, function: Any, *args: Any, **kwargs: Any) -> Any:
+    """Run an optional package with relative scratch files confined to its run directory."""
+    previous_directory = Path.cwd()
+    try:
+        os.chdir(run_dir)
+        return function(*args, **kwargs)
+    finally:
+        os.chdir(previous_directory)
+
+
+def _clear_partial_run_outputs(run_dir: Path) -> None:
+    """Remove package-created files after a failed or unsupported invocation."""
+    for path in sorted(run_dir.rglob("*"), reverse=True):
+        if path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            path.rmdir()
+
+
+def _package_output_paths(run_dir: Path, raw_path: Path) -> List[Path]:
+    """Return package-created files for manifest hashing, excluding the normalized raw result."""
+    return sorted(path for path in run_dir.rglob("*") if path.is_file() and path != raw_path)
+
+
+def _write_manifest(
+    workspace: CandidateWorkspace,
+    engine: str,
+    run_id: str,
+    run_dir: Path,
+    started_at: str,
+    runtime: Mapping[str, str],
+    input_path: Path,
+    status: str,
+    output_paths: Sequence[Tuple[Path, str]],
+    failure: Optional[Mapping[str, str]] = None,
+) -> Path:
+    manifest: Dict[str, Any] = {
+        "schema_version": 1,
+        "candidate_id": workspace.candidate_id,
+        "engine": engine,
+        "run_id": run_id,
+        "status": status,
+        "started_at": started_at,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "runtime": dict(runtime),
+        "inputs": [_artifact(workspace, input_path, "declared-candidate-input")],
+        "outputs": [_artifact(workspace, path, role) for path, role in output_paths],
+    }
+    if failure is not None:
+        manifest["failure"] = dict(failure)
+    manifest_path = run_dir / "engine-run.json"
+    _write_json(manifest_path, manifest)
+    return manifest_path
+
+
+def _resolve_runtime(module_name: str, distribution: str) -> Tuple[Dict[str, str], Any]:
+    """Verify installed metadata and Python compatibility before importing a package."""
+    try:
+        package_metadata = metadata.metadata(distribution)
+        package_version = metadata.version(distribution)
+    except metadata.PackageNotFoundError as exc:
+        raise LookupError("module-unavailable: {0}".format(exc)) from exc
+    requires_python = package_metadata.get("Requires-Python")
+    if not requires_python:
+        raise LookupError("runtime-metadata-missing: installed package has no Requires-Python metadata")
+    try:
+        from packaging.specifiers import SpecifierSet
+        from packaging.version import Version
+
+        current_python = Version("{0}.{1}.{2}".format(*sys.version_info[:3]))
+        if current_python not in SpecifierSet(requires_python):
+            raise LookupError(
+                "python-version-unsupported: package requires Python {0}".format(requires_python)
+            )
+    except ImportError as exc:
+        raise LookupError("runtime-compatibility-unavailable: packaging is unavailable") from exc
+    except (TypeError, ValueError) as exc:
+        raise LookupError("runtime-metadata-invalid: invalid Requires-Python metadata") from exc
+    if importlib.util.find_spec(module_name) is None:
+        raise LookupError("module-unavailable: package metadata exists but module is not importable")
+    return (
+        {"kind": "direct", "version": str(package_version), "executable": module_name},
+        {"package": distribution, "version": str(package_version), "python_requires": requires_python},
+    )
+
+
+def _unavailable_run(
+    workspace: CandidateWorkspace,
+    engine: str,
+    input_path: Path,
+    started_at: str,
+    code: str,
+    message: str,
+    runtime: Optional[Mapping[str, str]] = None,
+    run_id: Optional[str] = None,
+    run_dir: Optional[Path] = None,
+) -> AdapterRun:
+    if run_id is None or run_dir is None:
+        run_id, run_dir = _create_run_dir(workspace, engine)
+    manifest_path = _write_manifest(
+        workspace,
+        engine,
+        run_id,
+        run_dir,
+        started_at,
+        runtime or {"kind": "direct", "version": "unavailable", "executable": engine},
+        input_path,
+        "unavailable",
+        [],
+        {"code": code, "message": message},
+    )
+    return AdapterRun("unavailable", manifest_path, None)
+
+
+def run_planetsynth(workspace: CandidateWorkspace) -> AdapterRun:
+    """Run a declared giant-planet cooling interpretation when planetsynth supports it.
+
+    The only supported package interface is ``evolve_giant_planet`` with keyword
+    arguments ``mass_mjup``, ``radius_rjup``, ``age_gyr``, and
+    ``equilibrium_temperature_k``. It must return finite ``radius_rjup`` and
+    ``luminosity_lsun`` values in a mapping.
+    """
+    input_path, payload = _read_input(
+        workspace, PLANETSYNTH_INPUT, "planetsynth-characterization.schema.json"
+    )
+    _validate_planetsynth_applicability(payload)
+    started_at = datetime.now(timezone.utc).isoformat()
+    try:
+        runtime, runtime_report = _resolve_runtime("planetsynth", "planetsynth")
+    except LookupError as exc:
+        code, _, message = str(exc).partition(": ")
+        return _unavailable_run(workspace, PLANETSYNTH_ENGINE, input_path, started_at, code, message or code)
+    run_id, run_dir = _create_run_dir(workspace, PLANETSYNTH_ENGINE)
+    try:
+        module = _run_in_directory(run_dir, importlib.import_module, "planetsynth")
+    except Exception as exc:
+        _clear_partial_run_outputs(run_dir)
+        manifest_path = _write_manifest(
+            workspace, PLANETSYNTH_ENGINE, run_id, run_dir, started_at, runtime, input_path,
+            "failed", [], {"code": "module-import-failed", "message": str(exc)},
+        )
+        return AdapterRun("failed", manifest_path, None)
+    model = getattr(module, "evolve_giant_planet", None)
+    if not callable(model):
+        _clear_partial_run_outputs(run_dir)
+        return _unavailable_run(
+            workspace,
+            PLANETSYNTH_ENGINE,
+            input_path,
+            started_at,
+            "unsupported-interface",
+            "planetsynth must expose callable evolve_giant_planet; no interpretation was written.",
+            runtime,
+            run_id,
+            run_dir,
+        )
+    characterization = payload["characterization"]
+    try:
+        result = _finite_json(
+            _run_in_directory(
+                run_dir,
+                model,
+                mass_mjup=characterization["mass_mjup"]["value"],
+                radius_rjup=characterization["radius_rjup"]["value"],
+                age_gyr=characterization["age_gyr"]["value"],
+                equilibrium_temperature_k=characterization["equilibrium_temperature_k"]["value"],
+            )
+        )
+        if not isinstance(result, dict):
+            raise ValueError("planetsynth result must be a mapping")
+        radius_rjup = _finite_value(result.get("radius_rjup"), "planetsynth radius_rjup")
+        luminosity_lsun = _finite_value(result.get("luminosity_lsun"), "planetsynth luminosity_lsun")
+        if radius_rjup <= 0 or luminosity_lsun < 0:
+            raise ValueError("planetsynth returned physically invalid radius or luminosity")
+    except Exception as exc:
+        _clear_partial_run_outputs(run_dir)
+        manifest_path = _write_manifest(
+            workspace, PLANETSYNTH_ENGINE, run_id, run_dir, started_at, runtime, input_path,
+            "failed", [], {"code": "adapter-execution-failed", "message": str(exc)},
+        )
+        return AdapterRun("failed", manifest_path, None)
+    raw_path = run_dir / "raw_result.json"
+    _write_json(raw_path, result)
+    package_outputs = _package_output_paths(run_dir, raw_path)
+    report_path = workspace.path / "outputs" / "{0}.{1}.json".format(PLANETSYNTH_OUTPUT_PREFIX, run_id)
+    report = {
+        "schema_version": 1,
+        "candidate_id": workspace.candidate_id,
+        "run_id": run_id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "status": "succeeded",
+        "input_artifact": _artifact(workspace, input_path, "planetsynth-characterization"),
+        "raw_result_artifact": _artifact(workspace, raw_path, "planetsynth-raw-result"),
+        "runtime": runtime_report,
+        "interpretation": {
+            "radius": {"value": radius_rjup, "unit": "R_jup"},
+            "luminosity": {"value": luminosity_lsun, "unit": "L_sun"},
+        },
+        "caveat": "Cooling and evolution output is descriptive downstream interpretation, not a planet claim, validation result, or disposition.",
+    }
+    _write_json(report_path, report)
+    manifest_path = _write_manifest(
+        workspace,
+        PLANETSYNTH_ENGINE,
+        run_id,
+        run_dir,
+        started_at,
+        runtime,
+        input_path,
+        "succeeded",
+        [(raw_path, "planetsynth-raw-result")]
+        + [(path, "package-output") for path in package_outputs]
+        + [(report_path, "planetsynth-interpretation")],
+    )
+    return AdapterRun("succeeded", manifest_path, report_path)
+
+
+def run_pyppluss(workspace: CandidateWorkspace) -> AdapterRun:
+    """Test a declared anomalous-transit hypothesis with pyPplusS when supported.
+
+    The supported package interface is ``model_anomalous_transit(time_days=...,
+    hypothesis=...)``. It must return a mapping with a finite ``model_flux``
+    array matching the candidate-owned normalized-flux input length.
+    """
+    input_path, payload = _read_input(
+        workspace, PYPPLUSS_INPUT, "anomalous-transit-hypothesis.schema.json"
+    )
+    _validate_pyppluss_applicability(payload)
+    started_at = datetime.now(timezone.utc).isoformat()
+    try:
+        runtime, runtime_report = _resolve_runtime("pyppluss", "pyppluss")
+    except LookupError as exc:
+        code, _, message = str(exc).partition(": ")
+        return _unavailable_run(workspace, PYPPLUSS_ENGINE, input_path, started_at, code, message or code)
+    run_id, run_dir = _create_run_dir(workspace, PYPPLUSS_ENGINE)
+    try:
+        module = _run_in_directory(run_dir, importlib.import_module, "pyppluss")
+    except Exception as exc:
+        _clear_partial_run_outputs(run_dir)
+        manifest_path = _write_manifest(
+            workspace, PYPPLUSS_ENGINE, run_id, run_dir, started_at, runtime, input_path,
+            "failed", [], {"code": "module-import-failed", "message": str(exc)},
+        )
+        return AdapterRun("failed", manifest_path, None)
+    model = getattr(module, "model_anomalous_transit", None)
+    if not callable(model):
+        _clear_partial_run_outputs(run_dir)
+        return _unavailable_run(
+            workspace,
+            PYPPLUSS_ENGINE,
+            input_path,
+            started_at,
+            "unsupported-interface",
+            "pyPplusS must expose callable model_anomalous_transit; no hypothesis test was written.",
+            runtime,
+            run_id,
+            run_dir,
+        )
+    observation = payload["observation"]
+    try:
+        result = _finite_json(
+            _run_in_directory(
+                run_dir,
+                model,
+                time_days=observation["time_days"]["values"],
+                hypothesis=payload["hypothesis"],
+            )
+        )
+        if not isinstance(result, dict) or not isinstance(result.get("model_flux"), list):
+            raise ValueError("pyPplusS result must provide a model_flux array")
+        model_flux = result["model_flux"]
+        measured_flux = observation["normalized_flux"]["values"]
+        if len(model_flux) != len(measured_flux):
+            raise ValueError("pyPplusS model_flux length does not match the declared observation")
+        residuals = [float(measured) - _finite_value(modeled, "pyPplusS model_flux") for measured, modeled in zip(measured_flux, model_flux)]
+        rms = math.sqrt(sum(value * value for value in residuals) / len(residuals))
+        maximum = max(abs(value) for value in residuals)
+    except Exception as exc:
+        _clear_partial_run_outputs(run_dir)
+        manifest_path = _write_manifest(
+            workspace, PYPPLUSS_ENGINE, run_id, run_dir, started_at, runtime, input_path,
+            "failed", [], {"code": "adapter-execution-failed", "message": str(exc)},
+        )
+        return AdapterRun("failed", manifest_path, None)
+    raw_path = run_dir / "raw_result.json"
+    _write_json(raw_path, result)
+    package_outputs = _package_output_paths(run_dir, raw_path)
+    report_path = workspace.path / "outputs" / "{0}.{1}.json".format(PYPPLUSS_OUTPUT_PREFIX, run_id)
+    report = {
+        "schema_version": 1,
+        "candidate_id": workspace.candidate_id,
+        "run_id": run_id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "status": "succeeded",
+        "model": payload["hypothesis"]["model"],
+        "input_artifact": _artifact(workspace, input_path, "anomalous-transit-hypothesis"),
+        "raw_result_artifact": _artifact(workspace, raw_path, "pyppluss-raw-result"),
+        "runtime": runtime_report,
+        "fit_diagnostics": {
+            "rms_residual": {"value": rms, "unit": "relative_flux"},
+            "max_abs_residual": {"value": maximum, "unit": "relative_flux"},
+            "cadence_count": len(measured_flux),
+        },
+        "caveat": "A ringed or oblate transit comparison tests one declared hypothesis only. It does not establish a physical interpretation, planet claim, validation result, or disposition.",
+    }
+    _write_json(report_path, report)
+    manifest_path = _write_manifest(
+        workspace,
+        PYPPLUSS_ENGINE,
+        run_id,
+        run_dir,
+        started_at,
+        runtime,
+        input_path,
+        "succeeded",
+        [(raw_path, "pyppluss-raw-result")]
+        + [(path, "package-output") for path in package_outputs]
+        + [(report_path, "pyppluss-hypothesis-test")],
+    )
+    return AdapterRun("succeeded", manifest_path, report_path)

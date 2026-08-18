@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/radial-velocity-observations-1.0.json",
+  "title": "Candidate-local Radial-Velocity Observations",
+  "description": "Observation times are Barycentric Julian Date in the TDB standard (BJD_TDB).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "candidate_id", "observations"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "candidate_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "observations": {
+      "type": "array",
+      "minItems": 3,
+      "items": { "$ref": "#/$defs/observation" }
+    }
+  },
+  "$defs": {
+    "quantity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "unit"],
+      "properties": {
+        "value": { "type": "number" },
+        "unit": { "type": "string", "minLength": 1 }
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observation_time", "velocity", "uncertainty", "instrument", "provenance"],
+      "properties": {
+        "observation_time": {
+          "allOf": [
+            { "$ref": "#/$defs/quantity" },
+            { "properties": { "unit": { "const": "BJD_TDB" } } }
+          ]
+        },
+        "velocity": {
+          "allOf": [
+            { "$ref": "#/$defs/quantity" },
+            { "properties": { "unit": { "const": "m/s" } } }
+          ]
+        },
+        "uncertainty": {
+          "allOf": [
+            { "$ref": "#/$defs/quantity" },
+            {
+              "properties": {
+                "value": { "exclusiveMinimum": 0 },
+                "unit": { "const": "m/s" }
+              }
+            }
+          ]
+        },
+        "instrument": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": ".*\\S.*" },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source_uri", "retrieved_at_utc", "record_label"],
+          "properties": {
+            "source_uri": { "type": "string", "format": "uri" },
+            "retrieved_at_utc": { "type": "string", "format": "date-time" },
+            "record_label": { "type": "string", "minLength": 1, "maxLength": 400 }
+          }
+        }
+      }
+    }
+  }
+}

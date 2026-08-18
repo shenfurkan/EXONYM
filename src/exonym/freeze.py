@@ -164,6 +164,52 @@ def _collect_config_hashes(workspace: CandidateWorkspace) -> Dict[str, str]:
     return hashes
 
 
+def _collect_catalog_manifests(workspace: CandidateWorkspace) -> List[Dict]:
+    """Index append-only catalog retrieval manifests for release reproducibility."""
+    records: List[Dict] = []
+    for manifest_path in sorted((workspace.path / "runs" / "catalog").glob("*/*/query-manifest.json")):
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        records.append({
+            "provider": data.get("provider", "unknown"),
+            "retrieval_id": data.get("retrieval_id", ""),
+            "status": data.get("status", "unknown"),
+            "retrieved_at": data.get("retrieved_at", ""),
+            "manifest_path": manifest_path.relative_to(workspace.path).as_posix(),
+            "sha256": _sha256(manifest_path),
+        })
+    records.sort(key=lambda record: record.get("retrieved_at", ""))
+    return records
+
+
+def _require_valid_catalog_evidence(workspace: CandidateWorkspace) -> None:
+    """Refuse to freeze candidate catalog evidence that fails repository validation."""
+    catalog_runs = workspace.path / "runs" / "catalog"
+    if not catalog_runs.is_dir():
+        return
+    from .isolation import IsolationReport
+    from .schemas import validate_schemas
+
+    report = IsolationReport()
+    validate_schemas(workspace.repository_root, report)
+    workspace_root = workspace.path.resolve()
+    failures = []
+    for violation in report.violations:
+        try:
+            path = Path(violation.path).resolve()
+            path.relative_to(workspace_root)
+        except (TypeError, ValueError):
+            continue
+        if "catalog" in path.parts:
+            failures.append(violation)
+    if failures:
+        raise ValueError("cannot freeze invalid candidate-local catalog evidence: {0}".format(failures[0].detail))
+
+
 def freeze(workspace: CandidateWorkspace, version: Optional[str] = None) -> Path:
     """Build the reproducibility bundle and return its directory.
 
@@ -179,6 +225,7 @@ def freeze(workspace: CandidateWorkspace, version: Optional[str] = None) -> Path
     release_dir = workspace.path / "releases" / version
     if release_dir.exists():
         raise FileExistsError("release already exists: {0}".format(release_dir))
+    _require_valid_catalog_evidence(workspace)
     release_dir.mkdir(parents=True)
 
     repository_root = workspace.repository_root
@@ -218,6 +265,7 @@ def freeze(workspace: CandidateWorkspace, version: Optional[str] = None) -> Path
     # Collect engine manifests and config hashes for full analysis chain traceability
     engine_manifests = _collect_engine_manifests(workspace)
     config_hashes = _collect_config_hashes(workspace)
+    catalog_manifests = _collect_catalog_manifests(workspace)
 
     # Hash the repository-level package definition for reproducibility context
     pyproject_path = repository_root / "pyproject.toml"
@@ -236,6 +284,8 @@ def freeze(workspace: CandidateWorkspace, version: Optional[str] = None) -> Path
         # Transit ephemeris configuration hashes active at freeze time.
         # Allows detection of any config drift between the original run and a replay.
         "config_hashes": config_hashes,
+        # Catalog retrievals are context evidence, indexed without copying data.
+        "catalog_manifests": catalog_manifests,
         # Repository package definition hash for environment reproducibility.
         "pyproject_toml_sha256": pyproject_sha256,
         # Lock file hash (also copied as requirements.lock.txt into this release dir).
@@ -246,4 +296,3 @@ def freeze(workspace: CandidateWorkspace, version: Optional[str] = None) -> Path
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     return release_dir
-

@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/rv-keplerian-fit-1.0.json",
+  "title": "Candidate-local Keplerian Radial-Velocity Model Comparison",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "candidate_id", "generated_at", "report_type", "observation_time_standard", "velocity_unit", "input_artifacts", "fixed_orbital_inputs", "models", "model_comparison", "diagnostics", "caveat"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "candidate_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "report_type": { "const": "keplerian-rv-model-comparison" },
+    "observation_time_standard": { "const": "BJD_TDB" },
+    "velocity_unit": { "const": "m/s" },
+    "input_artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/artifact" }
+    },
+    "fixed_orbital_inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["period", "reference_time"],
+      "properties": {
+        "period": { "$ref": "#/$defs/parameter" },
+        "reference_time": { "$ref": "#/$defs/parameter" }
+      }
+    },
+    "models": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["constant", "keplerian"],
+      "properties": {
+        "constant": { "$ref": "#/$defs/model" },
+        "keplerian": {
+          "allOf": [
+            { "$ref": "#/$defs/model" },
+            {
+              "required": ["parameters"],
+              "properties": {
+                "parameters": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["semi_amplitude", "eccentricity", "argument_periastron", "mean_anomaly_reference", "systemic_velocities"],
+                  "properties": {
+                    "semi_amplitude": { "$ref": "#/$defs/parameter" },
+                    "eccentricity": { "$ref": "#/$defs/parameter" },
+                    "argument_periastron": { "$ref": "#/$defs/parameter" },
+                    "mean_anomaly_reference": { "$ref": "#/$defs/parameter" },
+                    "systemic_velocities": {
+                      "type": "array",
+                      "minItems": 1,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["instrument", "systemic_velocity"],
+                        "properties": {
+                          "instrument": { "type": "string", "minLength": 1 },
+                          "systemic_velocity": { "$ref": "#/$defs/parameter" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "model_comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference_model", "alternative_model", "delta_bic_constant_minus_keplerian", "delta_aic_constant_minus_keplerian", "interpretation"],
+      "properties": {
+        "reference_model": { "const": "constant" },
+        "alternative_model": { "const": "keplerian" },
+        "delta_bic_constant_minus_keplerian": { "type": "number" },
+        "delta_aic_constant_minus_keplerian": { "type": "number" },
+        "interpretation": { "type": "string", "minLength": 1 }
+      }
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observation_count", "instrument_count", "degrees_of_freedom", "optimizer", "optimizer_status", "optimizer_message"],
+      "properties": {
+        "observation_count": { "type": "integer", "minimum": 1 },
+        "instrument_count": { "type": "integer", "minimum": 1 },
+        "degrees_of_freedom": { "type": "integer", "minimum": 1 },
+        "optimizer": { "type": "string", "minLength": 1 },
+        "optimizer_status": { "type": "integer" },
+        "optimizer_message": { "type": "string", "minLength": 1 }
+      }
+    },
+    "caveat": { "type": "string", "minLength": 1 }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "role"],
+      "properties": {
+        "path": { "const": "data/external/radial_velocity_observations.json" },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "role": { "const": "radial-velocity-observations" }
+      }
+    },
+    "parameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "uncertainty", "unit", "source"],
+      "properties": {
+        "value": { "type": ["number", "null"] },
+        "uncertainty": { "type": ["number", "null"], "minimum": 0 },
+        "unit": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "minLength": 1 }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "chi_squared", "log_likelihood", "aic", "bic", "parameter_count"],
+      "properties": {
+        "model": { "type": "string", "minLength": 1 },
+        "chi_squared": { "type": "number", "minimum": 0 },
+        "log_likelihood": { "type": "number" },
+        "aic": { "type": "number" },
+        "bic": { "type": "number" },
+        "parameter_count": { "type": "integer", "minimum": 1 },
+        "parameters": { "type": "object" }
+      }
+    }
+  }
+}

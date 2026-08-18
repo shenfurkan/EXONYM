@@ -4,12 +4,14 @@ bandit==1.8.6
 batman-package==2.5.3
 celerite==0.4.3
 corner==2.3.0
+dynesty==3.0.0
 emcee==3.1.6
 jsonschema==4.25.1
 ldtk==1.8.6
 lightkurve==2.6.0
 matplotlib==3.9.4
 numpy==1.26.4
+packaging==26.2
 pandas==2.3.3
 Pillow==11.3.0
 pysyd==6.10.5
@@ -17,3 +19,4 @@ scipy==1.13.1
 tess-atl==0.0.3.1
 triceratops==1.0.20
 transitleastsquares==1.32
+wotan==1.10

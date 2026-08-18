@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/decisive-rejection-1.0.json",
+  "title": "Candidate-local Decisive Rejection Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "candidate_id", "recorded_at", "status", "reason", "evidence"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "candidate_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "recorded_at": { "type": "string", "format": "date-time" },
+    "status": { "const": "decisive-rejection" },
+    "reason": { "type": "string", "minLength": 1 },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$" },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    }
+  }
+}

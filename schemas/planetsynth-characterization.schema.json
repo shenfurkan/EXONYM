@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/planetsynth-characterization-1.0.json",
+  "title": "Candidate-local PlanetSynth Characterization Input",
+  "description": "Declared inputs for descriptive giant-planet cooling and evolution interpretation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "candidate_id", "purpose", "characterization", "provenance"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "candidate_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "purpose": { "const": "giant-planet-cooling-evolution" },
+    "characterization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mass_mjup", "radius_rjup", "age_gyr", "equilibrium_temperature_k"],
+      "properties": {
+        "mass_mjup": { "$ref": "#/$defs/mjup" },
+        "radius_rjup": { "$ref": "#/$defs/rjup" },
+        "age_gyr": { "$ref": "#/$defs/gyr" },
+        "equilibrium_temperature_k": { "$ref": "#/$defs/kelvin" }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_description", "recorded_at"],
+      "properties": {
+        "source_description": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "recorded_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "$defs": {
+    "quantity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "unit"],
+      "properties": { "value": { "type": "number", "exclusiveMinimum": 0 }, "unit": { "type": "string" } }
+    },
+    "mjup": { "allOf": [{ "$ref": "#/$defs/quantity" }, { "properties": { "unit": { "const": "M_jup" } } }] },
+    "rjup": { "allOf": [{ "$ref": "#/$defs/quantity" }, { "properties": { "unit": { "const": "R_jup" } } }] },
+    "gyr": { "allOf": [{ "$ref": "#/$defs/quantity" }, { "properties": { "unit": { "const": "Gyr" } } }] },
+    "kelvin": { "allOf": [{ "$ref": "#/$defs/quantity" }, { "properties": { "unit": { "const": "K" } } }] }
+  }
+}

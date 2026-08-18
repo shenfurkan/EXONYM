@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/pyppluss-hypothesis-test-1.0.json",
+  "title": "Candidate-local pyPplusS Hypothesis Test Report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "candidate_id", "run_id", "generated_at", "status", "model", "input_artifact", "raw_result_artifact", "runtime", "fit_diagnostics", "caveat"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "candidate_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "run_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "status": { "const": "succeeded" },
+    "model": { "enum": ["ringed-planet", "oblate-planet"] },
+    "input_artifact": { "$ref": "#/$defs/input-artifact" },
+    "raw_result_artifact": { "$ref": "#/$defs/raw-artifact" },
+    "runtime": { "$ref": "#/$defs/runtime" },
+    "fit_diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rms_residual", "max_abs_residual", "cadence_count"],
+      "properties": { "rms_residual": { "$ref": "#/$defs/flux" }, "max_abs_residual": { "$ref": "#/$defs/flux" }, "cadence_count": { "type": "integer", "minimum": 5 } }
+    },
+    "caveat": { "type": "string", "minLength": 1 }
+  },
+  "$defs": {
+    "artifact": { "type": "object", "additionalProperties": false, "required": ["path", "sha256", "role"], "properties": { "path": { "type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$" }, "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }, "role": { "type": "string", "minLength": 1 } } },
+    "input-artifact": { "allOf": [{ "$ref": "#/$defs/artifact" }, { "properties": { "path": { "const": "data/external/anomalous_transit_hypothesis.json" }, "role": { "const": "anomalous-transit-hypothesis" } } }] },
+    "raw-artifact": { "allOf": [{ "$ref": "#/$defs/artifact" }, { "properties": { "role": { "const": "pyppluss-raw-result" } } }] },
+    "runtime": { "type": "object", "additionalProperties": false, "required": ["package", "version", "python_requires"], "properties": { "package": { "const": "pyppluss" }, "version": { "type": "string", "minLength": 1 }, "python_requires": { "type": "string", "minLength": 1 } } },
+    "flux": { "type": "object", "additionalProperties": false, "required": ["value", "unit"], "properties": { "value": { "type": "number", "minimum": 0 }, "unit": { "const": "relative_flux" } } }
+  }
+}

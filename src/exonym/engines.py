@@ -133,6 +133,20 @@ _ENGINE_CATALOG: Tuple[EngineDescriptor, ...] = (
         description="Corner plot visualization for multidimensional posterior distributions.",
     ),
     EngineDescriptor(
+        name="planetsynth",
+        capability="physical-interpretation",
+        optional_group="specialized",
+        module_name="planetsynth",
+        description="Optional giant-planet cooling and evolution interpretation adapter.",
+    ),
+    EngineDescriptor(
+        name="pyppluss",
+        capability="physical-hypothesis-test",
+        optional_group="specialized",
+        module_name="pyppluss",
+        description="Optional ringed or oblate anomalous-transit hypothesis adapter.",
+    ),
+    EngineDescriptor(
         name="localization",
         capability="astrometry",
         optional_group="core",
@@ -578,89 +592,86 @@ def _triage_record(
     }
 
 
+def _write_statistical_vetting_manifest(
+    workspace: CandidateWorkspace, evidence_path: Path, evidence: Dict[str, Any]
+) -> Path:
+    """Record the inputs and output of one non-claim statistical-vetting aggregation."""
+    timestamp_slug = datetime.now(timezone.utc).strftime("%Y%m%dt%H%M%S%f").lower()
+    run_id = "{0}-statistical-vetting".format(timestamp_slug)
+    run_dir = workspace.path / "runs" / "statistical-vetting" / run_id
+    run_dir.mkdir(parents=True)
+    inputs = [{
+        "path": "candidate.json",
+        "sha256": _file_sha256(workspace.path / "candidate.json"),
+        "role": "candidate_identity",
+    }]
+    for diagnostic in evidence.get("diagnostics", []):
+        artifact = diagnostic.get("artifact") if isinstance(diagnostic, dict) else None
+        if not isinstance(artifact, dict):
+            continue
+        path = workspace.path / artifact.get("path", "")
+        if path.is_file() and artifact.get("sha256") == _file_sha256(path):
+            inputs.append({
+                "path": artifact["path"],
+                "sha256": artifact["sha256"],
+                "role": "pre_vetting_diagnostic",
+            })
+    manifest = {
+        "schema_version": 1,
+        "candidate_id": workspace.candidate_id,
+        "engine": "statistical-vetting",
+        "run_id": run_id,
+        "status": "succeeded",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "runtime": {"kind": "direct", "version": "1.0.0", "executable": "exonym.statistical_vetting"},
+        "inputs": inputs,
+        "outputs": [{
+            "path": evidence_path.relative_to(workspace.path).as_posix(),
+            "sha256": _file_sha256(evidence_path),
+            "role": "statistical_vetting_evidence",
+        }],
+    }
+    manifest_path = run_dir / "engine-run.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return manifest_path
+
+
 def run_automated_triage(
     workspace: CandidateWorkspace,
     policy_id: str = "default-pre-vetting-triage",
     policy_version: str = "1.0.0",
 ) -> Path:
-    """Aggregate pre-vetting findings into an automated triage decision.
+    """Aggregate all required pre-vetting diagnostics into a routing decision.
 
-    Evaluates only existing, manifest-backed fixed-ephemeris and PRF localization
-    outputs. Missing, malformed, or unprovenanced evidence is blocked rather than
-    inferred as a scientific pass.
-
-    Output is strictly validated against schemas/automated-triage.schema.json
-    and written to candidate/<id>/decisions/automated_triage.json.
+    The candidate-local evidence representation records calibration limits,
+    input representations, scores, and uncertainty before triage routes work.
+    This is never a validation or claim-producing operation.
     """
     workspace = _trusted_workspace(workspace)
+    from .statistical_vetting import build_statistical_vetting_evidence
+
+    evidence_path = build_statistical_vetting_evidence(workspace)
+    evidence = _load_json_object(evidence_path)
+    if evidence is None:
+        raise RuntimeError("statistical vetting evidence was not readable after it was written")
+    manifest_path = _write_statistical_vetting_manifest(workspace, evidence_path, evidence)
+    evidence_relative = evidence_path.relative_to(workspace.path).as_posix()
+    evidence_sha = _file_sha256(evidence_path)
+    manifest_relative = manifest_path.relative_to(workspace.path).as_posix()
+    manifest_sha = _file_sha256(manifest_path)
     records: List[Dict[str, str]] = []
-
-    # 1. Screening Evaluation
-    screen_path = workspace.path / "outputs" / "fixed_ephemeris_screening.json"
-    if not screen_path.is_file():
-        # probe for generic screening outputs
-        for p in sorted((workspace.path / "outputs").glob("fixed_ephemeris_screen*.json")):
-            screen_path = p
-            break
-
-    if screen_path.is_file():
-        screen_data = _load_json_object(screen_path)
-        screen_obj = screen_data.get("screen", screen_data) if screen_data else None
-        odd_even = screen_obj.get("odd_even") if isinstance(screen_obj, dict) else None
-        consistent = odd_even.get("consistent_at_threshold") if isinstance(odd_even, dict) else None
-        if consistent is False:
-            records.append(_triage_record(
-                workspace, "screen", screen_path, "review-required",
-                "Significant odd-even transit depth asymmetry requires human review.",
-            ))
-        elif consistent is True:
-            records.append(_triage_record(
-                workspace, "screen", screen_path, "pass",
-                "Odd-even depths are statistically consistent.",
-            ))
-        else:
-            records.append({
-                "engine": "screen",
-                "status": "blocked",
-                "reason": "Screening output lacks a conclusive odd-even consistency result.",
-            })
-
-    # 2. Centroid PRF Localization Evaluation
-    prf_path = workspace.path / "outputs" / "prf_localization_report.json"
-    if prf_path.is_file():
-        prf_data = _load_json_object(prf_path)
-        is_on_target = prf_data.get("on_target") if prf_data else None
-        if is_on_target is False:
-            records.append(_triage_record(
-                workspace, "localization", prf_path, "review-required",
-                "Transit flux deficit centroid is significantly offset from the target.",
-            ))
-        elif is_on_target is True:
-            records.append(_triage_record(
-                workspace, "localization", prf_path, "pass",
-                "Centroid is consistent with an on-target signal.",
-            ))
-        else:
-            records.append({
-                "engine": "localization",
-                "status": "blocked",
-                "reason": "Localization output lacks a conclusive on-target result.",
-            })
-
-    if not records:
-        records.append({
-            "engine": "screen",
-            "status": "blocked",
-            "reason": "No manifest-backed screening or localization evidence is available.",
-        })
-
-    statuses = {record["status"] for record in records}
-    if "blocked" in statuses:
-        overall_status = "blocked"
-    elif "review-required" in statuses:
-        overall_status = "review-required"
-    else:
-        overall_status = "pass"
+    for diagnostic in evidence["diagnostics"]:
+        record: Dict[str, str] = {
+            "engine": "statistical-vetting",
+            "status": diagnostic["status"],
+            "reason": "{0}: {1}".format(diagnostic["name"], diagnostic["reason"]),
+            "run_manifest_path": manifest_relative,
+            "run_manifest_sha256": manifest_sha,
+            "artifact_path": evidence_relative,
+            "artifact_sha256": evidence_sha,
+        }
+        records.append(record)
 
     decisions_dir = workspace.path / "decisions"
     decisions_dir.mkdir(parents=True, exist_ok=True)
@@ -671,7 +682,7 @@ def run_automated_triage(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "policy_id": policy_id,
         "policy_version": policy_version,
-        "status": overall_status,
+        "status": evidence["status"],
         "records": records,
     }
 

@@ -7,7 +7,8 @@ Fits phase-folded transit light curves with batman (Mandel & Agol 2002):
 - Parameterized eccentric orbits via (sqrt(e)*cos(omega), sqrt(e)*sin(omega))
   to avoid coordinate singularities at e=0 (Eastman et al. 2013).
 - Gaussian log-likelihood with per-cadence photometric jitter parameter.
-- Posterior sampling via Goodman & Weare (2010) affine-invariant ensemble sampler (emcee).
+- Posterior sampling via Goodman & Weare (2010) affine-invariant ensemble sampler
+  (emcee) or optional dynamic nested sampling (dynesty).
 
 Contains no target constants or hardcoded candidate parameters; all stellar priors,
 ephemerides, and photometric time-series are loaded dynamically from the candidate workspace.
@@ -198,31 +199,43 @@ def _neg_log_posterior(
     eccentric: bool,
     ldtk_prior: Optional[Dict[str, Any]] = None,
 ) -> float:
-    if not np.all(np.isfinite(theta)):
+    log_prior = _log_prior(
+        theta,
+        rho_prior_solar,
+        eccentric,
+        ldtk_prior,
+        noise_scale=float(np.median(flux_err)),
+    )
+    if not math.isfinite(log_prior):
         return 1e100
+    log_likelihood = _log_likelihood(
+        theta, phase_days, flux, flux_err, ephemeris, eccentric
+    )
+    if not math.isfinite(log_likelihood):
+        return 1e100
+    return float(-log_likelihood - log_prior)
+
+
+def _unpack_theta(theta: np.ndarray, eccentric: bool) -> Tuple[float, ...]:
+    """Return the model parameters, including eccentricity coordinates when used."""
     if eccentric:
-        rp, log_rho, b, baseline, log_jitter, q1, q2, se_cos, se_sin = (
-            float(theta[0]),
-            float(theta[1]),
-            float(theta[2]),
-            float(theta[3]),
-            float(theta[4]),
-            float(theta[5]),
-            float(theta[6]),
-            float(theta[7]),
-            float(theta[8]),
-        )
-    else:
-        rp, log_rho, b, baseline, log_jitter, q1, q2 = (
-            float(theta[0]),
-            float(theta[1]),
-            float(theta[2]),
-            float(theta[3]),
-            float(theta[4]),
-            float(theta[5]),
-            float(theta[6]),
-        )
-        se_cos, se_sin = 0.0, 0.0
+        return tuple(float(value) for value in theta[:9])
+    return tuple(float(value) for value in theta[:7]) + (0.0, 0.0)
+
+
+def _log_prior(
+    theta: np.ndarray,
+    rho_prior_solar: float,
+    eccentric: bool,
+    ldtk_prior: Optional[Dict[str, Any]] = None,
+    noise_scale: Optional[float] = None,
+) -> float:
+    """Evaluate parameter priors separately from the photometric likelihood."""
+    if not np.all(np.isfinite(theta)):
+        return -np.inf
+    rp, log_rho, b, baseline, log_jitter, q1, q2, se_cos, se_sin = _unpack_theta(
+        theta, eccentric
+    )
     if not (
         0.001 < rp < 0.3
         and -2.0 < log_rho < 1.5
@@ -235,24 +248,56 @@ def _neg_log_posterior(
         and 0.01 < q1 < 0.99
         and 0.01 < q2 < 0.99
     ):
-        return 1e100
-    eccentricity = 0.0
-    omega_deg = 90.0
-    if eccentric:
-        norm_sq = se_cos * se_cos + se_sin * se_sin
-        if norm_sq > 1.0:
-            return 1e100
-        eccentricity = norm_sq
-        if eccentricity > 0:
-            omega_deg = math.degrees(math.atan2(se_sin, se_cos))
-        else:
-            omega_deg = 90.0
+        return -np.inf
+    if eccentric and se_cos * se_cos + se_sin * se_sin > 1.0:
+        return -np.inf
 
-    period_days = ephemeris["period_days"]
-    rho_solar = 10.0 ** log_rho
-    a_rs = stellar_density_a_rs(rho_solar, period_days)
+    if rho_prior_solar <= 0 or not math.isfinite(rho_prior_solar):
+        return -np.inf
+    log_prior = -0.5 * ((log_rho - math.log10(rho_prior_solar)) / 0.3) ** 2
+    if noise_scale is not None:
+        if noise_scale <= 0 or not math.isfinite(noise_scale):
+            return -np.inf
+        # Retained for emcee compatibility: this empirical weak prior prevents
+        # the jitter parameter from washing out the folded signal.
+        log_prior += -0.5 * ((log_jitter - math.log(noise_scale)) / 1.0) ** 2
+    if ldtk_prior is not None:
+        u1, u2 = kipping_to_quadratic_limb_darkening(q1, q2)
+        log_prior += -0.5 * ((u1 - ldtk_prior["u1"]) / ldtk_prior["u1_err"]) ** 2
+        log_prior += -0.5 * ((u2 - ldtk_prior["u2"]) / ldtk_prior["u2_err"]) ** 2
+    return float(log_prior)
+
+
+def _log_likelihood(
+    theta: np.ndarray,
+    phase_days: np.ndarray,
+    flux: np.ndarray,
+    flux_err: np.ndarray,
+    ephemeris: Dict[str, Any],
+    eccentric: bool,
+) -> float:
+    """Evaluate only the Gaussian folded-light-curve likelihood."""
+    if not np.all(np.isfinite(theta)):
+        return -np.inf
+    rp, log_rho, b, baseline, log_jitter, q1, q2, se_cos, se_sin = _unpack_theta(
+        theta, eccentric
+    )
+    eccentricity = se_cos * se_cos + se_sin * se_sin if eccentric else 0.0
+    if eccentricity >= 1.0:
+        return -np.inf
+    omega_deg = math.degrees(math.atan2(se_sin, se_cos)) if eccentricity > 0 else 90.0
+
+    try:
+        period_days = ephemeris["period_days"]
+        rho_solar = 10.0 ** log_rho
+        a_rs = stellar_density_a_rs(rho_solar, period_days)
+    except (KeyError, OverflowError, ValueError):
+        return -np.inf
     if eccentricity > 0:
-        a_rs = a_rs * (1.0 - eccentricity**2) / (1.0 + eccentricity * math.sin(math.radians(omega_deg)))
+        denominator = 1.0 + eccentricity * math.sin(math.radians(omega_deg))
+        if denominator <= 0:
+            return -np.inf
+        a_rs = a_rs * (1.0 - eccentricity**2) / denominator
 
     model = batman_transit_flux(
         phase_days,
@@ -267,24 +312,14 @@ def _neg_log_posterior(
         omega_deg=omega_deg,
     )
     if model is None:
-        return 1e100
+        return -np.inf
 
     jitter = math.exp(log_jitter)
     ivar = 1.0 / (flux_err**2 + jitter**2)
     residual = flux - model
     chi2 = float(np.sum(residual**2 * ivar))
     logdet = float(np.sum(np.log(2.0 * math.pi / ivar)))
-    log_likelihood = -0.5 * (chi2 + logdet)
-    # Weak log-jitter prior anchored to the observed per-bin noise scale so
-    # the sampler cannot inflate the error budget to wash out the signal.
-    noise_scale = float(np.median(flux_err))
-    log_prior = -0.5 * ((log_rho - math.log10(rho_prior_solar)) / 0.3) ** 2
-    log_prior += -0.5 * ((log_jitter - math.log(noise_scale)) / 1.0) ** 2
-    if ldtk_prior is not None:
-        u1, u2 = kipping_to_quadratic_limb_darkening(q1, q2)
-        log_prior += -0.5 * ((u1 - ldtk_prior["u1"]) / ldtk_prior["u1_err"]) ** 2
-        log_prior += -0.5 * ((u2 - ldtk_prior["u2"]) / ldtk_prior["u2_err"]) ** 2
-    return float(-log_likelihood - log_prior)
+    return float(-0.5 * (chi2 + logdet))
 
 
 def _map_optimize(
@@ -354,6 +389,168 @@ def _quantile_summary(chain: np.ndarray) -> Dict[str, float]:
     }
 
 
+def _posterior_summaries(
+    chain: np.ndarray, ephemeris: Dict[str, Any], eccentric: bool
+) -> Dict[str, Dict[str, float]]:
+    """Summarize sampled and derived transit parameters from an equal-weight chain."""
+    names = list(PARAMETER_NAMES_ECCENTRIC if eccentric else PARAMETER_NAMES_CIRCULAR)
+    posteriors: Dict[str, Dict[str, float]] = {}
+    for index, name in enumerate(names):
+        posteriors[name] = _quantile_summary(chain[:, index])
+
+    rp_samples = chain[:, 0]
+    rho_samples = 10.0 ** chain[:, 1]
+    b_samples = chain[:, 2]
+    q1_samples = chain[:, 5]
+    q2_samples = chain[:, 6]
+    a_rs_samples = np.array(
+        [stellar_density_a_rs(rho, ephemeris["period_days"]) for rho in rho_samples]
+    )
+    inc_samples = np.degrees(np.arccos(np.clip(b_samples / a_rs_samples, 0.0, 1.0)))
+    area_ppm = (rp_samples**2) * 1e6
+    depth_values = []
+    for median_rp, median_a, median_b, median_q1, median_q2 in zip(
+        _chunk_medians(rp_samples),
+        _chunk_medians(a_rs_samples),
+        _chunk_medians(b_samples),
+        _chunk_medians(q1_samples),
+        _chunk_medians(q2_samples),
+    ):
+        model = batman_transit_flux(
+            np.array([0.0]),
+            ephemeris["period_days"],
+            float(median_rp),
+            float(median_a),
+            float(median_b),
+            float(median_q1),
+            float(median_q2),
+            1.0,
+        )
+        depth_values.append(1.0 - (model[0] if model is not None else 1.0))
+    depth_ppm_samples = np.asarray(depth_values) * 1e6
+
+    u1_samples, u2_samples = [], []
+    for q1_val, q2_val in zip(q1_samples[::7], q2_samples[::7]):
+        u1_val, u2_val = kipping_to_quadratic_limb_darkening(q1_val, q2_val)
+        u1_samples.append(u1_val)
+        u2_samples.append(u2_val)
+
+    posteriors["inclination_deg"] = _quantile_summary(inc_samples)
+    posteriors["a_rs"] = _quantile_summary(a_rs_samples)
+    posteriors["rho_star_solar"] = _quantile_summary(rho_samples)
+    posteriors["area_ratio_ppm"] = _quantile_summary(area_ppm)
+    posteriors["mid_transit_depth_ppm"] = _quantile_summary(depth_ppm_samples)
+    posteriors["u1"] = _quantile_summary(np.asarray(u1_samples))
+    posteriors["u2"] = _quantile_summary(np.asarray(u2_samples))
+    if eccentric:
+        se_cos_samples = chain[:, 7]
+        se_sin_samples = chain[:, 8]
+        eccentricity_samples = np.minimum(0.95, se_cos_samples**2 + se_sin_samples**2)
+        omega_samples = np.degrees(np.arctan2(se_sin_samples, se_cos_samples))
+        posteriors["eccentricity"] = _quantile_summary(eccentricity_samples)
+        posteriors["omega_deg"] = _quantile_summary(omega_samples)
+    return posteriors
+
+
+def _resample_weighted_posterior(
+    samples: np.ndarray, weights: np.ndarray, seed: int
+) -> Tuple[np.ndarray, float]:
+    """Systematically resample normalized nested-sampling weights with a fixed seed."""
+    samples = np.asarray(samples, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    if samples.ndim != 2 or weights.shape != (samples.shape[0],):
+        raise ValueError("nested samples and weights have incompatible shapes")
+    if not np.all(np.isfinite(samples)) or not np.all(np.isfinite(weights)) or np.any(weights < 0):
+        raise ValueError("nested samples and weights must be finite with non-negative weights")
+    total_weight = float(np.sum(weights))
+    if total_weight <= 0:
+        raise ValueError("nested weights must have positive total weight")
+    weights = weights / total_weight
+    positions = (np.random.default_rng(seed).random() + np.arange(weights.size)) / weights.size
+    indices = np.searchsorted(np.cumsum(weights), positions, side="right")
+    indices = np.minimum(indices, samples.shape[0] - 1)
+    return samples[indices], float(1.0 / np.sum(weights**2))
+
+
+def _make_dynesty_prior_transform(
+    rho_prior_solar: float,
+    noise_scale: float,
+    eccentric: bool,
+    ldtk_prior: Optional[Dict[str, Any]],
+):
+    """Create a normalized prior transform for dynesty's likelihood-only API."""
+    from scipy.special import ndtr, ndtri
+
+    if rho_prior_solar <= 0 or noise_scale <= 0:
+        raise ValueError("stellar density and noise scale must be positive")
+
+    def truncated_normal(unit_value: float, mean: float, sigma: float, lower: float, upper: float) -> float:
+        clipped = float(np.clip(unit_value, np.finfo(float).eps, 1.0 - np.finfo(float).eps))
+        lower_cdf = ndtr((lower - mean) / sigma)
+        upper_cdf = ndtr((upper - mean) / sigma)
+        return float(mean + sigma * ndtri(lower_cdf + clipped * (upper_cdf - lower_cdf)))
+
+    q_transform = None
+    if ldtk_prior is not None:
+        # The emcee path uses uniform Kipping parameters multiplied by the LDTk
+        # density. Build its equivalent normalized two-dimensional prior once,
+        # then use inverse-CDF sampling so it remains a prior for the evidence.
+        from scipy.integrate import cumulative_trapezoid
+
+        q_grid = np.linspace(0.01, 0.99, 513)
+        q1_grid, q2_grid = np.meshgrid(q_grid, q_grid, indexing="ij")
+        root_q1 = np.sqrt(q1_grid)
+        u1_grid = 2.0 * root_q1 * q2_grid
+        u2_grid = root_q1 * (1.0 - 2.0 * q2_grid)
+        log_density = -0.5 * ((u1_grid - ldtk_prior["u1"]) / ldtk_prior["u1_err"]) ** 2
+        log_density += -0.5 * ((u2_grid - ldtk_prior["u2"]) / ldtk_prior["u2_err"]) ** 2
+        density = np.exp(log_density - float(np.max(log_density)))
+        marginal = np.trapz(density, q_grid, axis=1)
+        q1_cdf = cumulative_trapezoid(marginal, q_grid, initial=0.0)
+        q1_cdf /= q1_cdf[-1]
+
+        def q_transform(q1_unit: float, q2_unit: float) -> Tuple[float, float]:
+            q1_value = float(np.interp(q1_unit, q1_cdf, q_grid))
+            root_q1_value = math.sqrt(q1_value)
+            u1_values = 2.0 * root_q1_value * q_grid
+            u2_values = root_q1_value * (1.0 - 2.0 * q_grid)
+            conditional = np.exp(
+                -0.5 * ((u1_values - ldtk_prior["u1"]) / ldtk_prior["u1_err"]) ** 2
+                -0.5 * ((u2_values - ldtk_prior["u2"]) / ldtk_prior["u2_err"]) ** 2
+                - float(np.max(log_density))
+            )
+            q2_cdf = cumulative_trapezoid(conditional, q_grid, initial=0.0)
+            q2_cdf /= q2_cdf[-1]
+            return q1_value, float(np.interp(q2_unit, q2_cdf, q_grid))
+
+    def prior_transform(unit_cube: np.ndarray) -> np.ndarray:
+        unit_cube = np.asarray(unit_cube, dtype=float)
+        expected_dimensions = len(PARAMETER_NAMES_ECCENTRIC if eccentric else PARAMETER_NAMES_CIRCULAR)
+        if unit_cube.shape != (expected_dimensions,) or not np.all(np.isfinite(unit_cube)):
+            raise ValueError("dynesty prior transform received an invalid unit-cube point")
+        if np.any(unit_cube < 0.0) or np.any(unit_cube > 1.0):
+            raise ValueError("dynesty prior transform requires values in [0, 1]")
+        theta = np.empty(expected_dimensions, dtype=float)
+        theta[0] = 0.001 + unit_cube[0] * (0.3 - 0.001)
+        theta[1] = truncated_normal(unit_cube[1], math.log10(rho_prior_solar), 0.3, -2.0, 1.5)
+        theta[2] = unit_cube[2] * 1.2
+        theta[3] = 0.99 + unit_cube[3] * 0.02
+        theta[4] = truncated_normal(unit_cube[4], math.log(noise_scale), 1.0, -12.0, -2.0)
+        if q_transform is None:
+            theta[5] = 0.01 + unit_cube[5] * 0.98
+            theta[6] = 0.01 + unit_cube[6] * 0.98
+        else:
+            theta[5], theta[6] = q_transform(unit_cube[5], unit_cube[6])
+        if eccentric:
+            radius = math.sqrt(unit_cube[7])
+            angle = 2.0 * math.pi * unit_cube[8]
+            theta[7] = radius * math.cos(angle)
+            theta[8] = radius * math.sin(angle)
+        return theta
+
+    return prior_transform
+
+
 def _synthetic_transit_table(
     ephemeris: Dict[str, Any], rng_seed: int = 5
 ) -> Dict[str, np.ndarray]:
@@ -398,8 +595,20 @@ def run_mcmc_transit_fit(
     seed: int = 5,
     signal: Optional[str] = None,
     use_ldtk_prior: bool = False,
+    sampler: str = "emcee",
 ) -> Path:
-    """Run the MCMC transit fit and write outputs/mcmc_transit_fit.json."""
+    """Run an emcee or dynesty transit fit and write the historical output paths."""
+    if sampler == "dynesty":
+        return _run_dynesty_transit_fit(
+            workspace,
+            n_samples=n_samples,
+            eccentric=eccentric,
+            seed=seed,
+            signal=signal,
+            use_ldtk_prior=use_ldtk_prior,
+        )
+    if sampler != "emcee":
+        raise ValueError("sampler must be one of: emcee, dynesty")
     import emcee
 
     outputs_dir = workspace.path / "outputs"
@@ -475,61 +684,7 @@ def run_mcmc_transit_fit(
     chain = sampler.get_chain(discard=burn_in, flat=True)
 
     names = list(PARAMETER_NAMES_ECCENTRIC if eccentric else PARAMETER_NAMES_CIRCULAR)
-    posteriors: Dict[str, Dict[str, float]] = {}
-    for index, name in enumerate(names):
-        posteriors[name] = _quantile_summary(chain[:, index])
-
-    rp_samples = chain[:, 0]
-    rho_samples = 10.0 ** chain[:, 1]
-    b_samples = chain[:, 2]
-    q1_samples = chain[:, 5]
-    q2_samples = chain[:, 6]
-    a_rs_samples = np.array(
-        [stellar_density_a_rs(rho, ephemeris["period_days"]) for rho in rho_samples]
-    )
-    inc_samples = np.degrees(np.arccos(np.clip(b_samples / a_rs_samples, 0.0, 1.0)))
-    area_ppm = (rp_samples**2) * 1e6
-    depth_values = []
-    for median_rp, median_a, median_b, median_q1, median_q2 in zip(
-        _chunk_medians(rp_samples),
-        _chunk_medians(a_rs_samples),
-        _chunk_medians(b_samples),
-        _chunk_medians(q1_samples),
-        _chunk_medians(q2_samples),
-    ):
-        model = batman_transit_flux(
-            np.array([0.0]),
-            ephemeris["period_days"],
-            float(median_rp),
-            float(median_a),
-            float(median_b),
-            float(median_q1),
-            float(median_q2),
-            1.0,
-        )
-        depth_values.append(1.0 - (model[0] if model is not None else 1.0))
-    depth_ppm_samples = np.asarray(depth_values) * 1e6
-
-    u1_samples, u2_samples = [], []
-    for q1_val, q2_val in zip(q1_samples[::7], q2_samples[::7]):
-        u1_val, u2_val = kipping_to_quadratic_limb_darkening(q1_val, q2_val)
-        u1_samples.append(u1_val)
-        u2_samples.append(u2_val)
-
-    posteriors["inclination_deg"] = _quantile_summary(inc_samples)
-    posteriors["a_rs"] = _quantile_summary(a_rs_samples)
-    posteriors["rho_star_solar"] = _quantile_summary(rho_samples)
-    posteriors["area_ratio_ppm"] = _quantile_summary(area_ppm)
-    posteriors["mid_transit_depth_ppm"] = _quantile_summary(depth_ppm_samples)
-    posteriors["u1"] = _quantile_summary(np.asarray(u1_samples))
-    posteriors["u2"] = _quantile_summary(np.asarray(u2_samples))
-    if eccentric:
-        se_cos_samples = chain[:, 7]
-        se_sin_samples = chain[:, 8]
-        eccentricity_samples = np.minimum(0.95, se_cos_samples**2 + se_sin_samples**2)
-        omega_samples = np.degrees(np.arctan2(se_sin_samples, se_cos_samples))
-        posteriors["eccentricity"] = _quantile_summary(eccentricity_samples)
-        posteriors["omega_deg"] = _quantile_summary(omega_samples)
+    posteriors = _posterior_summaries(chain, ephemeris, eccentric)
 
     try:
         import logging
@@ -583,6 +738,150 @@ def run_mcmc_transit_fit(
         "signal": signal,
         "caveat": "Descriptive folded/binned fit; not an adopted native-cadence posterior.",
     }
+    suffix = f".{signal.lstrip('.')}" if signal else ""
+    output_path = outputs_dir / f"mcmc_transit_fit{suffix}.json"
+    output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    np.save(str(outputs_dir / f"mcmc_transit_fit_chain{suffix}.npy"), chain)
+    return output_path
+
+
+def _run_dynesty_transit_fit(
+    workspace: CandidateWorkspace,
+    n_samples: int,
+    eccentric: bool,
+    seed: int,
+    signal: Optional[str],
+    use_ldtk_prior: bool,
+) -> Path:
+    """Run optional dynamic nested sampling with an explicit normalized prior transform."""
+    try:
+        import dynesty
+    except ImportError as exc:
+        raise RuntimeError(
+            "dynesty is required for --sampler dynesty; install the pinned optional dependency with "
+            'pip install -e ".[inference]"'
+        ) from exc
+    if n_samples <= 0:
+        raise ValueError("n_samples must be positive for dynesty")
+
+    ephemeris = load_transit_ephemeris(workspace, signal=signal)
+    stellar = load_stellar_parameters(workspace)
+    rho_prior_solar = float(stellar["mass_solar"]) / float(stellar["radius_solar"]) ** 3
+    ldtk_prior = _load_ldtk_prior(workspace) if use_ldtk_prior else None
+    table = load_light_curve_table(workspace)
+    if table is None:
+        table = _synthetic_transit_table(ephemeris)
+        source = "synthetic-demo"
+    else:
+        source = "candidate-data"
+    try:
+        phase_days, binned_flux, binned_error = _folded_binned_data(
+            table["time"], table["flux"], ephemeris
+        )
+    except ValueError:
+        if source == "synthetic-demo":
+            raise
+        table = _synthetic_transit_table(ephemeris)
+        source = "synthetic-demo"
+        phase_days, binned_flux, binned_error = _folded_binned_data(
+            table["time"], table["flux"], ephemeris
+        )
+
+    noise_scale = float(np.median(binned_error))
+    prior_transform = _make_dynesty_prior_transform(
+        rho_prior_solar, noise_scale, eccentric, ldtk_prior
+    )
+    ndim = len(PARAMETER_NAMES_ECCENTRIC if eccentric else PARAMETER_NAMES_CIRCULAR)
+    initial_live_points = max(2 * ndim + 1, min(500, max(50, n_samples // 10)))
+    max_likelihood_calls = max(n_samples, initial_live_points)
+    nested_sampler = dynesty.DynamicNestedSampler(
+        lambda theta: _log_likelihood(
+            theta, phase_days, binned_flux, binned_error, ephemeris, eccentric
+        ),
+        prior_transform,
+        ndim,
+        rstate=np.random.default_rng(seed),
+    )
+    nested_sampler.run_nested(
+        nlive_init=initial_live_points,
+        maxcall=max_likelihood_calls,
+        print_progress=False,
+    )
+    results = nested_sampler.results
+    samples = np.asarray(results.samples, dtype=float)
+    log_weights = np.asarray(results.logwt, dtype=float)
+    log_evidence = np.asarray(results.logz, dtype=float)
+    log_evidence_error = np.asarray(results.logzerr, dtype=float)
+    if (
+        samples.ndim != 2
+        or samples.shape[1] != ndim
+        or samples.shape[0] == 0
+        or log_weights.shape != (samples.shape[0],)
+        or log_evidence.size == 0
+        or log_evidence_error.size == 0
+        or not np.all(np.isfinite(samples))
+        or not np.all(np.isfinite(log_weights))
+        or not math.isfinite(float(log_evidence[-1]))
+        or not math.isfinite(float(log_evidence_error[-1]))
+    ):
+        raise RuntimeError("dynesty returned incomplete or non-finite nested-sampling results")
+    posterior_weights = np.exp(log_weights - float(log_evidence[-1]))
+    chain, effective_samples = _resample_weighted_posterior(samples, posterior_weights, seed)
+    posteriors = _posterior_summaries(chain, ephemeris, eccentric)
+    sampling_efficiency = float(getattr(results, "eff", np.nan))
+    if not math.isfinite(sampling_efficiency):
+        sampling_efficiency = None
+
+    payload = {
+        "schema_version": "1.0",
+        "work_package": "NESTED_TRANSIT_FIT",
+        "generated_utc": datetime.now(timezone.utc).isoformat(),
+        "source": source,
+        "sampler": "dynesty",
+        "dynesty_version": getattr(dynesty, "__version__", "unknown"),
+        "model": (
+            "batman quadratic limb darkening, stellar-density locked, eccentric orbit"
+            if eccentric
+            else "batman quadratic limb darkening, stellar-density locked, circular orbit"
+        ),
+        "ephemeris": {
+            "period_days": ephemeris["period_days"],
+            "epoch_btjd": ephemeris["epoch_btjd"],
+            "source": ephemeris["source"],
+        },
+        "density_prior_solar": float(rho_prior_solar),
+        "limb_darkening_prior": (
+            {"source": "ldtk", "path": ldtk_prior["path"]} if ldtk_prior is not None else None
+        ),
+        "posterior": posteriors,
+        "evidence": {
+            "log_z": float(log_evidence[-1]),
+            "log_z_err": float(log_evidence_error[-1]),
+            "meaning": "Nested-sampling model evidence; not a validation probability.",
+        },
+        "diagnostics": {
+            "initial_live_points": int(initial_live_points),
+            "max_likelihood_calls": int(max_likelihood_calls),
+            "iterations": int(getattr(results, "niter", samples.shape[0])),
+            "likelihood_calls": int(np.sum(np.asarray(getattr(results, "ncall", 0)))),
+            "sampling_efficiency_percent": sampling_efficiency,
+            "weighted_samples": int(samples.shape[0]),
+            "effective_samples": effective_samples,
+            "resampled_samples": int(chain.shape[0]),
+            "resampling": "systematic equal-weight resampling",
+            "resampling_seed": int(seed),
+            "prior_transform": (
+                "LDTk-weighted Kipping prior via numerical inverse CDF"
+                if ldtk_prior is not None
+                else "analytic bounded and truncated priors"
+            ),
+        },
+        "n_binned_points": int(phase_days.size),
+        "signal": signal,
+        "caveat": "Descriptive folded/binned fit; nested evidence is not an adopted native-cadence posterior or validation claim.",
+    }
+    outputs_dir = workspace.path / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
     suffix = f".{signal.lstrip('.')}" if signal else ""
     output_path = outputs_dir / f"mcmc_transit_fit{suffix}.json"
     output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

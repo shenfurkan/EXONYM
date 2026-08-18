@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/planetsynth-interpretation-1.0.json",
+  "title": "Candidate-local PlanetSynth Interpretation Report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "candidate_id", "run_id", "generated_at", "status", "input_artifact", "raw_result_artifact", "runtime", "interpretation", "caveat"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "candidate_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "run_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "status": { "const": "succeeded" },
+    "input_artifact": { "$ref": "#/$defs/input-artifact" },
+    "raw_result_artifact": { "$ref": "#/$defs/raw-artifact" },
+    "runtime": { "$ref": "#/$defs/runtime" },
+    "interpretation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["radius", "luminosity"],
+      "properties": { "radius": { "$ref": "#/$defs/radius" }, "luminosity": { "$ref": "#/$defs/luminosity" } }
+    },
+    "caveat": { "type": "string", "minLength": 1 }
+  },
+  "$defs": {
+    "artifact": { "type": "object", "additionalProperties": false, "required": ["path", "sha256", "role"], "properties": { "path": { "type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$" }, "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }, "role": { "type": "string", "minLength": 1 } } },
+    "input-artifact": { "allOf": [{ "$ref": "#/$defs/artifact" }, { "properties": { "path": { "const": "data/external/planetsynth_characterization.json" }, "role": { "const": "planetsynth-characterization" } } }] },
+    "raw-artifact": { "allOf": [{ "$ref": "#/$defs/artifact" }, { "properties": { "role": { "const": "planetsynth-raw-result" } } }] },
+    "runtime": { "type": "object", "additionalProperties": false, "required": ["package", "version", "python_requires"], "properties": { "package": { "const": "planetsynth" }, "version": { "type": "string", "minLength": 1 }, "python_requires": { "type": "string", "minLength": 1 } } },
+    "radius": { "type": "object", "additionalProperties": false, "required": ["value", "unit"], "properties": { "value": { "type": "number", "exclusiveMinimum": 0 }, "unit": { "const": "R_jup" } } },
+    "luminosity": { "type": "object", "additionalProperties": false, "required": ["value", "unit"], "properties": { "value": { "type": "number", "minimum": 0 }, "unit": { "const": "L_sun" } } }
+  }
+}

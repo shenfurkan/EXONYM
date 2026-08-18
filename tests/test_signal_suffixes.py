@@ -83,20 +83,18 @@ def test_triceratops_signal_suffix(tmp_path):
     report_default = run_triceratops_simulation(workspace, n_draws=100, allow_fallback=True)
     assert report_default.name == "triceratops_report.json"
     assert report_default.is_file()
-    assert (workspace.path / "claims" / "fpp_claim.json").is_file()
+    assert not (workspace.path / "claims" / "fpp_claim.json").exists()
 
     # 2. Suffixed run (.01)
     with pytest.warns(UserWarning, match="could not read signal transit config"):
         report_signal = run_triceratops_simulation(workspace, n_draws=100, signal=".01", allow_fallback=True)
     assert report_signal.name == "triceratops_report.01.json"
     assert report_signal.is_file()
-    assert (workspace.path / "claims" / "fpp_claim.01.json").is_file()
+    assert not (workspace.path / "claims" / "fpp_claim.01.json").exists()
 
     # Verify both coexist
     assert (workspace.path / "outputs" / "triceratops_report.json").is_file()
     assert (workspace.path / "outputs" / "triceratops_report.01.json").is_file()
-    assert (workspace.path / "claims" / "fpp_claim.json").is_file()
-    assert (workspace.path / "claims" / "fpp_claim.01.json").is_file()
 
 
 def test_transit_fit_signal_suffix(tmp_path):

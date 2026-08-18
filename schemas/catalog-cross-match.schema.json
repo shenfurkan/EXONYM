@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/catalog-cross-match-1.0.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "candidate_id", "provider", "retrieval_id", "snapshot_path", "snapshot_sha256", "cross_match"],
+  "properties": {
+    "schema_version": {"const": 1}, "candidate_id": {"$ref": "#/$defs/id"}, "provider": {"$ref": "#/$defs/provider"}, "retrieval_id": {"$ref": "#/$defs/id"},
+    "snapshot_path": {"$ref": "#/$defs/path"}, "snapshot_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "cross_match": {"type": "object", "additionalProperties": false, "required": ["method", "status", "comparison_epoch_jyear", "matches"], "properties": {
+      "method": {"const": "icrs-proper-motion-uncertainty-v1"}, "status": {"enum": ["matched", "ambiguous", "no-plausible-match", "insufficient-astrometry"]},
+      "comparison_epoch_jyear": {"type": ["number", "null"]}, "matches": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["source_record_index", "separation_mas", "combined_uncertainty_mas", "sigma_distance"], "properties": {"source_record_index": {"type": "integer", "minimum": 0}, "separation_mas": {"type": "number", "minimum": 0}, "combined_uncertainty_mas": {"type": "number", "exclusiveMinimum": 0}, "sigma_distance": {"type": "number", "minimum": 0}}}}
+    }}
+  },
+  "$defs": {"id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"}, "provider": {"enum": ["mast", "gaia", "simbad", "vizier", "nasa-exoplanet-archive", "irsa", "ztf", "exofop", "lamost-dr11", "smoka", "mast-hubble-jwst"]}, "path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"}}
+}

@@ -106,8 +106,8 @@ def run_triceratops_simulation(
     Reads candidate target metadata and either a per-signal transit config
     (``config/signals/transit_config<signal>.json`` when ``signal`` is given)
     or the BLS periodogram outputs, executes Monte Carlo sampling over
-    candidate model scenarios, and writes outputs/triceratops_report.json and
-    claims/fpp_claim.json.
+    candidate model scenarios, and writes outputs/triceratops_report.json. A
+    claim is written only when the real Monte Carlo returns a finite FPP.
 
     Parameters
     ----------
@@ -297,25 +297,14 @@ def run_triceratops_simulation(
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
     claim_path = claims_dir / f"fpp_claim{suffix}.json"
-    if fpp_rounded is not None:
+    if source == "triceratops-monte-carlo" and fpp_rounded is not None:
         claim_payload = {
             "parameter": "fpp",
             "value": fpp_rounded,
-            "uncertainty_upper": round(max(fpp * 0.2, 0.0001), 6),
-            "uncertainty_lower": round(max(fpp * 0.2, 0.0001), 6),
+            "uncertainty_upper": None,
+            "uncertainty_lower": None,
             "unit": "dimensionless",
-            "method": "TRICERATOPS Monte Carlo simulation (N={0})".format(n_draws),
-        }
-        claim_path.write_text(json.dumps(claim_payload, indent=2) + "\n", encoding="utf-8")
-    else:
-        # fpp is NaN — write a clearly invalid sentinel claim so downstream tools
-        # see an explicit failure rather than a missing file.
-        claim_payload = {
-            "parameter": "fpp",
-            "value": None,
-            "unit": "dimensionless",
-            "method": "TRICERATOPS Monte Carlo simulation (N={0})".format(n_draws),
-            "error": triceratops_error or "Monte Carlo did not run",
+            "method": "TRICERATOPS Monte Carlo simulation (N={0}); uncertainty not reported by the engine".format(n_draws),
         }
         claim_path.write_text(json.dumps(claim_payload, indent=2) + "\n", encoding="utf-8")
 

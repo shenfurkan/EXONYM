@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/statistical-vetting-evidence-1.0.json",
+  "title": "Candidate-local Statistical Vetting Evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "candidate_id", "generated_at", "signal", "status", "diagnostics"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "candidate_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "signal": { "type": ["string", "null"], "pattern": "^\\.[0-9]+$" },
+    "status": { "enum": ["pass", "review-required", "blocked"] },
+    "diagnostics": {
+      "type": "array",
+      "minItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "status", "reason", "artifact", "calibration_source", "input_representation", "score", "uncertainty", "applicability_limits"],
+        "properties": {
+          "name": { "enum": ["screening", "archive", "localization", "activity", "dilution"] },
+          "status": { "enum": ["pass", "review-required", "blocked"] },
+          "reason": { "type": "string", "minLength": 1 },
+          "artifact": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path", "sha256"],
+                "properties": {
+                  "path": { "type": "string", "pattern": "^outputs/[A-Za-z0-9][A-Za-z0-9._-]*\\.json$" },
+                  "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+                }
+              },
+              { "type": "null" }
+            ]
+          },
+          "calibration_source": { "type": "string", "minLength": 1 },
+          "input_representation": { "type": "string", "minLength": 1 },
+          "score": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "value", "unit"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "value": { "type": ["number", "integer", "null"] },
+              "unit": { "type": "string", "minLength": 1 }
+            }
+          },
+          "uncertainty": { "type": ["number", "integer", "null"] },
+          "applicability_limits": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+        }
+      }
+    }
+  }
+}

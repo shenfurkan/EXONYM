@@ -61,11 +61,16 @@
           {
             "if": { "properties": { "status": { "enum": ["pass", "review-required"] } } },
             "then": {
-              "required": [
-                "run_manifest_path",
-                "run_manifest_sha256",
-                "artifact_path",
-                "artifact_sha256"
+              "anyOf": [
+                {
+                  "required": [
+                    "run_manifest_path",
+                    "run_manifest_sha256",
+                    "artifact_path",
+                    "artifact_sha256"
+                  ]
+                },
+                { "required": ["artifact_path", "artifact_sha256"] }
               ]
             }
           }
