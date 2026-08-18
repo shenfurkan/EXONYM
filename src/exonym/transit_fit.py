@@ -161,6 +161,33 @@ def _folded_binned_data(
     )
 
 
+def _load_ldtk_prior(workspace: CandidateWorkspace) -> Dict[str, Any]:
+    """Load one finite candidate-local quadratic LDTk prior for explicit use."""
+    path = workspace.path / "outputs" / "ldtk_quadratic_limb_darkening_prior.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError("--ldtk-prior requires a readable candidate-local LDTk prior artifact") from exc
+    if payload.get("candidate_id") != workspace.candidate_id:
+        raise ValueError("LDTk prior candidate_id does not match the fit workspace")
+    coefficients = payload.get("quadratic_coefficients")
+    if not isinstance(coefficients, list) or len(coefficients) != 1:
+        raise ValueError("--ldtk-prior requires exactly one recorded passband prior")
+    coefficient = coefficients[0]
+    if not isinstance(coefficient, dict):
+        raise ValueError("LDTk prior coefficient record is invalid")
+    values = {}
+    for name in ("u1", "u1_err", "u2", "u2_err"):
+        value = coefficient.get(name)
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+            raise ValueError("LDTk prior {0} must be finite".format(name))
+        if name.endswith("_err") and value <= 0:
+            raise ValueError("LDTk prior uncertainties must be positive")
+        values[name] = float(value)
+    values["path"] = str(path.relative_to(workspace.path)).replace("\\", "/")
+    return values
+
+
 def _neg_log_posterior(
     theta: np.ndarray,
     phase_days: np.ndarray,
@@ -169,6 +196,7 @@ def _neg_log_posterior(
     ephemeris: Dict[str, Any],
     rho_prior_solar: float,
     eccentric: bool,
+    ldtk_prior: Optional[Dict[str, Any]] = None,
 ) -> float:
     if not np.all(np.isfinite(theta)):
         return 1e100
@@ -252,6 +280,10 @@ def _neg_log_posterior(
     noise_scale = float(np.median(flux_err))
     log_prior = -0.5 * ((log_rho - math.log10(rho_prior_solar)) / 0.3) ** 2
     log_prior += -0.5 * ((log_jitter - math.log(noise_scale)) / 1.0) ** 2
+    if ldtk_prior is not None:
+        u1, u2 = kipping_to_quadratic_limb_darkening(q1, q2)
+        log_prior += -0.5 * ((u1 - ldtk_prior["u1"]) / ldtk_prior["u1_err"]) ** 2
+        log_prior += -0.5 * ((u2 - ldtk_prior["u2"]) / ldtk_prior["u2_err"]) ** 2
     return float(-log_likelihood - log_prior)
 
 
@@ -263,6 +295,7 @@ def _map_optimize(
     rho_prior_solar: float,
     eccentric: bool,
     start: np.ndarray,
+    ldtk_prior: Optional[Dict[str, Any]] = None,
 ) -> np.ndarray:
     from scipy.optimize import minimize
 
@@ -297,7 +330,7 @@ def _map_optimize(
             candidate[4] = start[4] + jitter_delta
             result = minimize(
                 lambda x: _neg_log_posterior(
-                    x, phase_days, flux, flux_err, ephemeris, rho_prior_solar, eccentric
+                    x, phase_days, flux, flux_err, ephemeris, rho_prior_solar, eccentric, ldtk_prior
                 ),
                 candidate,
                 method="L-BFGS-B",
@@ -364,6 +397,7 @@ def run_mcmc_transit_fit(
     burn_in: Optional[int] = None,
     seed: int = 5,
     signal: Optional[str] = None,
+    use_ldtk_prior: bool = False,
 ) -> Path:
     """Run the MCMC transit fit and write outputs/mcmc_transit_fit.json."""
     import emcee
@@ -373,6 +407,7 @@ def run_mcmc_transit_fit(
     ephemeris = load_transit_ephemeris(workspace, signal=signal)
     stellar = load_stellar_parameters(workspace)
     rho_prior_solar = float(stellar["mass_solar"]) / float(stellar["radius_solar"]) ** 3
+    ldtk_prior = _load_ldtk_prior(workspace) if use_ldtk_prior else None
 
     table = load_light_curve_table(workspace)
     if table is None:
@@ -407,7 +442,7 @@ def run_mcmc_transit_fit(
             [rp_start, math.log10(rho_prior_solar), 0.3, 1.0, log_jitter_start, 0.35, 0.3]
         )
     map_point = _map_optimize(
-        phase_days, binned_flux, binned_error, ephemeris, rho_prior_solar, eccentric, start
+        phase_days, binned_flux, binned_error, ephemeris, rho_prior_solar, eccentric, start, ldtk_prior
     )
 
     ndim = int(map_point.size)
@@ -432,7 +467,7 @@ def run_mcmc_transit_fit(
         n_walkers,
         ndim,
         lambda x: -_neg_log_posterior(
-            x, phase_days, binned_flux, binned_error, ephemeris, rho_prior_solar, eccentric
+            x, phase_days, binned_flux, binned_error, ephemeris, rho_prior_solar, eccentric, ldtk_prior
         ),
         moves=emcee.moves.StretchMove(a=1.5),
     )
@@ -532,6 +567,9 @@ def run_mcmc_transit_fit(
             "source": ephemeris["source"],
         },
         "density_prior_solar": float(rho_prior_solar),
+        "limb_darkening_prior": (
+            {"source": "ldtk", "path": ldtk_prior["path"]} if ldtk_prior is not None else None
+        ),
         "posterior": posteriors,
         "mcmc": {
             "walkers": int(n_walkers),

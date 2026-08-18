@@ -195,6 +195,28 @@ def _build_parser() -> argparse.ArgumentParser:
         default="lc",
         help="SPOC product type: light curves (lc), target pixel files (tp), or both.",
     )
+    ingest_parser.add_argument(
+        "--provider",
+        choices=("spoc", "tesscut"),
+        default="spoc",
+        help="MAST product provider. TESSCut supports light curves only.",
+    )
+
+    detrend_parser = commands.add_parser(
+        "detrend", help="Write an opt-in candidate-local detrended light-curve artifact."
+    )
+    detrend_parser.add_argument("candidate_id")
+    detrend_parser.add_argument(
+        "--method", choices=("running-median", "wotan", "celerite"), default="running-median"
+    )
+    detrend_parser.add_argument(
+        "--window-days", type=float, required=True, help="Positive detrending timescale in days."
+    )
+
+    ds9_parser = commands.add_parser(
+        "ds9-regions", help="Export validated archival Gaia sources as a candidate-local DS9 region file."
+    )
+    ds9_parser.add_argument("candidate_id")
 
     verify_parser = commands.add_parser("verify", help="Run the repository audit.")
     verify_parser.add_argument(
@@ -297,6 +319,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--signal",
         default=None,
         help="Per-signal transit config name (e.g. .01 -> config/signals/transit_config.01.json).",
+    )
+    fit_parser.add_argument(
+        "--ldtk-prior",
+        action="store_true",
+        help="Use exactly one recorded candidate-local LDTk quadratic limb-darkening prior.",
     )
 
     phasecurve_parser = commands.add_parser(
@@ -514,11 +541,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             all_products = []
             if args.products in ("lc", "both"):
                 all_products.extend(
-                    fetch_tess_products(candidate, sectors=args.sectors, exptime=args.exptime)
+                    fetch_tess_products(
+                        candidate, sectors=args.sectors, exptime=args.exptime, provider=args.provider
+                    )
                 )
             if args.products in ("tp", "both"):
                 all_products.extend(
-                    fetch_tess_tpfs(candidate, sectors=args.sectors, exptime=args.exptime)
+                    fetch_tess_tpfs(
+                        candidate, sectors=args.sectors, exptime=args.exptime, provider=args.provider
+                    )
                 )
             if not all_products:
                 print("no products found for the requested sectors")
@@ -527,6 +558,36 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             _print_json(
                 [str(path.relative_to(candidate.path)).replace("\\", "/") for path in written]
             )
+            return 0
+
+        if args.command == "detrend":
+            from .detrending import detrend_candidate
+            from .inputs import load_light_curve_table
+
+            table = load_light_curve_table(candidate, max_points=None)
+            if table is None:
+                raise ValueError("detrending requires readable candidate-local light-curve data")
+            artifact = detrend_candidate(
+                candidate,
+                table["time"],
+                table["flux"],
+                flux_err=table["flux_err"],
+                method=args.method,
+                window_days=args.window_days,
+            )
+            _print_json(
+                {
+                    "artifact": artifact.artifact_path.relative_to(repository_root).as_posix(),
+                    "manifest": artifact.manifest_path.relative_to(repository_root).as_posix(),
+                }
+            )
+            return 0
+
+        if args.command == "ds9-regions":
+            from .ds9 import export_ds9_regions
+
+            output = export_ds9_regions(candidate)
+            print(output.relative_to(repository_root).as_posix())
             return 0
 
         if args.command == "fetch-priors":
@@ -605,6 +666,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 n_samples=args.n_samples,
                 eccentric=args.eccentric,
                 signal=args.signal,
+                use_ldtk_prior=args.ldtk_prior,
             )
             print(output.relative_to(repository_root).as_posix())
             return 0

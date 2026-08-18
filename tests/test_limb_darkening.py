@@ -6,6 +6,8 @@ import types
 import pytest
 
 from exonym.limb_darkening import OUTPUT_FILENAME, generate_ldtk_quadratic_prior
+from exonym.transit_fit import _load_ldtk_prior
+from exonym.workspace import create_candidate
 
 
 class _Filter:
@@ -120,3 +122,24 @@ def test_generate_ldtk_prior_raises_when_dependency_is_unavailable(tmp_path, mon
     with pytest.raises(RuntimeError, match="dependency is unavailable"):
         generate_ldtk_quadratic_prior(workspace, [_Filter("synthetic-band")])
     assert not (tmp_path / "outputs" / OUTPUT_FILENAME).exists()
+
+
+def test_transit_fit_loads_only_matching_recorded_ldtk_prior(tmp_path):
+    workspace = create_candidate(tmp_path, "ldtk-fit-prior")
+    artifact = workspace.path / "outputs" / OUTPUT_FILENAME
+    artifact.write_text(
+        json.dumps(
+            {
+                "candidate_id": workspace.candidate_id,
+                "quadratic_coefficients": [
+                    {"u1": 0.2, "u1_err": 0.01, "u2": 0.3, "u2_err": 0.02}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    prior = _load_ldtk_prior(workspace)
+
+    assert prior["u1"] == pytest.approx(0.2)
+    assert prior["path"] == "outputs/ldtk_quadratic_limb_darkening_prior.json"
