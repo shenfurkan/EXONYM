@@ -209,6 +209,11 @@ def _build_parser() -> argparse.ArgumentParser:
     triage_parser.add_argument("candidate_id", help="Target candidate identifier.")
     triage_parser.add_argument("--policy-id", default="default-pre-vetting-triage", help="Triage policy identifier.")
     triage_parser.add_argument("--policy-version", default="1.0.0", help="Triage policy version.")
+    triage_parser.add_argument(
+        "--signal",
+        default=None,
+        help="Per-signal configuration suffix (for example .01).",
+    )
 
     rejection_parser = commands.add_parser(
         "record-rejection",
@@ -670,6 +675,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 candidate,
                 policy_id=getattr(args, "policy_id", "default-pre-vetting-triage"),
                 policy_version=getattr(args, "policy_version", "1.0.0"),
+                signal=getattr(args, "signal", None),
             )
             print(triage_path.relative_to(repository_root).as_posix())
             return 0

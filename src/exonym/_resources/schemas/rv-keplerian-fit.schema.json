@@ -41,7 +41,7 @@
                 "parameters": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["semi_amplitude", "eccentricity", "argument_periastron", "mean_anomaly_reference", "systemic_velocities"],
+                  "required": ["semi_amplitude", "eccentricity", "argument_periastron", "mean_anomaly_reference", "systemic_velocities", "linear_trend", "activity_coefficient", "instrument_jitters"],
                   "properties": {
                     "semi_amplitude": { "$ref": "#/$defs/parameter" },
                     "eccentricity": { "$ref": "#/$defs/parameter" },
@@ -57,6 +57,21 @@
                         "properties": {
                           "instrument": { "type": "string", "minLength": 1 },
                           "systemic_velocity": { "$ref": "#/$defs/parameter" }
+                        }
+                      }
+                    },
+                    "linear_trend": { "$ref": "#/$defs/parameter" },
+                    "activity_coefficient": { "$ref": "#/$defs/parameter" },
+                    "instrument_jitters": {
+                      "type": "array",
+                      "minItems": 1,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["instrument", "jitter"],
+                        "properties": {
+                          "instrument": { "type": "string", "minLength": 1 },
+                          "jitter": { "$ref": "#/$defs/parameter" }
                         }
                       }
                     }
@@ -83,14 +98,29 @@
     "diagnostics": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["observation_count", "instrument_count", "degrees_of_freedom", "optimizer", "optimizer_status", "optimizer_message", "kepler_equation_solver"],
+      "required": ["observation_count", "instrument_count", "degrees_of_freedom", "optimizer", "model_configuration", "optimizer_status", "optimizer_message", "constant_optimizer_status", "constant_optimizer_message", "uncertainty_estimation", "noise_model", "activity_regression", "kepler_equation_solver"],
       "properties": {
         "observation_count": { "type": "integer", "minimum": 1 },
         "instrument_count": { "type": "integer", "minimum": 1 },
         "degrees_of_freedom": { "type": "integer", "minimum": 1 },
         "optimizer": { "type": "string", "minLength": 1 },
+        "model_configuration": { "const": "instrument-jitter-linear-trend-optional-activity-v1" },
         "optimizer_status": { "type": "integer" },
         "optimizer_message": { "type": "string", "minLength": 1 },
+        "constant_optimizer_status": { "type": "integer" },
+        "constant_optimizer_message": { "type": "string", "minLength": 1 },
+        "uncertainty_estimation": { "type": "string", "minLength": 1 },
+        "noise_model": { "type": "string", "minLength": 1 },
+        "activity_regression": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "unit", "standardization"],
+          "properties": {
+            "status": { "enum": ["jointly-fitted", "not-provided"] },
+            "unit": { "type": ["string", "null"] },
+            "standardization": { "type": "string", "minLength": 1 }
+          }
+        },
         "kepler_equation_solver": {
           "type": "object",
           "additionalProperties": false,

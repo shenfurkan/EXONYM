@@ -30,6 +30,7 @@ MAX_INGEST_BYTES = 10 * 1024 * 1024
 _TAU = 2.0 * math.pi
 KEPLER_SOLVER_TOLERANCE_RAD = 1e-12
 KEPLER_SOLVER_MAX_ITERATIONS = 64
+RV_MODEL_CONFIGURATION = "instrument-jitter-linear-trend-optional-activity-v1"
 
 
 def _sha256(path: Path) -> str:
@@ -227,7 +228,18 @@ def keplerian_velocity_m_per_s(
     )
 
 
-def _observation_arrays(record: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str]]:
+def _observation_arrays(
+    record: Dict[str, Any]
+) -> Tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    List[str],
+    Optional[np.ndarray],
+    Optional[str],
+]:
+    """Return validated numeric RV arrays and an optional common activity index."""
     observations = record["observations"]
     instruments = sorted({str(item["instrument"]) for item in observations})
     positions = {instrument: index for index, instrument in enumerate(instruments)}
@@ -239,7 +251,22 @@ def _observation_arrays(record: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray,
         raise ValueError("RV observations must be finite")
     if np.any(uncertainty <= 0):
         raise ValueError("RV observation uncertainties must be positive")
-    return time, velocity, uncertainty, labels, instruments
+    activity_records = [item.get("activity_indicator") for item in observations]
+    if any(item is not None for item in activity_records) and not all(
+        item is not None for item in activity_records
+    ):
+        raise ValueError("RV activity indicators must be supplied for every observation or none")
+    if not activity_records or activity_records[0] is None:
+        return time, velocity, uncertainty, labels, instruments, None, None
+
+    activity_values = np.asarray([item["value"] for item in activity_records], dtype=float)
+    activity_units = {str(item["unit"]) for item in activity_records}
+    if not np.all(np.isfinite(activity_values)) or len(activity_units) != 1:
+        raise ValueError("RV activity indicators must be finite and use one common unit")
+    activity_scale = float(np.std(activity_values))
+    if activity_scale <= np.finfo(float).eps * max(1.0, float(np.max(np.abs(activity_values)))):
+        raise ValueError("RV activity indicators must vary to support a joint regression")
+    return time, velocity, uncertainty, labels, instruments, activity_values, activity_units.pop()
 
 
 def _instrument_design(labels: np.ndarray, instrument_count: int) -> np.ndarray:
@@ -257,7 +284,7 @@ def _constant_model(
     return design @ coefficients, coefficients, covariance
 
 
-def _parameter(value: Optional[float], uncertainty: Optional[float], unit: str) -> Dict[str, Optional[float]]:
+def _parameter(value: Optional[float], uncertainty: Optional[float], unit: str) -> Dict[str, Any]:
     return {"value": value, "uncertainty": uncertainty, "unit": unit, "source": "weighted RV fit"}
 
 
@@ -274,6 +301,37 @@ def _model_statistics(residual: np.ndarray, uncertainty: np.ndarray, parameter_c
         "bic": float(math.log(count) * parameter_count - 2.0 * log_likelihood),
         "parameter_count": parameter_count,
     }
+
+
+def _effective_uncertainty(
+    uncertainty: np.ndarray, labels: np.ndarray, log_jitters: np.ndarray
+) -> np.ndarray:
+    """Combine quoted uncertainties with non-negative per-instrument jitter."""
+    jitter = np.exp(np.asarray(log_jitters, dtype=float))
+    if not np.all(np.isfinite(jitter)):
+        raise ValueError("RV jitter parameters are non-finite")
+    return np.hypot(uncertainty, jitter[labels])
+
+
+def _negative_log_likelihood(residual: np.ndarray, effective_uncertainty: np.ndarray) -> float:
+    """Return the Gaussian RV negative log likelihood with its normalization."""
+    if np.any(effective_uncertainty <= 0) or not np.all(np.isfinite(effective_uncertainty)):
+        return math.inf
+    standardized = residual / effective_uncertainty
+    value = 0.5 * np.sum(standardized**2 + np.log(_TAU * effective_uncertainty**2))
+    return float(value) if math.isfinite(float(value)) else math.inf
+
+
+def _inverse_hessian_covariance(result: Any, parameter_count: int) -> np.ndarray:
+    """Extract a finite local inverse-Hessian covariance approximation."""
+    inverse_hessian = getattr(result, "hess_inv", None)
+    if inverse_hessian is None:
+        return np.full((parameter_count, parameter_count), np.nan)
+    dense = inverse_hessian.todense() if hasattr(inverse_hessian, "todense") else inverse_hessian
+    covariance = np.asarray(dense, dtype=float)
+    if covariance.shape != (parameter_count, parameter_count) or not np.all(np.isfinite(covariance)):
+        return np.full((parameter_count, parameter_count), np.nan)
+    return 0.5 * (covariance + covariance.T)
 
 
 def _eccentricity_components(theta: np.ndarray, component_start: int) -> Tuple[float, float, float, float]:
@@ -300,7 +358,7 @@ def fit_radial_velocity(
     report retains the observation hash, units, covariance-derived uncertainties,
     and information-criterion comparison for later human review.
     """
-    from scipy.optimize import least_squares
+    from scipy.optimize import minimize
 
     period_days = float(period_days)
     if not math.isfinite(period_days) or period_days <= 0:
@@ -313,107 +371,247 @@ def fit_radial_velocity(
     record = load_radial_velocity_observations(workspace)
     input_path = _observation_path(workspace)
     input_hash = _sha256(input_path)
-    time, velocity, uncertainty, labels, instruments = _observation_arrays(record)
+    (
+        time,
+        velocity,
+        uncertainty,
+        labels,
+        instruments,
+        activity_values,
+        activity_unit,
+    ) = _observation_arrays(record)
     instrument_count = len(instruments)
-    keplerian_parameter_count = instrument_count + 4
+    activity_parameter_count = 1 if activity_values is not None else 0
+    nuisance_parameter_count = instrument_count + 1 + activity_parameter_count
+    constant_parameter_count = nuisance_parameter_count + instrument_count
+    keplerian_parameter_count = nuisance_parameter_count + 4 + instrument_count
     if time.size <= keplerian_parameter_count:
         raise ValueError("RV fit requires more observations than Keplerian free parameters")
 
     reference_time_bjd_tdb = float(np.median(time))
+    centered_time_days = time - reference_time_bjd_tdb
     constant_prediction, constant_offsets, constant_covariance = _constant_model(
         velocity, uncertainty, labels, instrument_count
     )
-    constant_residual = velocity - constant_prediction
-    constant_statistics = _model_statistics(constant_residual, uncertainty, instrument_count)
     design = _instrument_design(labels, instrument_count)
+    del constant_prediction, constant_covariance
+    if activity_values is None:
+        standardized_activity = None
+        activity_center = None
+        activity_scale = None
+    else:
+        activity_center = float(np.median(activity_values))
+        activity_scale = float(np.std(activity_values))
+        standardized_activity = (activity_values - activity_center) / activity_scale
     velocity_span = float(np.ptp(velocity))
     initial_amplitude = max(float(np.std(velocity) * math.sqrt(2.0)), float(np.min(uncertainty)))
     lower_log_amplitude = math.log(float(np.min(uncertainty)) * 1e-3)
     upper_log_amplitude = math.log(max(velocity_span * 100.0, float(np.max(uncertainty)) * 100.0))
-    start = np.concatenate(
+    lower_log_jitter = math.log(float(np.min(uncertainty)) * 1e-6)
+    upper_log_jitter = math.log(max(velocity_span * 100.0, float(np.max(uncertainty)) * 100.0))
+    initial_log_jitters = np.full(instrument_count, math.log(float(np.min(uncertainty)) * 1e-3))
+    common_start = np.concatenate(
+        (constant_offsets, np.zeros(1 + activity_parameter_count), initial_log_jitters)
+    )
+    common_bounds = [(None, None)] * (instrument_count + 1 + activity_parameter_count) + [
+        (lower_log_jitter, upper_log_jitter)
+    ] * instrument_count
+
+    def constant_components(theta: np.ndarray) -> Tuple[np.ndarray, np.ndarray, int]:
+        trend = float(theta[instrument_count])
+        activity_coefficient = (
+            float(theta[instrument_count + 1]) if standardized_activity is not None else 0.0
+        )
+        jitter_start = nuisance_parameter_count
+        prediction = design @ theta[:instrument_count] + trend * centered_time_days
+        if standardized_activity is not None:
+            prediction = prediction + activity_coefficient * standardized_activity
+        effective_uncertainty = _effective_uncertainty(
+            uncertainty, labels, theta[jitter_start : jitter_start + instrument_count]
+        )
+        return prediction, effective_uncertainty, jitter_start
+
+    def constant_negative_log_likelihood(theta: np.ndarray) -> float:
+        prediction, effective_uncertainty, _ = constant_components(theta)
+        return _negative_log_likelihood(velocity - prediction, effective_uncertainty)
+
+    keplerian_start = np.concatenate(
         (
-            constant_offsets,
+            common_start[:nuisance_parameter_count],
             np.asarray([math.log(initial_amplitude), 0.0, 0.0, 0.0]),
+            common_start[nuisance_parameter_count:],
         )
     )
-    lower = np.concatenate(
-        (
-            np.full(instrument_count, -np.inf),
-            np.asarray([lower_log_amplitude, -_TAU, -np.inf, -np.inf]),
-        )
-    )
-    upper = np.concatenate(
-        (
-            np.full(instrument_count, np.inf),
-            np.asarray([upper_log_amplitude, _TAU, np.inf, np.inf]),
-        )
+    keplerian_bounds = (
+        common_bounds[:nuisance_parameter_count]
+        + [(lower_log_amplitude, upper_log_amplitude), (-_TAU, _TAU), (None, None), (None, None)]
+        + common_bounds[nuisance_parameter_count:]
     )
 
-    def residuals(theta: np.ndarray) -> np.ndarray:
-        amplitude = math.exp(float(theta[instrument_count]))
-        mean_anomaly = float(theta[instrument_count + 1])
-        eccentricity, argument, _, _ = _eccentricity_components(theta, instrument_count + 2)
-        model = design @ theta[:instrument_count] + keplerian_velocity_m_per_s(
-            time,
-            amplitude,
-            mean_anomaly,
-            eccentricity,
-            argument,
-            reference_time_bjd_tdb,
-            period_days,
+    def keplerian_components(theta: np.ndarray) -> Tuple[np.ndarray, np.ndarray, int]:
+        amplitude_index = nuisance_parameter_count
+        amplitude = math.exp(float(theta[amplitude_index]))
+        mean_anomaly = float(theta[amplitude_index + 1])
+        eccentricity, argument, _, _ = _eccentricity_components(theta, amplitude_index + 2)
+        trend = float(theta[instrument_count])
+        activity_coefficient = (
+            float(theta[instrument_count + 1]) if standardized_activity is not None else 0.0
         )
-        return (velocity - model) / uncertainty
+        jitter_start = amplitude_index + 4
+        prediction = (
+            design @ theta[:instrument_count]
+            + trend * centered_time_days
+            + keplerian_velocity_m_per_s(
+                time,
+                amplitude,
+                mean_anomaly,
+                eccentricity,
+                argument,
+                reference_time_bjd_tdb,
+                period_days,
+            )
+        )
+        if standardized_activity is not None:
+            prediction = prediction + activity_coefficient * standardized_activity
+        effective_uncertainty = _effective_uncertainty(
+            uncertainty, labels, theta[jitter_start : jitter_start + instrument_count]
+        )
+        return prediction, effective_uncertainty, jitter_start
 
-    result = None
-    for mean_anomaly_start in np.linspace(-math.pi, math.pi, 9):
-        trial_start = start.copy()
-        trial_start[instrument_count + 1] = mean_anomaly_start
-        trial = least_squares(residuals, trial_start, bounds=(lower, upper), method="trf")
-        if result is None or trial.cost < result.cost:
-            result = trial
-    if result is None:
-        raise RuntimeError("Keplerian RV optimization did not produce a result")
-    if not result.success or not np.all(np.isfinite(result.x)):
-        raise RuntimeError("Keplerian RV optimization did not converge: {0}".format(result.message))
-    fitted_residual = residuals(result.x)
-    fitted_prediction = velocity - fitted_residual * uncertainty
+    def keplerian_negative_log_likelihood(theta: np.ndarray) -> float:
+        prediction, effective_uncertainty, _ = keplerian_components(theta)
+        return _negative_log_likelihood(velocity - prediction, effective_uncertainty)
+
+    def optimize_model(
+        objective: Any,
+        start_values: np.ndarray,
+        bounds: Sequence[Tuple[Optional[float], Optional[float]]],
+        phase_index: Optional[int],
+    ) -> Any:
+        """Run deterministic phase starts and return the best converged likelihood fit."""
+        best_result = None
+        phase_starts = np.linspace(-math.pi, math.pi, 9) if phase_index is not None else [0.0]
+        for phase_start in phase_starts:
+            trial_start = start_values.copy()
+            if phase_index is not None:
+                trial_start[phase_index] = phase_start
+            trial = minimize(
+                objective,
+                trial_start,
+                method="L-BFGS-B",
+                bounds=bounds,
+                options={"maxiter": 2000, "ftol": 1e-12, "gtol": 1e-8},
+            )
+            if (
+                trial.success
+                and np.all(np.isfinite(trial.x))
+                and math.isfinite(float(trial.fun))
+                and (best_result is None or float(trial.fun) < float(best_result.fun))
+            ):
+                best_result = trial
+        if best_result is None:
+            raise RuntimeError("Keplerian RV optimization did not converge from any deterministic phase start")
+        return best_result
+
+    constant_result = optimize_model(constant_negative_log_likelihood, common_start, common_bounds, None)
+    result = optimize_model(
+        keplerian_negative_log_likelihood,
+        keplerian_start,
+        keplerian_bounds,
+        nuisance_parameter_count + 1,
+    )
+    constant_prediction, constant_effective_uncertainty, constant_jitter_start = constant_components(
+        constant_result.x
+    )
+    fitted_prediction, fitted_effective_uncertainty, keplerian_jitter_start = keplerian_components(result.x)
+    constant_statistics = _model_statistics(
+        velocity - constant_prediction, constant_effective_uncertainty, constant_parameter_count
+    )
     keplerian_statistics = _model_statistics(
-        velocity - fitted_prediction, uncertainty, keplerian_parameter_count
+        velocity - fitted_prediction, fitted_effective_uncertainty, keplerian_parameter_count
     )
     degrees_of_freedom = int(time.size - keplerian_parameter_count)
-    covariance = np.linalg.pinv(result.jac.T @ result.jac)
-    covariance *= keplerian_statistics["chi_squared"] / degrees_of_freedom
+    covariance = _inverse_hessian_covariance(result, keplerian_parameter_count)
+    constant_covariance = _inverse_hessian_covariance(constant_result, constant_parameter_count)
     standard_errors = np.sqrt(np.clip(np.diag(covariance), 0.0, np.inf))
-    amplitude = math.exp(float(result.x[instrument_count]))
-    amplitude_uncertainty = _finite_uncertainty(amplitude * standard_errors[instrument_count])
+    constant_standard_errors = np.sqrt(np.clip(np.diag(constant_covariance), 0.0, np.inf))
+    amplitude_index = nuisance_parameter_count
+    amplitude = math.exp(float(result.x[amplitude_index]))
+    amplitude_uncertainty = _finite_uncertainty(amplitude * standard_errors[amplitude_index])
     eccentricity, argument, first_component, second_component = _eccentricity_components(
-        result.x, instrument_count + 2
+        result.x, amplitude_index + 2
     )
     norm_squared = first_component * first_component + second_component * second_component
     eccentricity_gradient = np.zeros(keplerian_parameter_count)
-    eccentricity_gradient[instrument_count + 2] = 1.9 * first_component / (1.0 + norm_squared) ** 2
-    eccentricity_gradient[instrument_count + 3] = 1.9 * second_component / (1.0 + norm_squared) ** 2
+    eccentricity_gradient[amplitude_index + 2] = 1.9 * first_component / (1.0 + norm_squared) ** 2
+    eccentricity_gradient[amplitude_index + 3] = 1.9 * second_component / (1.0 + norm_squared) ** 2
     eccentricity_uncertainty = _finite_uncertainty(
         math.sqrt(max(float(eccentricity_gradient @ covariance @ eccentricity_gradient), 0.0))
     )
     argument_uncertainty: Optional[float] = None
     if norm_squared > 1e-12:
         argument_gradient = np.zeros(keplerian_parameter_count)
-        argument_gradient[instrument_count + 2] = -second_component / norm_squared
-        argument_gradient[instrument_count + 3] = first_component / norm_squared
+        argument_gradient[amplitude_index + 2] = -second_component / norm_squared
+        argument_gradient[amplitude_index + 3] = first_component / norm_squared
         argument_uncertainty = _finite_uncertainty(
             math.degrees(math.sqrt(max(float(argument_gradient @ covariance @ argument_gradient), 0.0)))
         )
-    instrument_parameters = []
-    for index, instrument in enumerate(instruments):
-        instrument_parameters.append(
-            {
-                "instrument": instrument,
-                "systemic_velocity": _parameter(
-                    float(result.x[index]), _finite_uncertainty(standard_errors[index]), "m/s"
-                ),
-            }
-        )
+
+    def nuisance_parameters(
+        theta: np.ndarray,
+        errors: np.ndarray,
+        jitter_start: int,
+    ) -> Dict[str, Any]:
+        """Serialize shared offsets, trend, optional activity, and jitter parameters."""
+        systemic_velocities = []
+        instrument_jitters = []
+        for index, instrument in enumerate(instruments):
+            systemic_velocities.append(
+                {
+                    "instrument": instrument,
+                    "systemic_velocity": _parameter(
+                        float(theta[index]), _finite_uncertainty(errors[index]), "m/s"
+                    ),
+                }
+            )
+            jitter = math.exp(float(theta[jitter_start + index]))
+            instrument_jitters.append(
+                {
+                    "instrument": instrument,
+                    "jitter": _parameter(
+                        jitter,
+                        _finite_uncertainty(jitter * errors[jitter_start + index]),
+                        "m/s",
+                    ),
+                }
+            )
+        if activity_values is None:
+            activity_parameter = _parameter(None, None, "m/s per unavailable activity index")
+            activity_parameter["source"] = "not fitted because no activity indicator was supplied"
+        else:
+            activity_index = instrument_count + 1
+            activity_parameter = _parameter(
+                float(theta[activity_index] / activity_scale),
+                _finite_uncertainty(errors[activity_index] / activity_scale),
+                "m/s per {0}".format(activity_unit),
+            )
+        return {
+            "systemic_velocities": systemic_velocities,
+            "linear_trend": _parameter(
+                float(theta[instrument_count]),
+                _finite_uncertainty(errors[instrument_count]),
+                "m/s/day",
+            ),
+            "activity_coefficient": activity_parameter,
+            "instrument_jitters": instrument_jitters,
+        }
+
+    constant_nuisance_parameters = nuisance_parameters(
+        constant_result.x, constant_standard_errors, constant_jitter_start
+    )
+    keplerian_nuisance_parameters = nuisance_parameters(
+        result.x, standard_errors, keplerian_jitter_start
+    )
     input_artifact = {
         "path": input_path.relative_to(workspace.path).as_posix(),
         "sha256": input_hash,
@@ -433,22 +631,23 @@ def fit_radial_velocity(
         },
         "models": {
             "constant": {
-                "model": "instrument-specific constant systemic velocities",
+                "model": "instrument systemic velocities with jitter, linear trend, and optional activity regression",
                 **constant_statistics,
+                "parameters": constant_nuisance_parameters,
             },
             "keplerian": {
-                "model": "single-companion eccentric Keplerian with instrument systemic velocities",
+                "model": "single-companion eccentric Keplerian with shared jitter, linear trend, and optional activity regression",
                 **keplerian_statistics,
                 "parameters": {
                     "semi_amplitude": _parameter(amplitude, amplitude_uncertainty, "m/s"),
                     "eccentricity": _parameter(eccentricity, eccentricity_uncertainty, "dimensionless"),
                     "argument_periastron": _parameter(math.degrees(argument), argument_uncertainty, "deg"),
                     "mean_anomaly_reference": _parameter(
-                        float(result.x[instrument_count + 1]),
-                        _finite_uncertainty(standard_errors[instrument_count + 1]),
+                        float(result.x[amplitude_index + 1]),
+                        _finite_uncertainty(standard_errors[amplitude_index + 1]),
                         "rad",
                     ),
-                    "systemic_velocities": instrument_parameters,
+                    **keplerian_nuisance_parameters,
                 },
             },
         },
@@ -467,23 +666,41 @@ def fit_radial_velocity(
             "observation_count": int(time.size),
             "instrument_count": instrument_count,
             "degrees_of_freedom": degrees_of_freedom,
-            "optimizer": "scipy.optimize.least_squares method=trf",
+            "optimizer": "scipy.optimize.minimize method=L-BFGS-B with deterministic mean-anomaly starts",
+            "model_configuration": RV_MODEL_CONFIGURATION,
             "optimizer_status": int(result.status),
             "optimizer_message": str(result.message),
+            "constant_optimizer_status": int(constant_result.status),
+            "constant_optimizer_message": str(constant_result.message),
+            "uncertainty_estimation": "local inverse-Hessian approximation to the full Gaussian likelihood; it does not include model-selection or activity-model uncertainty",
+            "noise_model": "quoted per-observation uncertainty combined in quadrature with fitted per-instrument jitter",
+            "activity_regression": {
+                "status": "jointly-fitted" if activity_values is not None else "not-provided",
+                "unit": activity_unit,
+                "standardization": (
+                    "median-centered and standard-deviation scaled before fitting"
+                    if activity_values is not None
+                    else "not applicable"
+                ),
+            },
             "kepler_equation_solver": {
                 "method": "Newton-Raphson with residual convergence check",
                 "tolerance_rad": KEPLER_SOLVER_TOLERANCE_RAD,
                 "max_iterations": KEPLER_SOLVER_MAX_ITERATIONS,
             },
         },
-        "caveat": "This candidate-local RV fit is non-claim evidence and does not determine scientific disposition or lifecycle state.",
+        "caveat": "This candidate-local RV fit is non-claim evidence and does not determine scientific disposition or lifecycle state. The optional activity term tests only a contemporaneous linear correlation in the supplied indicator; it is not an activity model, and the jitter/trend terms do not establish a companion.",
     }
     output_path = workspace.path / "outputs" / RV_FIT_FILENAME
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     run_digest = hashlib.sha256(
-        (input_hash + json.dumps(report["fixed_orbital_inputs"], sort_keys=True)).encode("utf-8")
+        (
+            input_hash
+            + RV_MODEL_CONFIGURATION
+            + json.dumps(report["fixed_orbital_inputs"], sort_keys=True)
+        ).encode("utf-8")
     ).hexdigest()
     run_id = "fit-" + run_digest[:16]
     run_dir = workspace.path / "runs" / RV_ENGINE_NAME / run_id

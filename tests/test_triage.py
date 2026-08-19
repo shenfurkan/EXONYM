@@ -124,7 +124,52 @@ def _write_passing_pre_vetting_artifacts(candidate_path: Path, candidate_id: str
     )
     (outputs / "stellar_activity_results.json").write_text(
         json.dumps(
-            {"source": "candidate-data", "rotation_period_days": 7.0, "rotation_period_std_days": 0.2}
+            {
+                "schema_version": "1.0",
+                "work_package": "STELLAR_ACTIVITY",
+                "generated_utc": "2026-08-01T00:00:00Z",
+                "source": "candidate-data",
+                "scientific_status": "exploratory-activity-diagnostic",
+                "validation_eligible": False,
+                "transit_mask_status": "applied-candidate-ephemeris",
+                "method": "synthetic test diagnostic",
+                "period_search_range_days": [0.5, 20.0],
+                "rotation_period_days": 7.0,
+                "rotation_period_std_days": 0.2,
+                "modulation_amplitude_ppm": 100.0,
+                "best_analytic_white_noise_false_alarm_probability": 0.1,
+                "n_segments": 1,
+                "segments": [
+                    {
+                        "sector": 1,
+                        "n_points": 100,
+                        "baseline_days": 20.0,
+                        "best_period_days": 7.0,
+                        "max_power": 0.2,
+                        "analytic_white_noise_false_alarm_probability": 0.1,
+                        "sampling_window": {
+                            "method": "normalized-spectral-window-v1",
+                            "baseline_days": 20.0,
+                            "frequency_resolution_days_inverse": 0.05,
+                            "top_window_peaks": [
+                                {"frequency_days_inverse": 0.1, "period_days": 10.0, "window_power": 0.2}
+                            ],
+                            "nearest_window_peak": None,
+                            "direct_frequency_proximity_within_resolution": False,
+                            "interpretation": "Synthetic test-only window diagnostic."
+                        }
+                    }
+                ],
+                "harmonic_persistence": {
+                    "status": "unresolved-insufficient-segments",
+                    "reference_frequency_days_inverse": None,
+                    "reference_period_days": None,
+                    "segments": [],
+                    "consistent_segment_count": 0,
+                    "interpretation": "One segment cannot establish persistence."
+                },
+                "caveat": "Synthetic test-only activity diagnostic."
+            }
         ),
         encoding="utf-8",
     )

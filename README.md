@@ -26,6 +26,7 @@ Independent discovery starts with a TIC target that has no assigned TOI or cTOI.
 
 - Scientific commands require candidate-owned observations and fail when their required inputs are absent. Synthetic fixtures are limited to tests and never create candidate evidence.
 - `exonym screen` requires real photometry and a real ephemeris. The same evidence rule applies to search, fitting, phase-curve, activity, asteroseismic, dilution, and TTV commands.
+- `exonym rv fit` is a descriptive fixed-period comparison. It jointly fits per-instrument offsets and jitter, a linear trend, and an activity term only when every RV datum carries the same-unit activity index; it does not confirm a companion or model correlated stellar noise.
 - Workflow gates verify the existence, structure, and checklist state of evidence artifacts. They do not independently reproduce the scientific judgement written in a checklist or claim.
 - Diagnostic plots are derived from candidate artifacts. They do not establish a TPF-derived centroid measurement, so use calibrated difference-image or pixel-level analysis for centroid evidence.
 - A low false-positive probability, a clean odd-even statistic, or a small centroid offset is necessary evidence in some cases, but none alone proves a planetary companion.
@@ -55,33 +56,31 @@ EXONYM requires Python `3.9.*`. The version constraint is exact because the pack
 Run these commands from the repository root in PowerShell:
 
 ```powershell
-py -3.9 -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install -e ".[test]"
-python -m exonym --root . verify
+# Activate a Python 3.9 virtual environment using your local environment manager.
+pip install -e ".[test]"
+exonym --root . verify  # final integration or an ownership/isolation investigation
 ```
 
 Install optional analysis engines separately when they are needed:
 
 ```powershell
 # Native-cadence Transit Least Squares discovery
-python -m pip install -e ".[discovery]"
+pip install -e ".[discovery]"
 
 # TRICERATOPS screening
-python -m pip install -e ".[screening]"
+pip install -e ".[screening]"
 
 # Asteroseismology tools
-python -m pip install -e ".[asteroseismology]"
+pip install -e ".[asteroseismology]"
 
 # Confirm the installed command
 exonym --version
 ```
 
-The command-line entry point and module invocation are equivalent:
+Use the command-line entry point:
 
 ```powershell
 exonym --help
-python -m exonym --help
 ```
 
 Place the optional repository-root argument before the subcommand when operating outside the repository root:
@@ -178,7 +177,7 @@ The active phase advances only when its gate passes. `stopped` workspaces cannot
 | `acquisition` | Raw FITS products and provenance sidecars under `data/raw/`. | At least one `.fits` or `.fz` file must exist, and every such file needs a matching `<stem>.provenance.json` sidecar. |
 | `vetting` | `docs/03_spoc_dv_vetting.md` records odd-even, difference-image centroid, ephemeris-match, and secondary-eclipse assessments. | Every mandatory checklist item must be checked. The gate does not recompute these diagnostics. |
 | `followup` | `docs/04_tfop_sg_followup.md` records photometry, reconnaissance spectroscopy, high-resolution imaging, and precision-RV status. | Every mandatory checklist item must be checked. |
-| `analysis` | Structured scientific claims in `claims/`. | Any parseable claim with `parameter: "fpp"` and numeric `value < 0.01` passes this gate. The claim need not have a particular filename, so method and provenance still require reviewer scrutiny. |
+| `analysis` | Structured scientific claims in `claims/`. | FPP claims are currently disabled: the gate always blocks advancement until provenance-bound observed photometry and calibrated scene constraints are integrated into the statistical validation workflow. |
 | `review` | `decisions/review_gate.md`, a current novelty audit, and the complete candidate record. | The checklist and novelty audit must pass. Successful review sets the lifecycle state to `published` and writes a final gate record. Leaving `published` later requires an explicit reason through `set-state`. |
 
 The novelty-audit record must have a valid schema, match the workspace candidate, declare `status: "eligible"`, and contain a nonexpired, timezone-aware evidence trail. This prevents a stale or mismatched literature check from satisfying feasibility or review.
@@ -243,7 +242,7 @@ tests/                        Target-neutral automated test suite
 | Record | Purpose | Important constraint |
 | --- | --- | --- |
 | `candidate.json` | Candidate identity, mission, lifecycle, workflow, disposition, publication state, and creation time. | Schema version is `2`; top-level objects reject undeclared properties. Use the CLI to change lifecycle state. |
-| `<stem>.provenance.json` | URI, acquisition time, fetcher, and SHA-256 digest for a downloaded product. | The acquisition gate checks sidecar presence. Schema validation checks the record format, but `verify` does not recompute the digest against FITS bytes. |
+| `<stem>.provenance.json` | URI, acquisition time, fetcher, and SHA-256 digest for a downloaded product. | The acquisition gate requires a schema-valid, hash-matched sidecar for each raw FITS product. |
 | `claims/*.json` | A parameter, value, uncertainties, unit, and method for a scientific assertion. | Supported claim parameters include period, radius, mass, and false-positive probability. A claim is an assertion with provenance, not a publication-grade result by itself. |
 | `decisions/novelty_audit.json` | Evidence that the signal is eligible for the workflow's novelty criterion. | Requires timestamped evidence, a decision basis, and a valid expiry time. |
 
@@ -280,12 +279,12 @@ All commands accept the global form `exonym [--root <repository-root>] <command>
 | `ingest <candidate-id>` | `--sectors <int> [<int> ...]`, `--exptime <int>`, `--products {lc,tp,both}` | Downloads SPOC light curves and/or target pixel files into `data/raw/` and writes provenance sidecars. `lc` is the default product choice. |
 | `fetch-priors <candidate-id>` | None | Retrieves available catalog transit priors into `config/signals/transit_config.NN.json`. It can legitimately return an empty list. |
 | `catalog record-ephemeris <candidate-id>` | Source kind, HTTPS URI, raw artifact, BJD_TDB period/epoch/duration, retrieval and expiry times | Adds reviewed EB, variable-star, ExoFOP, or literature ephemeris evidence only when its raw local source artifact can be hash-bound. |
-| `catalog match-ephemeris <candidate-id>` | `--signal` | Writes a hash-bound comparison with fresh, supported known-signal catalog rows. A match requires human review; no match is not a novelty decision. |
+| `catalog match-ephemeris <candidate-id>` | `--signal` | Writes a hash-bound comparison with fresh NEA planetary-system and TOI rows plus supported recorded evidence. A match requires human review; no match is not a novelty decision. |
 | `search <candidate-id>` | `--engine {bls,tls}`, `--period-min`, `--period-max`, `--signal` | Writes engine-specific search results and a content-addressed input manifest. The default blind period interval is 0.5 to 15.0 days. TLS requires the `discovery` extra. |
 | `screen <candidate-id>` | `--signal` | Writes `outputs/fixed_ephemeris_screen.json` or a signal-scoped equivalent after fixed-ephemeris primary, odd-even, half-phase, and alternating-event checks. |
-| `vet <candidate-id>` | `--n-draws`, `--signal` | Runs the optional TRICERATOPS wrapper, writes `outputs/triceratops_report.json`, and on success writes an FPP claim. The default draw count is 2000. |
+| `vet <candidate-id>` | `--n-draws`, `--signal` | Runs the optional TRICERATOPS wrapper and writes `outputs/triceratops_report.json` with input provenance and a claim-ineligible diagnostic FPP. The default draw count is 2000. |
 | `archive <candidate-id>` | `--radius-arcsec` | Writes `outputs/archival_vetting_report.json` from Gaia DR3 and available ExoFOP context. The default search radius is 10 arcsec. |
-| `plot <candidate-id>` | `--signal` | Writes phase-folded light-curve and centroid-offset figures under `figures/`. See the scientific-use warning for the centroid-panel limitation. |
+| `plot <candidate-id>` | `--signal` | Writes a candidate-data phase-folded light-curve figure, plus an optional posterior corner plot when a matching fit chain exists. It does not create a centroid-evidence figure. |
 
 ### Exploratory characterization commands
 
@@ -307,6 +306,8 @@ The following descriptions document the implemented procedures, not an abstract 
 ### Transit search
 
 `exonym search --engine bls` uses Astropy's weighted Box Least Squares implementation. It fits a box-shaped periodic transit model using normalized per-cadence flux uncertainties when they are usable; otherwise it records a robust-scatter fallback in the result and manifest. The reported `snr` is the fitted transit depth divided by its formal BLS depth uncertainty.
+
+Candidate photometry is accepted only when its TESS sector is present in product metadata or a canonical filename. The loader skips unscoped products instead of inventing a sector label, so sector-specific baselines and survey scopes cannot silently use guessed metadata.
 
 The search grid is set from the observed time baseline and trial duration, so the `n_periods` setting requests at least that density but cannot make the grid coarser than the baseline-duration resolution criterion. A retained peak must contain at least two observed transit-event windows. The blind command uses a fixed three-hour duration unless a survey supplies its declared duration grid; `best_duration_hours` therefore describes the selected box-model duration, not a recovered physical transit duration.
 
@@ -343,7 +344,7 @@ The current localization and scene treatment are intentionally marked uncalibrat
 
 `exonym archive` queries Gaia DR3 through available TAP, VizieR, and mirror backends. It validates target association within two arcsec, including proper-motion propagation where applicable. A Renormalised Unit Weight Error value above 1.4 flags possible unresolved multiplicity, but does not establish binarity. The command's default ten-arcsec archive radius is suitable for local catalog context, not a complete crowding analysis when brighter contaminants sit farther from the target aperture.
 
-`exonym catalog match-ephemeris` compares the candidate ephemeris with fresh, retained NASA Exoplanet Archive `pscomppars` rows and with fresh candidate-recorded known-signal evidence. Use `exonym catalog record-ephemeris` only after reviewing an EB, variable-star, ExoFOP, or literature source: the command accepts a BJD_TDB period, epoch, and duration only when a local raw source artifact, HTTPS source URI, retrieval time, and expiry time are recorded and hash-bound. It refuses other time systems rather than approximating a conversion. A period/epoch agreement, or a period harmonic without a published epoch, is a review requirement; a no-match result is limited to the retained current evidence and never establishes novelty.
+`exonym catalog match-ephemeris` compares the candidate ephemeris with fresh, retained NASA Exoplanet Archive `pscomppars` and TOI rows, and with fresh candidate-recorded known-signal evidence. The `pscomppars` parser compares an epoch only when its source row declares BJD_TDB. The TOI parser compares period and duration but retains its epoch as unavailable for comparison because the retrieved BJD label does not establish BJD_TDB. Use `exonym catalog record-ephemeris` only after reviewing an EB, variable-star, ExoFOP, or literature source: the command accepts a BJD_TDB period, epoch, and duration only when a local raw source artifact, HTTPS source URI, retrieval time, and expiry time are recorded and hash-bound. A period/epoch agreement, or a period harmonic without a comparable epoch, is a review requirement; a no-match result is limited to the retained current evidence and never establishes novelty.
 
 ### Pixel localization and dilution
 
@@ -429,16 +430,15 @@ Use the framework to organize and test evidence. Do not treat it as an automatic
 
 Freezing does not copy the full candidate workspace, raw FITS data, derived outputs, or claims into the release directory. Before calling a release reproducible, check that the source inputs, candidate records, and external-data retrieval conditions are still available and documented.
 
-Run the following before a code, schema, template, or scientific-record milestone:
+Run focused tests while making an ordinary change, and run the full suite before a work-package integration:
 
 ```powershell
-python -m compileall -q src tests
-python -m pytest -q
-exonym verify
-exonym verify --schemas-only
+pytest -q
 ```
 
-For an editorial-only README change, the repository policy does not require the full Python test suite. The isolation audit remains appropriate because target-neutral documentation can accidentally contain target-specific identifiers or aliases.
+Reserve `exonym verify` and `exonym verify --schemas-only` for final integration, a candidate-layout migration, or an ownership/isolation investigation. They are not a replacement for focused scientific and artifact-contract tests.
+
+For an editorial-only README change, the repository policy does not require the full Python test suite. A final isolation audit remains appropriate if target-neutral documentation may have acquired a target-specific identifier or alias.
 
 Continuous integration runs the test suite, full isolation audit, and schema-only audit on pushes and pull requests.
 

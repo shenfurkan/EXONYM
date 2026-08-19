@@ -14,22 +14,33 @@ from exonym.schemas import validate_schemas
 from exonym.workspace import create_candidate
 
 
-def _observation_record(candidate_id, time_values, velocity_values, uncertainty=0.5):
+def _observation_record(
+    candidate_id,
+    time_values,
+    velocity_values,
+    uncertainty=0.5,
+    instruments=None,
+    activity_values=None,
+):
     observations = []
     for index, (time_value, velocity_value) in enumerate(zip(time_values, velocity_values)):
-        observations.append(
-            {
-                "observation_time": {"value": float(time_value), "unit": "BJD_TDB"},
-                "velocity": {"value": float(velocity_value), "unit": "m/s"},
-                "uncertainty": {"value": uncertainty, "unit": "m/s"},
-                "instrument": "synthetic-spectrograph",
-                "provenance": {
-                    "source_uri": "https://example.invalid/synthetic-rv",
-                    "retrieved_at_utc": "2000-01-01T00:00:00Z",
-                    "record_label": "synthetic-{0}".format(index),
-                },
+        observation = {
+            "observation_time": {"value": float(time_value), "unit": "BJD_TDB"},
+            "velocity": {"value": float(velocity_value), "unit": "m/s"},
+            "uncertainty": {"value": uncertainty, "unit": "m/s"},
+            "instrument": instruments[index] if instruments is not None else "synthetic-spectrograph",
+            "provenance": {
+                "source_uri": "https://example.invalid/synthetic-rv",
+                "retrieved_at_utc": "2000-01-01T00:00:00Z",
+                "record_label": "synthetic-{0}".format(index),
+            },
+        }
+        if activity_values is not None:
+            observation["activity_indicator"] = {
+                "value": float(activity_values[index]),
+                "unit": "relative-index",
             }
-        )
+        observations.append(observation)
     return {"schema_version": 1, "candidate_id": candidate_id, "observations": observations}
 
 
@@ -116,6 +127,8 @@ def test_rv_keplerian_fit_recovers_synthetic_amplitude_and_records_provenance(tm
         "tolerance_rad": 1e-12,
         "max_iterations": 64,
     }
+    assert report["diagnostics"]["activity_regression"]["status"] == "not-provided"
+    assert len(report["models"]["keplerian"]["parameters"]["instrument_jitters"]) == 1
 
     manifests = list((workspace.path / "runs" / "rv-keplerian").glob("*/engine-run.json"))
     assert len(manifests) == 1
@@ -127,6 +140,76 @@ def test_rv_keplerian_fit_recovers_synthetic_amplitude_and_records_provenance(tm
     audit = IsolationReport()
     validate_schemas(tmp_path, audit)
     assert audit.violations == []
+
+
+def test_rv_fit_jointly_models_instrument_jitter_linear_trend_and_activity(tmp_path):
+    workspace = create_candidate(tmp_path, "rv-nuisance-model")
+    period_days = 5.0
+    reference_time_bjd_tdb = 1200.0
+    time = np.linspace(reference_time_bjd_tdb - 30.0, reference_time_bjd_tdb + 30.0, 96)
+    activity = np.sin(0.61 * time) + 0.31 * np.cos(0.17 * time)
+    instruments = ["spectrograph-a" if index % 2 == 0 else "spectrograph-b" for index in range(time.size)]
+    offsets = np.asarray([2.0 if instrument == "spectrograph-a" else -1.5 for instrument in instruments])
+    velocity = (
+        offsets
+        + 0.12 * (time - reference_time_bjd_tdb)
+        + 2.5 * activity
+        + keplerian_velocity_m_per_s(
+            time,
+            7.0,
+            0.8,
+            0.0,
+            0.0,
+            reference_time_bjd_tdb,
+            period_days,
+        )
+    )
+    source = tmp_path / "rv-nuisance.json"
+    source.write_text(
+        json.dumps(
+            _observation_record(
+                workspace.candidate_id,
+                time,
+                velocity,
+                uncertainty=0.4,
+                instruments=instruments,
+                activity_values=activity,
+            )
+        ),
+        encoding="utf-8",
+    )
+    ingest_radial_velocity_observations(workspace, source)
+
+    report = json.loads(fit_radial_velocity(workspace, period_days).read_text(encoding="utf-8"))
+    parameters = report["models"]["keplerian"]["parameters"]
+
+    assert parameters["semi_amplitude"]["value"] == pytest.approx(7.0, abs=0.3)
+    assert parameters["linear_trend"]["value"] == pytest.approx(0.12, abs=0.03)
+    assert parameters["activity_coefficient"]["value"] == pytest.approx(2.5, abs=0.3)
+    assert parameters["activity_coefficient"]["unit"] == "m/s per relative-index"
+    assert {item["instrument"] for item in parameters["instrument_jitters"]} == {
+        "spectrograph-a",
+        "spectrograph-b",
+    }
+    assert report["diagnostics"]["activity_regression"]["status"] == "jointly-fitted"
+    assert report["diagnostics"]["noise_model"].startswith("quoted per-observation")
+
+
+def test_rv_fit_rejects_partial_activity_indicator_series(tmp_path):
+    workspace = create_candidate(tmp_path, "rv-partial-activity")
+    source = tmp_path / "partial-activity.json"
+    record = _observation_record(
+        workspace.candidate_id,
+        np.linspace(1.0, 20.0, 16),
+        np.zeros(16),
+        activity_values=np.linspace(-1.0, 1.0, 16),
+    )
+    del record["observations"][0]["activity_indicator"]
+    source.write_text(json.dumps(record), encoding="utf-8")
+    ingest_radial_velocity_observations(workspace, source)
+
+    with pytest.raises(ValueError, match="every observation or none"):
+        fit_radial_velocity(workspace, 3.0)
 
 
 def test_kepler_solver_reaches_declared_residual_at_high_eccentricity():

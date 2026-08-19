@@ -124,6 +124,22 @@ def test_invalid_candidate_record_is_flagged(tmp_path):
     assert any(v.rule == "schema-violation" for v in report.violations)
 
 
+def test_schema_audit_rejects_duplicate_json_keys(tmp_path):
+    repo = _make_repo(tmp_path)
+    path = repo / "candidate" / "candidate-alpha" / "candidate.json"
+    path.write_text(
+        '{"schema_version": 2, "schema_version": 2}\n', encoding="utf-8"
+    )
+
+    report = _audit(repo)
+
+    assert not report.ok
+    assert any(
+        violation.rule == "schema-violation" and "duplicate JSON key" in violation.detail
+        for violation in report.violations
+    )
+
+
 def test_invalid_provenance_sidecar_is_flagged(tmp_path):
     repo = _make_repo(tmp_path)
     raw = repo / "candidate" / "candidate-alpha" / "data" / "raw"

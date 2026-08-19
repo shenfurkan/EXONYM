@@ -641,6 +641,7 @@ def run_automated_triage(
     workspace: CandidateWorkspace,
     policy_id: str = "default-pre-vetting-triage",
     policy_version: str = "1.0.0",
+    signal: Optional[str] = None,
 ) -> Path:
     """Aggregate all required pre-vetting diagnostics into a routing decision.
 
@@ -651,7 +652,7 @@ def run_automated_triage(
     workspace = _trusted_workspace(workspace)
     from .statistical_vetting import build_statistical_vetting_evidence
 
-    evidence_path = build_statistical_vetting_evidence(workspace)
+    evidence_path = build_statistical_vetting_evidence(workspace, signal=signal)
     evidence = _load_json_object(evidence_path)
     if evidence is None:
         raise RuntimeError("statistical vetting evidence was not readable after it was written")

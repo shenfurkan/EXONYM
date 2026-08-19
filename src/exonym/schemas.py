@@ -16,7 +16,7 @@ import json
 import math
 from functools import partial
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from .isolation import IsolationReport
 from .resources import ResourceUnavailableError, read_schema_text
@@ -72,12 +72,23 @@ def _reject_nonfinite_constant(value: str) -> object:
     raise ValueError("non-finite JSON number: {0}".format(value))
 
 
+def _reject_duplicate_object_keys(pairs: Sequence[Tuple[str, object]]) -> Dict[str, Any]:
+    """Reject ambiguous JSON objects rather than keeping their last key value."""
+    result: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key: {0}".format(key))
+        result[key] = value
+    return result
+
+
 def _parse_json(content: str) -> object:
     """Load strict JSON without accepting non-finite numeric constants."""
     return json.loads(
         content,
         parse_constant=_reject_nonfinite_constant,
         parse_float=_parse_finite_float,
+        object_pairs_hook=_reject_duplicate_object_keys,
     )
 
 

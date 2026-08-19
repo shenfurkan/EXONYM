@@ -33,6 +33,14 @@ CATALOG_STATUSES = (
 )
 RETRIEVAL_TTL = timedelta(days=30)
 RETRYABLE_HTTP_STATUSES = (429, 500, 502, 503, 504)
+KNOWN_SIGNAL_REQUIRED_COLUMNS = {
+    "nasa-exoplanet-archive": (
+        "pl_orbper", "pl_tranmid", "pl_trandur", "pl_tsystemref",
+    ),
+    "nasa-exoplanet-archive-toi": (
+        "toi", "tic_id", "pl_orbper", "pl_tranmid", "pl_trandurh",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -466,6 +474,18 @@ def _parse_rows(content: bytes, expected_format: str) -> Tuple[List[Dict[str, An
     return [], "unsupported provider response format: {0}".format(expected_format)
 
 
+def _validate_known_signal_columns(spec: ProviderSpec, rows: Sequence[Mapping[str, Any]]) -> Optional[str]:
+    """Reject populated known-signal snapshots missing their reviewed field contract."""
+    required = KNOWN_SIGNAL_REQUIRED_COLUMNS.get(spec.name)
+    if required is None or not rows:
+        return None
+    available = {str(key).lower() for key in rows[0]}
+    missing = [name for name in required if name.lower() not in available]
+    if missing:
+        return "known-signal field contract missing columns: {0}".format(", ".join(missing))
+    return None
+
+
 def _response_status(response: TransportResponse, rows: Sequence[Mapping[str, Any]], parse_error: Optional[str], spec: ProviderSpec) -> str:
     if response.status_code in (401, 403):
         return "requires-authentication"
@@ -732,6 +752,8 @@ def fetch_catalog(
         response_path = raw_dir / "response.bin"
         response_path.write_bytes(response.body)
         rows, parse_error = _parse_rows(response.body, spec.expected_format)
+        if parse_error is None:
+            parse_error = _validate_known_signal_columns(spec, rows)
         status = "unavailable" if transport_error else _response_status(response, rows, parse_error, spec)
         expires_at = (datetime.now(timezone.utc) + RETRIEVAL_TTL).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         raw_metadata_path = raw_dir / "response-metadata.json"
@@ -747,7 +769,7 @@ def fetch_catalog(
             "failure_policy": spec.failure_policy,
         })
         parser_log_path = run_dir / "parser-log.json"
-        _write_json(parser_log_path, {"schema_version": 1, "provider": provider_name, "retrieval_id": retrieval_id, "parser": {"name": "exonym-catalog", "version": "1"}, "record_count": len(rows), "message": transport_error or parse_error or "parsed"})
+        _write_json(parser_log_path, {"schema_version": 1, "provider": provider_name, "retrieval_id": retrieval_id, "parser": {"name": "exonym-catalog", "version": "1"}, "known_signal_required_columns": list(KNOWN_SIGNAL_REQUIRED_COLUMNS.get(provider_name, ())), "record_count": len(rows), "message": transport_error or parse_error or "parsed"})
         snapshot_path = run_dir / "snapshot.json"
         _write_json(snapshot_path, {
             "schema_version": 1, "candidate_id": candidate.candidate_id, "provider": provider_name,

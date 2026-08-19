@@ -440,18 +440,13 @@ def load_light_curve_table(
             if not sector_value or sector_value <= 0:
                 sector_value = _sector_from_canonical_filename(path)
             if not sector_value or sector_value <= 0:
-                if requested_sectors is not None:
-                    _warnings.warn(
-                        "skipped {0}: TESS sector cannot be verified from metadata or canonical filename".format(
-                            path.name
-                        ),
-                        stacklevel=2,
-                    )
-                    continue
-                # Ordinary candidate-local analysis can retain an unscoped
-                # product as a separate normalization group. It must never be
-                # mistaken for a requested physical sector in a survey.
-                sector_value = len(tables) + 1
+                _warnings.warn(
+                    "skipped {0}: TESS sector cannot be verified from metadata or canonical filename".format(
+                        path.name
+                    ),
+                    stacklevel=2,
+                )
+                continue
             if requested_sectors is not None and sector_value not in requested_sectors:
                 continue
             if sector_value in seen_sectors:
