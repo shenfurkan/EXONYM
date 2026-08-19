@@ -342,6 +342,17 @@ def test_vetting_readiness_refuses_review_required_evidence_without_claims(tmp_p
     assert not list((candidate_path / "claims").glob("*.json"))
 
 
+def test_vetting_readiness_requires_all_real_data_prerequisites(tmp_path: Path):
+    from exonym.statistical_vetting import require_vetting_readiness
+
+    candidate_path = _setup_synthetic_workspace(tmp_path, "synth-vet-prerequisites")
+    cand = load_candidate(tmp_path, "synth-vet-prerequisites")
+    _write_passing_pre_vetting_artifacts(candidate_path, cand.candidate_id)
+
+    with pytest.raises(RuntimeError, match="real candidate-data prerequisite outputs: search"):
+        require_vetting_readiness(cand)
+
+
 def test_decisive_rejection_prohibits_triceratops(tmp_path: Path):
     from exonym.statistical_vetting import record_decisive_rejection, require_vetting_readiness
 

@@ -299,6 +299,52 @@ def record_decisive_rejection(workspace: CandidateWorkspace, reason: str, eviden
     return path
 
 
+def _require_real_data_prerequisites(workspace: CandidateWorkspace, signal: Optional[str]) -> None:
+    """Require the ordered candidate-data outputs that must precede TRICERATOPS."""
+    suffix = ".{0}".format(signal.lstrip(".")) if signal else ""
+    required = (
+        ("search", Path("outputs") / "bls_search_results{0}.json".format(suffix), "source", "candidate-data"),
+        ("search manifest", Path("outputs") / "bls_search_manifest{0}.json".format(suffix), "source", "candidate-data"),
+        ("screen", Path("outputs") / "fixed_ephemeris_screen{0}.json".format(suffix), "source", "candidate-data"),
+        ("archive", Path("outputs") / "archival_vetting_report.json", "candidate_id", workspace.candidate_id),
+        ("localization", Path("outputs") / "prf_localization_results.json", "source", "candidate-data"),
+        ("activity", Path("outputs") / "stellar_activity_results.json", "source", "candidate-data"),
+        ("asteroseismology", Path("outputs") / "asteroseismic_results.json", "source", "candidate-data"),
+        ("SED", Path("outputs") / "sed_fit_results.json", "source", "candidate-data"),
+        ("dilution", Path("outputs") / "dilution_sensitivity_results.json", "source", "candidate-data"),
+        ("transit fit", Path("outputs") / "mcmc_transit_fit{0}.json".format(suffix), "source", "candidate-data"),
+        ("timing", Path("outputs") / "ttv_analysis_results{0}.json".format(suffix), "source", "candidate-data"),
+        ("phase curve", Path("outputs") / "phase_curve_results.json", "source", "candidate-data"),
+    )
+    candidate_root = workspace.path.resolve()
+    missing: List[str] = []
+    for name, relative, field, expected in required:
+        path = (candidate_root / relative).resolve()
+        try:
+            path.relative_to(candidate_root)
+        except ValueError:
+            missing.append(name)
+            continue
+        data = _load_object(path)
+        if data is None or data.get(field) != expected:
+            missing.append(name)
+    for name in ("phase_folded_lc{0}.png".format(suffix), "centroid_offset{0}.png".format(suffix)):
+        path = (candidate_root / "figures" / name).resolve()
+        try:
+            path.relative_to(candidate_root)
+        except ValueError:
+            missing.append("diagnostic plot {0}".format(name))
+            continue
+        if not path.is_file() or path.stat().st_size == 0:
+            missing.append("diagnostic plot {0}".format(name))
+    if missing:
+        raise RuntimeError(
+            "TRICERATOPS requires real candidate-data prerequisite outputs: {0}.".format(
+                ", ".join(missing)
+            )
+        )
+
+
 def require_vetting_readiness(workspace: CandidateWorkspace, signal: Optional[str] = None) -> Path:
     """Stop before Monte Carlo unless all required diagnostics pass automated routing."""
     rejection = _load_object(workspace.path / "decisions" / "decisive_rejection.json")
@@ -317,4 +363,5 @@ def require_vetting_readiness(workspace: CandidateWorkspace, signal: Optional[st
         raise RuntimeError(
             "TRICERATOPS requires passing candidate-local statistical vetting evidence; current routing is {0}.".format(status)
         )
+    _require_real_data_prerequisites(workspace, signal)
     return evidence_path

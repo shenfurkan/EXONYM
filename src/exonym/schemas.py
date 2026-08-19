@@ -980,9 +980,9 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
             except ValueError:
                 relative = Path()
             is_candidate_local = (
-                len(relative.parts) == len(expected_parts) + 1
+                len(relative.parts) >= len(expected_parts) + 1
                 and tuple(relative.parts[-len(expected_parts):]) == expected_parts
-                and not relative.parts[0].startswith("_")
+                and not any(p.startswith("_") for p in relative.parts[:-len(expected_parts)])
             )
             if not is_candidate_local:
                 report.add(path, rule, message)
@@ -1007,9 +1007,9 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
             except ValueError:
                 relative = Path()
             is_candidate_local = (
-                len(relative.parts) == 3
+                len(relative.parts) >= 3
                 and relative.parts[-2] == "outputs"
-                and not relative.parts[0].startswith("_")
+                and not any(p.startswith("_") for p in relative.parts[:-2])
             )
             if not is_candidate_local:
                 report.add(path, rule, message)
@@ -1022,16 +1022,9 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
         except ValueError:
             relative = Path()
         is_candidate_local = (
-            (
-                len(relative.parts) == 3
-                and relative.parts[1] == "outputs"
-                and not relative.parts[0].startswith("_")
-            )
-            or (
-                len(relative.parts) == 4
-                and relative.parts[0] == "active"
-                and relative.parts[2] == "outputs"
-            )
+            len(relative.parts) >= 3
+            and relative.parts[-2] == "outputs"
+            and not any(p.startswith("_") for p in relative.parts[:-2])
         )
         if not is_candidate_local:
             report.add(

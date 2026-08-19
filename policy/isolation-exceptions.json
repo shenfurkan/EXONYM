@@ -6,20 +6,6 @@
       "rule": "research-payload-outside-candidate",
       "reason": "Repository logo asset for README documentation",
       "expires": "2028-01-01"
-    },
-    {
-      "path": "templates/notebooks/evidence_review.ipynb",
-      "line": null,
-      "rule": "research-payload-outside-candidate",
-      "reason": "Target-neutral template cloned only into candidate workspaces",
-      "expires": "2028-01-01"
-    },
-    {
-      "path": "src/exonym/_resources/templates/notebooks/evidence_review.ipynb",
-      "line": null,
-      "rule": "research-payload-outside-candidate",
-      "reason": "Packaged mirror of the target-neutral candidate notebook template",
-      "expires": "2028-01-01"
     }
   ]
 }

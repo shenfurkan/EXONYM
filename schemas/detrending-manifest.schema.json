@@ -1,0 +1,50 @@
+﻿{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/detrending-manifest-1.0.json",
+  "title": "Candidate-local Detrending Run Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_id",
+    "generated_utc",
+    "method",
+    "configuration",
+    "input",
+    "artifact"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "candidate_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "generated_utc": { "type": "string", "format": "date-time" },
+    "method": { "type": "string", "enum": ["running-median", "wotan", "celerite"] },
+    "backend_version": { "type": ["string", "null"] },
+    "configuration": {
+      "type": "object",
+      "required": ["window_days"],
+      "additionalProperties": false,
+      "properties": {
+        "window_days": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "input": {
+      "type": "object",
+      "required": ["cadences", "finite_cadences", "sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "cadences": { "type": "integer", "minimum": 3 },
+        "finite_cadences": { "type": "integer", "minimum": 3 },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    }
+  }
+}

@@ -313,11 +313,6 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Per-signal transit config name (e.g. .01 -> config/signals/transit_config.01.json).",
     )
-    vet_parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Bypass automated triage gate and run TRICERATOPS Monte Carlo directly.",
-    )
 
     asteroseismology_parser = commands.add_parser(
         "asteroseismology", help="Estimate stellar oscillation envelope and seismic M*/R*."
@@ -757,8 +752,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             from .vetting.tricera_parse import run_triceratops_simulation
             from .statistical_vetting import require_vetting_readiness
 
-            if not getattr(args, "force", False):
-                require_vetting_readiness(candidate, signal=args.signal)
+            require_vetting_readiness(candidate, signal=args.signal)
             output = run_triceratops_simulation(
                 candidate, n_draws=args.n_draws, signal=args.signal
             )

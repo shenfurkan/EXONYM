@@ -6,7 +6,9 @@ gate: FPP below the preregistered threshold.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import tempfile
 import warnings
@@ -271,8 +273,8 @@ def run_triceratops_simulation(
             "to write an unvalidated placeholder report.".format(source)
         )
 
-    fpp_rounded: Optional[float] = None if (fpp != fpp) else round(fpp, 6)  # NaN check
-    nfpp_rounded: Optional[float] = None if (nfpp != nfpp) else round(nfpp, 6)
+    fpp_rounded: Optional[float] = round(fpp, 6) if math.isfinite(fpp) else None
+    nfpp_rounded: Optional[float] = round(nfpp, 6) if math.isfinite(nfpp) else None
 
     report = {
         "method": "TRICERATOPS",
@@ -299,12 +301,15 @@ def run_triceratops_simulation(
     claim_path = claims_dir / f"fpp_claim{suffix}.json"
     if source == "triceratops-monte-carlo" and fpp_rounded is not None:
         claim_payload = {
+            "candidate_id": workspace.candidate_id,
             "parameter": "fpp",
             "value": fpp_rounded,
             "uncertainty_upper": None,
             "uncertainty_lower": None,
             "unit": "dimensionless",
             "method": "TRICERATOPS Monte Carlo simulation (N={0}); uncertainty not reported by the engine".format(n_draws),
+            "report_path": report_path.relative_to(workspace.path).as_posix(),
+            "report_sha256": hashlib.sha256(report_path.read_bytes()).hexdigest(),
         }
         claim_path.write_text(json.dumps(claim_payload, indent=2) + "\n", encoding="utf-8")
 

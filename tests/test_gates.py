@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 import pytest
@@ -66,6 +67,34 @@ def _templated_repo(tmp_path):
     (tmp_path / "templates/protocols").mkdir(parents=True, exist_ok=True)
     (tmp_path / "templates/tracking").mkdir(parents=True, exist_ok=True)
     return tmp_path
+
+
+def _write_verified_fpp_claim(candidate, value=0.003):
+    report_path = candidate.path / "outputs" / "triceratops_report.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "candidate_id": candidate.candidate_id,
+                "source": "triceratops-monte-carlo",
+                "FPP": value,
+            }
+        ),
+        encoding="utf-8",
+    )
+    claim = {
+        "candidate_id": candidate.candidate_id,
+        "parameter": "fpp",
+        "value": value,
+        "uncertainty_upper": 0.001,
+        "uncertainty_lower": 0.001,
+        "unit": "dimensionless",
+        "method": "TRICERATOPS Monte Carlo simulation",
+        "report_path": "outputs/triceratops_report.json",
+        "report_sha256": hashlib.sha256(report_path.read_bytes()).hexdigest(),
+    }
+    claim_path = candidate.path / "claims" / "fpp.json"
+    claim_path.write_text(json.dumps(claim), encoding="utf-8")
+    return claim_path
 
 
 def test_parse_checklist_counts_and_flags(tmp_path):
@@ -185,19 +214,7 @@ def test_analysis_gate_requires_fpp_claim(tmp_path):
     candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha")
     claims = candidate.path / "claims"
     claims.mkdir(parents=True, exist_ok=True)
-    claims.joinpath("fpp.json").write_text(
-        json.dumps(
-            {
-                "parameter": "fpp",
-                "value": 0.003,
-                "uncertainty_upper": 0.001,
-                "uncertainty_lower": 0.001,
-                "unit": "dimensionless",
-                "method": "triceratops",
-            }
-        ),
-        encoding="utf-8",
-    )
+    _write_verified_fpp_claim(candidate)
 
     candidate.path.joinpath("docs/01_intake_manifest.md").write_text(
         "- [x] [MANDATORY] a\n- [x] [MANDATORY] b\n- [x] [MANDATORY] c\n- [x] [MANDATORY] d\n",
@@ -243,6 +260,36 @@ def test_analysis_gate_requires_fpp_claim(tmp_path):
     candidate = _reload(tmp_path)
     assert candidate.metadata["workflow"]["phase"] == "analysis"
     assert not gate_errors(candidate)
+
+
+@pytest.mark.parametrize("forgery", ("hash", "candidate", "source", "fpp", "path"))
+def test_analysis_gate_rejects_forged_or_mismatched_fpp_claim(tmp_path, forgery):
+    candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha")
+    candidate.path.joinpath("claims").mkdir(parents=True, exist_ok=True)
+    claim_path = _write_verified_fpp_claim(candidate)
+    claim = json.loads(claim_path.read_text(encoding="utf-8"))
+    report_path = candidate.path / "outputs" / "triceratops_report.json"
+
+    if forgery == "hash":
+        claim["report_sha256"] = "0" * 64
+    elif forgery == "candidate":
+        claim["candidate_id"] = "other-candidate"
+    elif forgery == "source":
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        report["source"] = "synthetic-demo"
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        claim["report_sha256"] = hashlib.sha256(report_path.read_bytes()).hexdigest()
+    elif forgery == "fpp":
+        claim["value"] = 0.004
+    else:
+        outside_report = tmp_path / "outside-report.json"
+        outside_report.write_text(report_path.read_text(encoding="utf-8"), encoding="utf-8")
+        claim["report_path"] = str(outside_report)
+    claim_path.write_text(json.dumps(claim), encoding="utf-8")
+
+    from exonym.gatekeeper import _gate_fpp_claim
+
+    assert _gate_fpp_claim(candidate)[0] is False
 
 
 def test_set_lifecycle_state_records_reason_and_event(tmp_path):
@@ -326,19 +373,7 @@ def _to_review_phase(tmp_path):
     advance(candidate)
     claims = candidate.path / "claims"
     claims.mkdir(parents=True, exist_ok=True)
-    claims.joinpath("fpp.json").write_text(
-        json.dumps(
-            {
-                "parameter": "fpp",
-                "value": 0.003,
-                "uncertainty_upper": 0.001,
-                "uncertainty_lower": 0.001,
-                "unit": "dimensionless",
-                "method": "triceratops",
-            }
-        ),
-        encoding="utf-8",
-    )
+    _write_verified_fpp_claim(candidate)
     advance(candidate)
     reloaded = _reload(tmp_path)
     assert reloaded.metadata["workflow"]["phase"] == "review"
@@ -522,4 +557,3 @@ def test_freeze_manifest_bare_workspace_has_empty_engine_manifests_and_config_ha
     assert manifest["config_hashes"] == {}
     assert "requirements_lock_sha256" in manifest
     assert len(manifest["requirements_lock_sha256"]) == 64
-

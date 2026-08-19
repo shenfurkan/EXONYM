@@ -159,7 +159,7 @@ def generate_ldtk_quadratic_prior(
     parameters_path = Path(workspace.path) / STELLAR_PARAMETERS_PATH
     generated_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     payload = {
-        "schema_version": "1.0",
+        "schema_version": 1,
         "work_package": "LDTK_QUADRATIC_LIMB_DARKENING_PRIOR",
         "generated_utc": generated_utc,
         "candidate_id": workspace.candidate_id,

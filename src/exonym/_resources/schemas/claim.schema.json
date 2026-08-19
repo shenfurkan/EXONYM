@@ -19,6 +19,15 @@
     "uncertainty_upper": { "type": ["number", "null"] },
     "uncertainty_lower": { "type": ["number", "null"] },
     "unit": { "type": "string" },
-    "method": { "type": "string" }
-  }
+    "method": { "type": "string" },
+    "candidate_id": { "type": "string", "minLength": 1 },
+    "report_path": { "type": "string", "minLength": 1 },
+    "report_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "parameter": { "const": "fpp" } } },
+      "then": { "required": ["candidate_id", "report_path", "report_sha256"] }
+    }
+  ]
 }

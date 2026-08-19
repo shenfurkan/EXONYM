@@ -175,6 +175,23 @@ def test_cli_vet_blocks_before_triceratops_without_required_evidence(tmp_path, m
     assert (repo / "candidate" / "candidate-alpha" / "decisions" / "automated_triage.json").is_file()
 
 
+def test_cli_vet_does_not_accept_force_bypass(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    root = ["--root", str(repo)]
+    main(root + ["init", "candidate-alpha", "--tic", "123456789"])
+    called = []
+    monkeypatch.setattr(
+        "exonym.vetting.tricera_parse.run_triceratops_simulation",
+        lambda *args, **kwargs: called.append(True),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(root + ["vet", "candidate-alpha", "--force"])
+
+    assert exc_info.value.code == 2
+    assert called == []
+
+
 def test_cli_search_forwards_tls_engine(tmp_path, capsys, monkeypatch):
     repo = _repo(tmp_path)
     root = ["--root", str(repo)]

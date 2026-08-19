@@ -46,8 +46,7 @@ where = ["src"]
   "schemas/*/*.json",
   "templates/*.md",
   "templates/*/*.md",
-  "templates/*/*/*.md",
-  "templates/*/*.ipynb"
+  "templates/*/*/*.md"
 ]
 
 [tool.pytest.ini_options]

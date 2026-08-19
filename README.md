@@ -125,11 +125,22 @@ exonym advance <candidate-id>
 `exonym survey` records a bounded TESS cohort below
 `candidate/_surveys/<survey-id>/`. Each registered target keeps an explicit
 survey outcome, including novelty-audit blocks and searches without alerts.
-Survey search uses only the manifest's selected sectors and routes a BLS peak
-to human review. It does not set a scientific disposition, make a planet claim,
-or replace the required candidate-local screening sequence. Detection-reliability
-calibration, alternate detrending, null controls, injection-recovery, and
-ephemeris matching remain required before an independent-detection claim.
+Survey search uses only the manifest's frozen sectors and a preregistered SNR
+threshold. For each target it runs the following controls before routing any
+alert to human review: a BLS search across a one-, two-, and four-hour
+duration grid comparing both normalized and per-sector running-median flux;
+an inverted-flux null search; three deterministic scrambled-flux searches with
+fixed seeds; and candidate-scale transit injection at three phase offsets to
+check period and epoch recovery at the survey SNR threshold. An alert requires
+the reference BLS, the normalized search, and the duration-grid search to all
+clear the threshold, both diagnostic periods to agree with the reference within
+one percent, every null-control SNR to stay below the threshold, and at least
+two of three injections to recover. The command does not set a scientific
+disposition, make a planet claim, or replace the required candidate-local
+screening sequence. These controls do not provide a population false-alarm
+calibration, a broad completeness map, source localization, or a statistical
+validation. Localization, fitting, follow-up, archive checks, and a final FPP
+run remain required before an independent-detection claim.
 
 Pass `--toi <toi>` only when a known TOI is deliberately being analyzed for validation, comparison, or follow-up rather than independent discovery.
 
@@ -317,7 +328,7 @@ Z_centroid = sqrt((delta_RA * cos(dec))^2 + delta_Dec^2) / sigma
 The current wrapper gives TRICERATOPS a simplified box-shaped light curve instead of the observed candidate photometry. It also uses a fixed fractional uncertainty rather than a full posterior. Treat its output as a screening input, then check whether the stellar properties, aperture contamination, contrast limits, light-curve treatment, and population assumptions make sense for the candidate.
 
 > [!IMPORTANT]
-> TRICERATOPS can keep a laptop busy for a long time and may use enough CPU or memory to make other work unpleasant. Google Colab is a reasonable place for a long exploratory run when its data policy permits the upload. Keep a candidate-local record of the command, package version, input hashes, and output, then rerun any result that supports a claim in the project's frozen environment.
+> TRICERATOPS can keep a machine busy for a long time and may use significant CPU or memory. Dedicated or remote execution is suitable for a long exploratory run when data policy permits. Keep a candidate-local record of the command, package version, input hashes, and output, then rerun any result that supports a claim in the project's frozen environment.
 
 `exonym archive` queries Gaia DR3 through available TAP, VizieR, and mirror backends. It validates target association within two arcsec, including proper-motion propagation where applicable. A Renormalised Unit Weight Error value above 1.4 flags possible unresolved multiplicity, but does not establish binarity. The command's default ten-arcsec archive radius is suitable for local catalog context, not a complete crowding analysis when brighter contaminants sit farther from the target aperture.
 

@@ -1,4 +1,5 @@
 import json
+import hashlib
 import sys
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -254,6 +255,45 @@ def test_run_triceratops_does_not_monkeypatch_tls_client(tmp_path, monkeypatch):
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["source"] == "triceratops-monte-carlo"
     assert module.query_TRILEGAL is query_trilegal
+    claim_path = tmp_path / "claims" / "fpp_claim.json"
+    claim = json.loads(claim_path.read_text(encoding="utf-8"))
+    assert claim["candidate_id"] == "vet-stub"
+    assert claim["report_path"] == "outputs/triceratops_report.json"
+    assert claim["report_sha256"] == hashlib.sha256(report_path.read_bytes()).hexdigest()
+    assert claim["value"] == report["FPP"]
+
+
+def test_run_triceratops_does_not_claim_nonfinite_monte_carlo_fpp(tmp_path, monkeypatch):
+    import types
+
+    from exonym.vetting.tricera_parse import run_triceratops_simulation
+
+    stub, _ = _vet_workspace_stub(tmp_path, tic="123456789")
+    package = types.ModuleType("triceratops")
+    package.__path__ = []
+    module = types.ModuleType("triceratops.triceratops")
+
+    class FakeTarget:
+        def __init__(self, **kwargs):
+            self.FPP = float("inf")
+            self.NFPP = 0.0
+
+        def calc_depths(self, depth):
+            return None
+
+        def calc_probs(self, **kwargs):
+            return None
+
+    module.target = FakeTarget
+    monkeypatch.setitem(sys.modules, "triceratops", package)
+    monkeypatch.setitem(sys.modules, "triceratops.triceratops", module)
+
+    report_path = run_triceratops_simulation(stub, allow_fallback=False)
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["source"] == "triceratops-monte-carlo"
+    assert report["FPP"] is None
+    assert not (tmp_path / "claims" / "fpp_claim.json").exists()
 
 
 def test_run_triceratops_allow_fallback_writes_null_fpp_without_claim(tmp_path):

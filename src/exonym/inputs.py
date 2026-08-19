@@ -173,8 +173,18 @@ def load_transit_ephemeris(
 def load_stellar_parameters(workspace: CandidateWorkspace) -> Dict[str, Any]:
     """Return stellar parameters read from ``data/external/stellar_params.json``.
 
-    Falls back to generic solar demonstration values labelled ``synthetic-demo``.
+    Falls back to generic solar demonstration values labelled ``synthetic-demo``
+    when no file is present.  When the file exists but only partially populates
+    the required physics fields (``teff_k``, ``logg_cgs``, ``feh``,
+    ``mass_solar``, ``radius_solar``), the source is set to
+    ``"partial-candidate-data"`` and any missing physics field retains its
+    generic demonstration value.  Callers that require fully candidate-owned
+    stellar physics should reject ``source != "candidate-data"``.
+
+    ``ra_deg``, ``dec_deg``, and ``parallax_mas`` are optional positional
+    fields; their presence or absence does not affect the source label.
     """
+    _PHYSICS_FIELDS = ("teff_k", "logg_cgs", "feh", "mass_solar", "radius_solar")
     result: Dict[str, Any] = {
         "teff_k": DEMO_TEFF_K,
         "logg_cgs": DEMO_LOGG_CGS,
@@ -202,11 +212,15 @@ def load_stellar_parameters(workspace: CandidateWorkspace) -> Dict[str, Any]:
             payload, ("parallax_mas", "parallax", "plx")
         ),
     }
-    if any(value is not None for value in values.values()):
-        result["source"] = "candidate-data"
     for name, value in values.items():
         if value is not None:
             result[name] = value
+    physics_present = sum(1 for f in _PHYSICS_FIELDS if values.get(f) is not None)
+    if physics_present == len(_PHYSICS_FIELDS):
+        result["source"] = "candidate-data"
+    elif physics_present > 0:
+        result["source"] = "partial-candidate-data"
+    # else: no physics field found -> source stays "synthetic-demo"
     return result
 
 

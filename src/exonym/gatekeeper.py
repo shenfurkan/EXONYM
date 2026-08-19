@@ -8,7 +8,9 @@ are appended to ``candidate/<id>/lifecycle/events.jsonl``.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -78,20 +80,55 @@ def _gate_provenance_ready(workspace: CandidateWorkspace) -> Tuple[bool, str]:
 
 
 def _gate_fpp_claim(workspace: CandidateWorkspace, threshold: float = 0.01) -> Tuple[bool, str]:
-    """analysis gate: an FPP claim below the preregistered threshold exists."""
+    """Require a low FPP claim bound to its real TRICERATOPS report."""
     claims_root = workspace.path / "claims"
     if not claims_root.is_dir():
         return False, "no claims directory; FPP gate not met"
     for claim in sorted(claims_root.glob("*.json")):
         try:
             data = json.loads(claim.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError, UnicodeError):
             continue
-        if data.get("parameter") == "fpp" and isinstance(data.get("value"), (int, float)):
-            value = float(data["value"])
-            if value < threshold:
-                return True, "FPP={0:.4f} < {1:.2f}".format(value, threshold)
-    return False, "no FPP claim below threshold {0:.2f} found in claims/".format(threshold)
+        if not isinstance(data, dict) or data.get("parameter") != "fpp":
+            continue
+        value = data.get("value")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            continue
+        if data.get("candidate_id") != workspace.candidate_id:
+            continue
+        report_path_value = data.get("report_path")
+        report_hash = data.get("report_sha256")
+        if not isinstance(report_path_value, str) or not isinstance(report_hash, str):
+            continue
+        candidate_root = workspace.path.resolve()
+        report_path = (candidate_root / report_path_value).resolve()
+        try:
+            report_path.relative_to(candidate_root)
+        except ValueError:
+            continue
+        if not report_path.is_file():
+            continue
+        actual_hash = hashlib.sha256(report_path.read_bytes()).hexdigest()
+        if actual_hash != report_hash:
+            continue
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, UnicodeError):
+            continue
+        report_fpp = report.get("FPP") if isinstance(report, dict) else None
+        if (
+            not isinstance(report, dict)
+            or report.get("candidate_id") != workspace.candidate_id
+            or report.get("source") != "triceratops-monte-carlo"
+            or isinstance(report_fpp, bool)
+            or not isinstance(report_fpp, (int, float))
+            or not math.isfinite(report_fpp)
+            or value != report_fpp
+        ):
+            continue
+        if 0.0 <= value < threshold:
+            return True, "FPP={0:.4f} < {1:.2f}".format(value, threshold)
+    return False, "no verified TRICERATOPS FPP claim below threshold {0:.2f} found in claims/".format(threshold)
 
 
 def _parse_utc_timestamp(value: object) -> Optional[datetime]:
