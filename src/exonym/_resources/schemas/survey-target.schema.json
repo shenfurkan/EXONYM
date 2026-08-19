@@ -30,6 +30,7 @@
       "enum": [
         "pending-eligibility",
         "blocked-novelty-audit",
+        "invalidated-needs-rerun",
         "searched-no-alert",
         "alert-for-human-review",
         "excluded-before-search"

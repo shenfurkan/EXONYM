@@ -554,10 +554,8 @@ def run_asteroseismology(
 
     table = load_light_curve_table(workspace)
     if table is None:
-        table = _synthetic_oscillation_table()
-        source = "synthetic-demo"
-    else:
-        source = "candidate-data"
+        raise RuntimeError("asteroseismology requires observed candidate photometry")
+    source = "candidate-data"
 
     time = table["time"]
     flux = table["flux"]
@@ -565,13 +563,25 @@ def run_asteroseismology(
     cadence_seconds = 120.0
     if time.size > 1:
         cadence_seconds = float(np.median(np.diff(np.sort(time)))) * 86400.0
-    phase_days = phase_hours(time, ephemeris["period_days"], ephemeris["epoch_btjd"]) / 24.0
-    transit_mask = np.abs(phase_days) >= 0.75 * ephemeris["duration_days"]
-    masked_time = time[transit_mask]
-    masked_flux = flux[transit_mask]
+    required_fields = ("period_days", "epoch_btjd", "duration_days")
+    can_mask_transits = ephemeris.get("source") != "synthetic-demo" and all(
+        ephemeris.get("field_sources", {}).get(field) != "synthetic-demo"
+        for field in required_fields
+    )
+    if can_mask_transits:
+        phase_days = phase_hours(time, ephemeris["period_days"], ephemeris["epoch_btjd"]) / 24.0
+        transit_mask = np.abs(phase_days) >= 0.75 * ephemeris["duration_days"]
+        masked_time = time[transit_mask]
+        masked_flux = flux[transit_mask]
+        transit_mask_status = "applied-candidate-ephemeris"
+    else:
+        masked_time = time
+        masked_flux = flux
+        transit_mask_status = "not-applied-no-candidate-ephemeris"
     if masked_time.size < 100:
         masked_time = time
         masked_flux = flux
+        transit_mask_status = "not-applied-insufficient-post-mask-cadences"
 
     detrended_time, detrended_flux = _highpass_segments(
         masked_time, masked_flux, cadence_seconds, window_days=1.0
@@ -607,6 +617,14 @@ def run_asteroseismology(
         "work_package": "ASTEROSEISMOLOGY",
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "source": source,
+        "scientific_status": "exploratory-scaling-diagnostic",
+        "validation_eligible": False,
+        "validation_reason": (
+            "The envelope and solar scaling relations are not a calibrated "
+            "mode-identification or stellar-parameter inference. They cannot "
+            "supply an automatic validation constraint."
+        ),
+        "transit_mask_status": transit_mask_status,
         "status": (
             "scaling_rejected_unphysical"
             if not sanity["plausible"]
@@ -648,7 +666,8 @@ def run_asteroseismology(
         "caveat": (
             "Candidate envelope peaks and spacing correlations are preliminary "
             "diagnostics; calibrated detection probabilities require null "
-            "simulations and injection/recovery gates."
+            "simulations and injection/recovery gates. Missing candidate "
+            "ephemerides leave transit cadences unmasked rather than synthetic-masked."
         ),
     }
     output_path = outputs_dir / "asteroseismic_results.json"

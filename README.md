@@ -24,10 +24,10 @@ Independent discovery starts with a TIC target that has no assigned TOI or cTOI.
 
 ### Read this before interpreting an output
 
-- Several exploratory commands can produce records marked `source: "synthetic-demo"` when candidate data are unavailable. Those records exercise software paths; they are not scientific evidence for a target.
-- `exonym screen` intentionally requires real photometry and a real ephemeris. It does not substitute synthetic data.
+- Scientific commands require candidate-owned observations and fail when their required inputs are absent. Synthetic fixtures are limited to tests and never create candidate evidence.
+- `exonym screen` requires real photometry and a real ephemeris. The same evidence rule applies to search, fitting, phase-curve, activity, asteroseismic, dilution, and TTV commands.
 - Workflow gates verify the existence, structure, and checklist state of evidence artifacts. They do not independently reproduce the scientific judgement written in a checklist or claim.
-- The diagnostic centroid panel produced by `exonym plot` is currently a fixed-seed visualization, not a TPF-derived centroid measurement. Use a measured difference-image or pixel-level analysis for centroid evidence.
+- Diagnostic plots are derived from candidate artifacts. They do not establish a TPF-derived centroid measurement, so use calibrated difference-image or pixel-level analysis for centroid evidence.
 - A low false-positive probability, a clean odd-even statistic, or a small centroid offset is necessary evidence in some cases, but none alone proves a planetary companion.
 
 ## Design principles
@@ -130,8 +130,11 @@ threshold. For each target it runs the following controls before routing any
 alert to human review: a BLS search across a one-, two-, and four-hour
 duration grid comparing both normalized and per-sector running-median flux;
 an inverted-flux null search; three deterministic scrambled-flux searches with
-fixed seeds; and candidate-scale transit injection at three phase offsets to
-check period and epoch recovery at the survey SNR threshold. An alert requires
+fixed seeds; and finite-exposure box-model transit injection at three phase
+offsets to check period and epoch recovery at the survey SNR threshold. The
+cadence integration is inferred from the candidate time grid and does not make
+the injection a limb-darkened physical transit model. The running-median
+branch splits large intra-sector cadence gaps before filtering. An alert requires
 the reference BLS, the normalized search, and the duration-grid search to all
 clear the threshold, both diagnostic periods to agree with the reference within
 one percent, every null-control SNR to stay below the threshold, and at least
@@ -141,6 +144,20 @@ screening sequence. These controls do not provide a population false-alarm
 calibration, a broad completeness map, source localization, or a statistical
 validation. Localization, fitting, follow-up, archive checks, and a final FPP
 run remain required before an independent-detection claim.
+
+Each fresh survey robustness artifact also preserves a fixed-ephemeris
+odd-even comparison, half-phase window, and doubled-period alternating-event
+diagnostic for the selected BLS ephemeris. These fields are explicitly for
+human review: an unresolved window neither clears nor establishes an alias,
+and no automatic eclipsing-binary or planet disposition is made.
+
+Separately, `exonym survey sensitivity` runs a candidate-local grid of three
+periods, three durations, three depths, and four evenly spaced phase offsets
+through both preprocessing branches. Each grid cell reports its recovery
+fraction with a Wilson 95% interval so the limited phase-trial uncertainty is
+visible. This is still a fixed box-model diagnostic for one target: it is not
+a population selection function, detection-reliability calibration, or
+completeness estimate.
 
 Pass `--toi <toi>` only when a known TOI is deliberately being analyzed for validation, comparison, or follow-up rather than independent discovery.
 
@@ -251,6 +268,7 @@ All commands accept the global form `exonym [--root <repository-root>] <command>
 | `survey init <survey-id>` | `--mission tess --sectors <int> [<int> ...] --review-snr <float>` | Creates a bounded survey and freezes its internal BLS triage threshold below `candidate/_surveys/`. |
 | `survey add-target <survey-id> <candidate-id>` | None | Adds one TOI-free TESS workspace to the cohort denominator. |
 | `survey search <survey-id> <candidate-id>` | None | Runs BLS only on the survey sectors using its frozen threshold after a current eligible novelty audit; it records a triage outcome, not a planet claim. |
+| `survey sensitivity <survey-id> <candidate-id>` | None | Runs a fixed candidate-level period-duration-depth injection grid in both preprocessing branches and reports recovery intervals without changing survey routing. |
 | `survey exclude <survey-id> <candidate-id>` | `--reason <text>` | Retains a documented pre-search exclusion without changing the candidate lifecycle. |
 | `survey report <survey-id>` | None | Prints every registered target and its recorded outcome. |
 | `verify` | `--schemas-only` | Runs isolation and schema checks. It exits nonzero when violations are found. |
@@ -261,6 +279,8 @@ All commands accept the global form `exonym [--root <repository-root>] <command>
 | --- | --- | --- |
 | `ingest <candidate-id>` | `--sectors <int> [<int> ...]`, `--exptime <int>`, `--products {lc,tp,both}` | Downloads SPOC light curves and/or target pixel files into `data/raw/` and writes provenance sidecars. `lc` is the default product choice. |
 | `fetch-priors <candidate-id>` | None | Retrieves available catalog transit priors into `config/signals/transit_config.NN.json`. It can legitimately return an empty list. |
+| `catalog record-ephemeris <candidate-id>` | Source kind, HTTPS URI, raw artifact, BJD_TDB period/epoch/duration, retrieval and expiry times | Adds reviewed EB, variable-star, ExoFOP, or literature ephemeris evidence only when its raw local source artifact can be hash-bound. |
+| `catalog match-ephemeris <candidate-id>` | `--signal` | Writes a hash-bound comparison with fresh, supported known-signal catalog rows. A match requires human review; no match is not a novelty decision. |
 | `search <candidate-id>` | `--engine {bls,tls}`, `--period-min`, `--period-max`, `--signal` | Writes engine-specific search results and a content-addressed input manifest. The default blind period interval is 0.5 to 15.0 days. TLS requires the `discovery` extra. |
 | `screen <candidate-id>` | `--signal` | Writes `outputs/fixed_ephemeris_screen.json` or a signal-scoped equivalent after fixed-ephemeris primary, odd-even, half-phase, and alternating-event checks. |
 | `vet <candidate-id>` | `--n-draws`, `--signal` | Runs the optional TRICERATOPS wrapper, writes `outputs/triceratops_report.json`, and on success writes an FPP claim. The default draw count is 2000. |
@@ -286,20 +306,11 @@ The following descriptions document the implemented procedures, not an abstract 
 
 ### Transit search
 
-`exonym search --engine bls` uses a custom box-shaped periodic search. For an in-transit and out-of-transit partition, it estimates depth as:
+`exonym search --engine bls` uses Astropy's weighted Box Least Squares implementation. It fits a box-shaped periodic transit model using normalized per-cadence flux uncertainties when they are usable; otherwise it records a robust-scatter fallback in the result and manifest. The reported `snr` is the fitted transit depth divided by its formal BLS depth uncertainty.
 
-```text
-d = median(f_out) - median(f_in)
-```
+The search grid is set from the observed time baseline and trial duration, so the `n_periods` setting requests at least that density but cannot make the grid coarser than the baseline-duration resolution criterion. A retained peak must contain at least two observed transit-event windows. The blind command uses a fixed three-hour duration unless a survey supplies its declared duration grid; `best_duration_hours` therefore describes the selected box-model duration, not a recovered physical transit duration.
 
-It reports a heuristic signal-to-noise ratio using:
-
-```text
-N_eff = N_in * N_out / (N_in + N_out)
-SNR = d * sqrt(N_eff) / sigma_out
-```
-
-The blind search uses a fixed three-hour duration, refines candidate periods, and checks twofold and threefold harmonic aliases. `best_duration_hours` therefore describes the supplied search duration rather than a recovered physical transit duration. The score uses median-box statistics rather than a complete transit likelihood, weighted photometric uncertainties, a detrending model, or a correlated-noise model. Inspect recovered periods against the catalog and phase-folded data before treating a peak as an astrophysical event.
+The fitted-depth SNR is a ranking and human-review statistic only. It is not a look-elsewhere-corrected false-alarm probability, a population detection reliability, a correlated-noise model, or an astrophysical validation result. Inspect aliases, phase-folded photometry, alternate detrending, null controls, and injection recovery before treating a peak as an astrophysical event.
 
 `exonym search --engine tls` uses the optional Transit Least Squares engine on native-cadence photometry and per-cadence flux uncertainties. It reports TLS Signal Detection Efficiency alongside period, epoch, depth, and duration. TLS improves transit-shape matching but does not calibrate its own false-alarm rate; injection-recovery and null searches remain required before ranking alerts as a survey result.
 
@@ -323,14 +334,16 @@ Z_centroid = sqrt((delta_RA * cos(dec))^2 + delta_Dec^2) / sigma
 
 ### False-positive probability and archival context
 
-`exonym vet` uses the optional [TRICERATOPS](https://github.com/stevengiacalone/triceratops) package for false-positive scenarios. It reads the period, depth, and duration from a signal configuration or BLS result, combines them with workspace metadata, and writes a report and FPP claim when the run succeeds.
+`exonym vet` uses the optional [TRICERATOPS](https://github.com/stevengiacalone/triceratops) package for false-positive scenarios. It is guarded by the required candidate-local screening, archive, localization, activity, and dilution artifacts, then passes prepared observed photometry, per-cadence uncertainties, exposure time, sectors, and the declared ephemeris to the Monte Carlo backend. The report records the random seed, package versions, inputs, and any backend failure.
 
-The current wrapper gives TRICERATOPS a simplified box-shaped light curve instead of the observed candidate photometry. It also uses a fixed fractional uncertainty rather than a full posterior. Treat its output as a screening input, then check whether the stellar properties, aperture contamination, contrast limits, light-curve treatment, and population assumptions make sense for the candidate.
+The current localization and scene treatment are intentionally marked uncalibrated, so a completed Monte Carlo report is not claim-eligible and cannot write an FPP claim. It remains a documented statistical diagnostic. A calibrated mission PRF/scene model, validated contrast and contamination constraints, reproducibility across independent draws, and human review are still required before any scientific validation decision.
 
 > [!IMPORTANT]
 > TRICERATOPS can keep a machine busy for a long time and may use significant CPU or memory. Dedicated or remote execution is suitable for a long exploratory run when data policy permits. Keep a candidate-local record of the command, package version, input hashes, and output, then rerun any result that supports a claim in the project's frozen environment.
 
 `exonym archive` queries Gaia DR3 through available TAP, VizieR, and mirror backends. It validates target association within two arcsec, including proper-motion propagation where applicable. A Renormalised Unit Weight Error value above 1.4 flags possible unresolved multiplicity, but does not establish binarity. The command's default ten-arcsec archive radius is suitable for local catalog context, not a complete crowding analysis when brighter contaminants sit farther from the target aperture.
+
+`exonym catalog match-ephemeris` compares the candidate ephemeris with fresh, retained NASA Exoplanet Archive `pscomppars` rows and with fresh candidate-recorded known-signal evidence. Use `exonym catalog record-ephemeris` only after reviewing an EB, variable-star, ExoFOP, or literature source: the command accepts a BJD_TDB period, epoch, and duration only when a local raw source artifact, HTTPS source URI, retrieval time, and expiry time are recorded and hash-bound. It refuses other time systems rather than approximating a conversion. A period/epoch agreement, or a period harmonic without a published epoch, is a review requirement; a no-match result is limited to the retained current evidence and never establishes novelty.
 
 ### Pixel localization and dilution
 
@@ -396,7 +409,7 @@ For a proposed first-order resonance, it also reports the conventional super-per
 
 Low signal-to-noise timing estimates can be dominated by shape and baseline noise. The module has no standalone timing-variation detection threshold.
 
-`exonym activity` applies a per-sector generalized Lomb-Scargle search over one to twenty days, combines periods using power-weighted estimates, and fits a sinusoidal amplitude. Rotation or activity interpretations require window-function, harmonic, and persistence checks beyond the reported periodogram peak.
+`exonym activity` applies a per-sector generalized Lomb-Scargle search over one to twenty days, combines periods using power-weighted estimates, and fits a sinusoidal amplitude. It records the analytic white-noise FAP separately from a calibrated probability, the normalized sampling-window peaks, and cross-segment fundamental/half/double-harmonic consistency at each segment's frequency resolution. These are reviewer diagnostics: rotation or activity interpretations still require red-noise, window-function, harmonic, and persistence checks beyond the reported periodogram peak.
 
 ## Methodological limits
 

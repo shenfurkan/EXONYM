@@ -2,11 +2,18 @@ import hashlib
 import json
 import shutil
 
+import numpy as np
 import pytest
 
 from exonym.isolation import IsolationReport
+from exonym.freeze import freeze
 from exonym.schemas import validate_schemas
-from exonym.survey import _run_survey_robustness, create_survey, register_survey_target
+from exonym.survey import (
+    _run_survey_robustness,
+    create_survey,
+    register_survey_target,
+    run_survey_sensitivity,
+)
 from exonym.workspace import create_candidate, load_candidate
 
 
@@ -21,6 +28,7 @@ def _make_repo(tmp_path, with_templates=True):
         "survey.schema.json",
         "survey-target.schema.json",
         "survey-robustness.schema.json",
+        "survey-sensitivity.schema.json",
         "engine-run.schema.json",
         "automated-triage.schema.json",
         "radial-velocity-observations.schema.json",
@@ -40,6 +48,13 @@ def _make_repo(tmp_path, with_templates=True):
         "catalog-contrast-curves.schema.json",
         "catalog-context.schema.json",
         "catalog-cross-match.schema.json",
+        "known-signal-ephemeris-match.schema.json",
+        "known-signal-ephemeris-evidence.schema.json",
+        "stellar-activity.schema.json",
+        "phase-curve.schema.json",
+        "detrending-manifest.schema.json",
+        "ldtk-quadratic-limb-darkening-prior.schema.json",
+        "exofop-prior-retrieval.schema.json",
     ):
         shutil.copy2(
             "schemas/{0}".format(name), tmp_path / "schemas" / name
@@ -53,9 +68,48 @@ def _audit(tmp_path):
     return report
 
 
+def _prepare_freeze_source(repo):
+    package_dir = repo / "src" / "exonym"
+    package_dir.mkdir(parents=True, exist_ok=True)
+    (package_dir / "__init__.py").write_text('__version__ = "test"\n', encoding="utf-8")
+    (repo / "pyproject.toml").write_text(
+        "[build-system]\nrequires = [\"setuptools\"]\nbuild-backend = \"setuptools.build_meta\"\n"
+        "[project]\nname = \"exonym\"\nversion = \"0.0.0\"\n",
+        encoding="utf-8",
+    )
+    (repo / "requirements-lock.txt").write_text("numpy==1.26.4\n", encoding="utf-8")
+
+
 def test_clean_repository_passes_schema_validation(tmp_path):
     report = _audit(_make_repo(tmp_path))
     assert report.ok
+
+
+def test_release_snapshot_is_checked_for_inventory_and_hash_integrity(tmp_path):
+    repo = _make_repo(tmp_path)
+    _prepare_freeze_source(repo)
+    candidate = load_candidate(repo, "candidate-alpha")
+    release = freeze(candidate, version="v1.0.0")
+
+    assert _audit(repo).ok
+
+    (release / "workspace" / "candidate" / "candidate-alpha" / "candidate.json").write_text(
+        "{}\n", encoding="utf-8"
+    )
+    report = _audit(repo)
+
+    assert any(violation.rule == "release-file-hash-mismatch" for violation in report.violations)
+    assert any(violation.rule == "release-snapshot-hash-mismatch" for violation in report.violations)
+
+
+def test_release_staging_directory_is_flagged(tmp_path):
+    repo = _make_repo(tmp_path)
+    staging = repo / "candidate" / "candidate-alpha" / "releases" / ".v1.0.0.staging-leftover"
+    staging.mkdir(parents=True)
+
+    report = _audit(repo)
+
+    assert any(violation.rule == "release-staging-leftover" for violation in report.violations)
 
 
 def test_invalid_candidate_record_is_flagged(tmp_path):
@@ -116,7 +170,7 @@ def test_valid_provenance_sidecar_passes(tmp_path):
             {
                 "source_uri": "https://archive.stsci.edu/example",
                 "download_timestamp_utc": "2026-08-04T00:00:00Z",
-                "sha256": "a" * 64,
+                "sha256": hashlib.sha256(b"fits").hexdigest(),
                 "fetched_by": "test",
             }
         ),
@@ -124,6 +178,31 @@ def test_valid_provenance_sidecar_passes(tmp_path):
     )
 
     assert _audit(repo).ok
+
+
+def test_provenance_sidecar_hash_mismatch_is_flagged(tmp_path):
+    repo = _make_repo(tmp_path)
+    raw = repo / "candidate" / "candidate-alpha" / "data" / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
+    product = raw / "lc.fits"
+    product.write_bytes(b"original")
+    sidecar = raw / "lc.provenance.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "source_uri": "https://archive.stsci.edu/example",
+                "download_timestamp_utc": "2026-08-04T00:00:00Z",
+                "sha256": hashlib.sha256(b"original").hexdigest(),
+                "fetched_by": "test",
+            }
+        ),
+        encoding="utf-8",
+    )
+    product.write_bytes(b"tampered")
+
+    report = _audit(repo)
+
+    assert any(violation.rule == "provenance-hash-mismatch" for violation in report.violations)
 
 
 def test_invalid_claim_is_flagged(tmp_path):
@@ -137,6 +216,147 @@ def test_invalid_claim_is_flagged(tmp_path):
     report = _audit(repo)
     assert not report.ok
     assert any(v.rule == "schema-violation" for v in report.violations)
+
+
+def _write_observed_triceratops_report(repo, claim_eligible=False):
+    workspace = repo / "candidate" / "candidate-alpha"
+    photometry_path = workspace / "data" / "raw" / "observed.fits"
+    photometry_path.parent.mkdir(parents=True, exist_ok=True)
+    photometry_path.write_bytes(b"observed photometry")
+    report_path = workspace / "outputs" / "triceratops_report.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "candidate_id": "candidate-alpha",
+                "random_seed": 17,
+                "claim_eligible": claim_eligible,
+                "input_provenance": {
+                    "representation": "phase-folded observed candidate photometry",
+                    "flux_error_source": "reported per-cadence uncertainties",
+                    "raw_cadence_count": 50,
+                    "phase_bin_count": 10,
+                    "flux_error_scalar": 0.001,
+                    "exposure_days": 0.001,
+                    "observed_depth_ppm": 100.0,
+                    "input_files": [
+                        {
+                            "path": "data/raw/observed.fits",
+                            "sha256": _sha256(photometry_path),
+                        }
+                    ],
+                    "ephemeris_field_sources": {
+                        "period_days": "candidate-config",
+                        "epoch_btjd": "candidate-config",
+                        "duration_days": "candidate-config",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return report_path
+
+
+def test_scientific_verification_requires_observed_triceratops_input_and_disables_claims(tmp_path):
+    repo = _make_repo(tmp_path)
+    report_path = _write_observed_triceratops_report(repo, claim_eligible=True)
+    report = _audit(repo)
+
+    assert any(
+        violation.path == report_path.as_posix()
+        and violation.rule == "scientific-fpp-claim-disabled"
+        for violation in report.violations
+    )
+
+
+def test_scientific_verification_accepts_observed_unclaimable_triceratops_report(tmp_path):
+    repo = _make_repo(tmp_path)
+    _write_observed_triceratops_report(repo)
+
+    assert _audit(repo).ok
+
+
+def test_scientific_verification_rejects_any_active_fpp_claim(tmp_path):
+    repo = _make_repo(tmp_path)
+    claim_path = repo / "candidate" / "candidate-alpha" / "claims" / "fpp.json"
+    claim_path.write_text(
+        json.dumps(
+            {
+                "parameter": "fpp",
+                "value": 0.001,
+                "uncertainty_upper": 0.001,
+                "uncertainty_lower": 0.001,
+                "unit": "dimensionless",
+                "method": "test",
+                "candidate_id": "candidate-alpha",
+                "report_path": "outputs/triceratops_report.json",
+                "report_sha256": "a" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = _audit(repo)
+    assert any(violation.rule == "scientific-fpp-claim-disabled" for violation in report.violations)
+
+
+def test_scientific_verification_rejects_overclaimed_or_unowned_localization(tmp_path):
+    repo = _make_repo(tmp_path)
+    path = repo / "candidate" / "candidate-alpha" / "outputs" / "prf_localization_results.json"
+    path.write_text(
+        json.dumps(
+            {
+                "candidate_id": "wrong-candidate",
+                "calibration_status": "uncalibrated",
+                "summary": {"conclusion": "target_dominant_among_modeled_sources"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = _audit(repo)
+    assert any(violation.rule == "scientific-localization-ownership-invalid" for violation in report.violations)
+    assert any(violation.rule == "scientific-localization-overclaim" for violation in report.violations)
+
+
+def test_scientific_verification_accepts_inconclusive_uncalibrated_localization(tmp_path):
+    repo = _make_repo(tmp_path)
+    path = repo / "candidate" / "candidate-alpha" / "outputs" / "prf_localization_results.json"
+    path.write_text(
+        json.dumps(
+            {
+                "candidate_id": "candidate-alpha",
+                "calibration_status": "uncalibrated",
+                "summary": {"conclusion": "inconclusive_uncalibrated_prf"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _audit(repo).ok
+
+
+def test_scientific_verification_rejects_self_declared_localization_calibration(tmp_path):
+    repo = _make_repo(tmp_path)
+    path = repo / "candidate" / "candidate-alpha" / "outputs" / "prf_localization_results.json"
+    path.write_text(
+        json.dumps(
+            {
+                "candidate_id": "candidate-alpha",
+                "calibration_status": "calibrated",
+                "calibration_evidence": {"path": "outputs/benchmark.json", "sha256": "a" * 64},
+                "summary": {"conclusion": "target_dominant_among_modeled_sources"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = _audit(repo)
+
+    assert any(
+        violation.rule == "scientific-localization-calibration-unsupported"
+        for violation in report.violations
+    )
 
 
 def _valid_novelty_audit():
@@ -228,6 +448,7 @@ def _valid_survey_robustness():
             "best_depth_ppm": 1000.0,
             "best_duration_hours": 2.0,
             "snr": snr,
+            "n_distinct_transit_events": 3,
         }
 
     phase_offsets = [0.25, 0.5, 0.75]
@@ -262,7 +483,11 @@ def _valid_survey_robustness():
             "period_min_days": 0.5,
             "period_max_days": 20.0,
             "n_periods": 200,
+            "period_grid": "astropy-autopower-baseline-duration-resolved",
+            "injection_model": "finite-exposure-box-overlap",
+            "exposure_model": "median-positive-cadence-inferred",
             "detrend_window_days": 1.0,
+            "detrend_gap_break_window_fraction": 0.5,
             "scramble_seeds": [5, 7, 11],
             "period_agreement_fraction": 0.01,
             "injection_recovery": {
@@ -286,6 +511,19 @@ def _valid_survey_robustness():
             "controls": {
                 "inverted": bls_result(snr=2.0),
                 "scrambles": [{"seed": 5, "best": bls_result(snr=3.0)}],
+                "by_variant": {
+                    "normalized": {
+                        "inverted": bls_result(snr=2.0),
+                        "scrambles": [{"seed": 5, "best": bls_result(snr=3.0)}],
+                        "max_snr": 3.0,
+                    },
+                    "running-median": {
+                        "inverted": bls_result(snr=2.0),
+                        "scrambles": [{"seed": 5, "best": bls_result(snr=3.0)}],
+                        "max_snr": 3.0,
+                    },
+                },
+                "scramble_method": "independent-sector-circular-shift",
                 "max_snr": 3.0,
             },
         },
@@ -497,6 +735,62 @@ def test_missing_schema_file_is_reported(tmp_path):
     assert any(v.rule == "schema-file-missing" for v in report.violations)
 
 
+def test_detrending_manifest_schema_and_artifact_hash_are_verified(tmp_path):
+    from exonym.detrending import detrend_candidate
+
+    repo = _make_repo(tmp_path)
+    candidate = load_candidate(repo, "candidate-alpha")
+    result = detrend_candidate(
+        candidate,
+        time_btjd=[0.0, 1.0, 2.0, 3.0, 4.0],
+        flux=[1.0, 1.001, 0.999, 1.0, 1.0],
+        method="running-median",
+        window_days=0.5,
+    )
+
+    assert _audit(repo).ok
+    result.artifact_path.write_bytes(b"tampered")
+    report = _audit(repo)
+    assert any(v.rule == "artifact-hash-mismatch" for v in report.violations)
+
+
+def test_ldtk_prior_schema_and_stellar_input_hash_are_verified(tmp_path):
+    repo = _make_repo(tmp_path)
+    candidate = repo / "candidate" / "candidate-alpha"
+    parameters_path = candidate / "data" / "external" / "stellar_params.json"
+    parameters_path.parent.mkdir(parents=True, exist_ok=True)
+    parameters_path.write_text("{}\n", encoding="utf-8")
+    prior_path = candidate / "outputs" / "ldtk_quadratic_limb_darkening_prior.json"
+    prior_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "work_package": "LDTK_QUADRATIC_LIMB_DARKENING_PRIOR",
+                "generated_utc": "2026-01-01T00:00:00Z",
+                "candidate_id": "candidate-alpha",
+                "method": "test",
+                "ldtk": {"version": "test", "coefficient_method": "coeffs_qd", "monte_carlo": True},
+                "input_provenance": {
+                    "stellar_parameters_path": "data/external/stellar_params.json",
+                    "stellar_parameters_sha256": _sha256(parameters_path),
+                },
+                "stellar_parameters": {
+                    "teff_k": {"value": 5700.0, "uncertainty": 75.0, "unit": "K"}
+                },
+                "quadratic_coefficients": [
+                    {"filter": "TESS", "u1": 0.2, "u1_err": 0.01, "u2": 0.3, "u2_err": 0.02, "unit": "dimensionless"}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _audit(repo).ok
+    parameters_path.write_text('{"tampered": true}\n', encoding="utf-8")
+    report = _audit(repo)
+    assert any(v.rule == "artifact-hash-mismatch" for v in report.violations)
+
+
 def test_valid_survey_and_target_records_pass_schema_validation(tmp_path):
     # Arrange
     repo = _make_repo(tmp_path)
@@ -561,6 +855,7 @@ def test_generated_survey_robustness_artifact_passes_schema_validation(tmp_path,
             "best_depth_ppm": 1000.0,
             "best_duration_hours": 2.0,
             "snr": snr,
+            "n_distinct_transit_events": 3,
         }
 
     def fake_table(*args, **kwargs):
@@ -572,14 +867,29 @@ def test_generated_survey_robustness_artifact_passes_schema_validation(tmp_path,
         }
 
     def fake_diagnostics(*args, **kwargs):
+        normalized_controls = {
+            "inverted": bls_result(snr=2.0),
+            "scrambles": [{"seed": 5, "best": bls_result(snr=3.0)}],
+            "max_snr": 3.0,
+        }
+        running_median_controls = {
+            "inverted": bls_result(snr=2.0),
+            "scrambles": [{"seed": 5, "best": bls_result(snr=3.0)}],
+            "max_snr": 3.0,
+        }
         return {
             "variants": {
                 "normalized": {"best": bls_result(), "trials": [bls_result()]},
                 "running-median": {"best": bls_result(snr=7.0), "trials": [bls_result()]},
             },
             "controls": {
-                "inverted": bls_result(snr=2.0),
-                "scrambles": [{"seed": 5, "best": bls_result(snr=3.0)}],
+                "inverted": normalized_controls["inverted"],
+                "scrambles": normalized_controls["scrambles"],
+                "by_variant": {
+                    "normalized": normalized_controls,
+                    "running-median": running_median_controls,
+                },
+                "scramble_method": "independent-sector-circular-shift",
                 "max_snr": 3.0,
             },
         }
@@ -593,9 +903,13 @@ def test_generated_survey_robustness_artifact_passes_schema_validation(tmp_path,
         period_max_days,
         n_periods,
         tolerance,
-        minimum_snr=None,
-        epoch_tolerance_duration_fraction=1.0,
-    ):
+            minimum_snr=None,
+            epoch_tolerance_duration_fraction=1.0,
+            sectors=None,
+            detrend_window_days=None,
+            flux_err=None,
+            gap_break_window_fraction=0.5,
+        ):
         results = []
         for injection in injections:
             best = bls_result(snr=minimum_snr)
@@ -610,6 +924,22 @@ def test_generated_survey_robustness_artifact_passes_schema_validation(tmp_path,
                     * epoch_tolerance_duration_fraction,
                     "recovered": True,
                     "best": best,
+                    "branches": {
+                        "normalized": {
+                            "period_match": True,
+                            "epoch_match": True,
+                            "snr_pass": True,
+                            "recovered": True,
+                            "best": dict(best),
+                        },
+                        "running-median": {
+                            "period_match": True,
+                            "epoch_match": True,
+                            "snr_pass": True,
+                            "recovered": True,
+                            "best": dict(best),
+                        },
+                    },
                 }
             )
         return results
@@ -627,6 +957,170 @@ def test_generated_survey_robustness_artifact_passes_schema_validation(tmp_path,
     assert path.is_file()
     assert artifact["injection_recovery_summary"]["passed"] is True
     assert _audit(repo).ok
+
+
+def test_generated_survey_sensitivity_artifact_passes_schema_validation(tmp_path, monkeypatch):
+    # Arrange
+    repo = _make_repo(tmp_path)
+    survey = create_survey(repo, "test-survey", "tess", [17])
+    candidate = load_candidate(repo, "candidate-alpha")
+    _register_artifact_survey_target(repo)
+    raw_input = candidate.path / "data" / "raw" / "s0017_lc.fits"
+    raw_input.write_bytes(b"fits")
+
+    def fake_table(*args, **kwargs):
+        return {
+            "time": [index * 0.1 for index in range(100)],
+            "flux": [1.0] * 100,
+            "sector": [17] * 100,
+            "input_files": [raw_input],
+        }
+
+    def fake_recovery(time, flux, injections, *args, **kwargs):
+        results = []
+        for injection in injections:
+            best = {
+                "best_period": injection["period_days"],
+                "best_epoch": injection["epoch_btjd"],
+                "best_depth_ppm": injection["depth_ppm"],
+                "best_duration_hours": injection["duration_hours"],
+                "snr": 7.0,
+                "n_distinct_transit_events": 2,
+            }
+            branch = {
+                "period_match": True,
+                "epoch_match": True,
+                "snr_pass": True,
+                "recovered": True,
+                "best": best,
+            }
+            results.append(
+                {
+                    "injection": dict(injection),
+                    "period_match": True,
+                    "epoch_match": True,
+                    "snr_pass": True,
+                    "epoch_tolerance_hours": injection["duration_hours"],
+                    "recovered": True,
+                    "best": best,
+                    "branches": {
+                        "normalized": dict(branch),
+                        "running-median": dict(branch),
+                    },
+                }
+            )
+        return results
+
+    monkeypatch.setattr("exonym.survey._current_eligible_audit", lambda candidate: True)
+    monkeypatch.setattr("exonym.survey.load_light_curve_table", fake_table)
+    monkeypatch.setattr("exonym.survey.injection_recovery_diagnostics", fake_recovery)
+    monkeypatch.setattr(
+        "exonym.survey._input_manifest_records",
+        lambda *args, **kwargs: [
+            {
+                "path": "data/raw/s0017_lc.fits",
+                "sha256": _sha256(raw_input),
+                "provenance_path": None,
+                "provenance": None,
+            }
+        ],
+    )
+
+    # Act
+    output = run_survey_sensitivity(survey, candidate)
+
+    # Assert
+    assert output.is_file()
+    assert _audit(repo).ok
+
+
+def test_exofop_prior_retrieval_is_schema_and_hash_bound(tmp_path, monkeypatch):
+    # Arrange
+    from exonym.priors import fetch_exofop_priors
+
+    repo = _make_repo(tmp_path)
+    candidate = load_candidate(repo, "candidate-alpha")
+    csv_body = (
+        "TOI,TIC ID,Period (days),Epoch (BJD),Depth (ppm),Duration (hours)\n"
+        "100.01,123456789,4.0,2458123.0,500.0,2.0\n"
+    )
+
+    class FakeResponse:
+        status = 200
+
+        def read(self):
+            return csv_body.encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    monkeypatch.setattr("exonym.priors.urllib.request.urlopen", lambda *args, **kwargs: FakeResponse())
+
+    # Act
+    written = fetch_exofop_priors(candidate)
+
+    # Assert
+    assert len(written) == 1
+    assert _audit(repo).ok
+    config = json.loads(written[0].read_text(encoding="utf-8"))
+    raw_path = candidate.path / config["provenance"]["raw_response_path"]
+    raw_path.write_text("tampered", encoding="utf-8")
+    report = _audit(repo)
+    assert any("raw_response hash does not match" in violation.detail for violation in report.violations)
+
+
+def test_generated_stellar_activity_artifact_is_schema_valid(tmp_path, monkeypatch):
+    from exonym import activity
+
+    repo = _make_repo(tmp_path)
+    candidate = load_candidate(repo, "candidate-alpha")
+    time = np.linspace(0.0, 27.0, 800)
+    table = {
+        "time": time,
+        "flux": 1.0 + 300e-6 * np.sin(2.0 * np.pi * time / 5.0),
+        "flux_err": np.full(time.size, 100e-6),
+        "sector": np.ones(time.size, dtype=int),
+    }
+    ephemeris = {
+        "period_days": 3.5,
+        "epoch_btjd": 2.0,
+        "duration_days": 0.12,
+        "source": "candidate-data",
+        "field_sources": {
+            "period_days": "candidate-data",
+            "epoch_btjd": "candidate-data",
+            "duration_days": "candidate-data",
+        },
+    }
+    monkeypatch.setattr(activity, "load_light_curve_table", lambda _workspace: table)
+    monkeypatch.setattr(activity, "load_transit_ephemeris", lambda _workspace: ephemeris)
+
+    output = activity.run_stellar_activity(candidate)
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["scientific_status"] == "exploratory-activity-diagnostic"
+    assert payload["validation_eligible"] is False
+    assert _audit(repo).ok
+
+
+def test_exofop_prior_manifest_outside_candidate_is_rejected(tmp_path):
+    # Arrange
+    repo = _make_repo(tmp_path)
+    outside_manifest = repo / "exofop-prior-manifest.json"
+    outside_manifest.write_text("{}\n", encoding="utf-8")
+
+    # Act
+    report = _audit(repo)
+
+    # Assert
+    assert any(
+        violation.path == outside_manifest.as_posix()
+        and violation.rule == "exofop-prior-manifest-outside-candidate"
+        for violation in report.violations
+    )
 
 
 def test_malformed_survey_robustness_artifact_is_flagged(tmp_path):
@@ -647,6 +1141,20 @@ def test_incomplete_survey_robustness_artifact_is_flagged(tmp_path):
     repo = _make_repo(tmp_path)
     artifact = _valid_survey_robustness()
     del artifact["injection_recovery_summary"]
+    path = _write_survey_robustness(repo, artifact)
+
+    # Act
+    report = _audit(repo)
+
+    # Assert
+    assert any(violation.path == path.as_posix() for violation in report.violations)
+
+
+def test_survey_robustness_artifact_requires_distinct_event_evidence(tmp_path):
+    # Arrange
+    repo = _make_repo(tmp_path)
+    artifact = _valid_survey_robustness()
+    del artifact["reference_signal"]["n_distinct_transit_events"]
     path = _write_survey_robustness(repo, artifact)
 
     # Act

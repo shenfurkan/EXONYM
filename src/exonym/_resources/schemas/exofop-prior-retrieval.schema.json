@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/exofop-prior-retrieval-1.0.json",
+  "title": "ExoFOP Transit Prior Retrieval Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "candidate_id", "provider", "retrieval_id", "source_uri", "retrieved_at", "requested_tic_id", "raw_response", "raw_metadata", "signals", "skipped_rows", "normalization_policy"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "candidate_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+    "provider": {"const": "exofop-priors"},
+    "retrieval_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+    "source_uri": {"const": "https://exofop.ipac.caltech.edu/tess/download_toi.php?sort=toi&output=csv"},
+    "retrieved_at": {"type": "string", "format": "date-time"},
+    "requested_tic_id": {"type": "string", "minLength": 1},
+    "raw_response": {"$ref": "#/$defs/raw_response"},
+    "raw_metadata": {"$ref": "#/$defs/raw_metadata"},
+    "signals": {"type": "array", "items": {"$ref": "#/$defs/signal"}},
+    "skipped_rows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source_row_number", "reason"],
+        "properties": {
+          "source_row_number": {"type": "integer", "minimum": 2},
+          "reason": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "normalization_policy": {"type": "string", "minLength": 1}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "raw_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^data/external/catalog/exofop-priors/[a-z0-9][a-z0-9-]*/response\\.csv$"},
+        "sha256": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "raw_metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^data/external/catalog/exofop-priors/[a-z0-9][a-z0-9-]*/prior-response-metadata\\.json$"},
+        "sha256": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "signal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["toi", "signal_suffix", "source_row_number", "period_days", "epoch_btjd", "depth_ppm", "duration_hours", "source_time_system"],
+      "properties": {
+        "toi": {"type": "string"},
+        "signal_suffix": {"type": "string", "pattern": "^\\.[0-9]+$"},
+        "source_row_number": {"type": "integer", "minimum": 2},
+        "period_days": {"type": "number", "exclusiveMinimum": 0},
+        "epoch_btjd": {"type": "number"},
+        "depth_ppm": {"type": "number"},
+        "duration_hours": {"type": "number"},
+        "source_time_system": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

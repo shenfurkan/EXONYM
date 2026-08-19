@@ -228,7 +228,7 @@ def _load_archival_gaia_neighbor_rows(
 
 
 def _synthetic_tpf_cube() -> Dict[str, Any]:
-    """Deterministic demonstration TPF cube with a blended neighbor."""
+    """Deterministic test-only TPF cube with a blended neighbor."""
     rng = np.random.default_rng(seed=31)
     shape = (11, 11)
     target_x, target_y = 5.0, 5.0
@@ -289,35 +289,26 @@ def run_dilution_sensitivity(workspace: CandidateWorkspace) -> Path:
     outputs_dir.mkdir(parents=True, exist_ok=True)
 
     cubes = load_tpf_cubes(workspace)
-    if cubes:
-        ephemeris = load_transit_ephemeris(workspace)
-        source = "candidate-data"
-        neighbor_rows = _load_gaia_neighbor_rows(workspace)
-        target_g_mag: Optional[float] = None
-        contamination_metadata: Dict[str, Any] = {
-            "availability": "available" if neighbor_rows else "unavailable",
-            "source": "data/external/gaia_neighbors.csv",
-        }
-        if not neighbor_rows:
-            neighbor_rows, target_g_mag, contamination_metadata = _load_archival_gaia_neighbor_rows(
-                workspace
-            )
-    else:
-        cubes = [_synthetic_tpf_cube()]
-        source = "synthetic-demo"
-        demo = cubes[0]
-        ephemeris = {
-            "period_days": demo.pop("_period_days"),
-            "epoch_btjd": demo.pop("_epoch_btjd"),
-            "duration_days": demo.pop("_duration_days"),
-            "source": source,
-        }
-        neighbor_rows = demo.pop("_neighbor_rows")
-        target_g_mag = None
-        contamination_metadata = {
-            "availability": "synthetic-demo",
-            "source": "synthetic-demo",
-        }
+    if not cubes:
+        raise RuntimeError("dilution sensitivity requires observed candidate target-pixel data")
+    ephemeris = load_transit_ephemeris(workspace)
+    required_fields = ("period_days", "epoch_btjd", "duration_days")
+    if ephemeris.get("source") == "synthetic-demo" or any(
+        ephemeris.get("field_sources", {}).get(field) == "synthetic-demo"
+        for field in required_fields
+    ):
+        raise RuntimeError("dilution sensitivity requires a complete candidate-derived transit ephemeris")
+    source = "candidate-data"
+    neighbor_rows = _load_gaia_neighbor_rows(workspace)
+    target_g_mag: Optional[float] = None
+    contamination_metadata: Dict[str, Any] = {
+        "availability": "available" if neighbor_rows else "unavailable",
+        "source": "data/external/gaia_neighbors.csv",
+    }
+    if not neighbor_rows:
+        neighbor_rows, target_g_mag, contamination_metadata = _load_archival_gaia_neighbor_rows(
+            workspace
+        )
 
     aperture_rows: List[Dict[str, Any]] = []
     for cube in cubes:
@@ -356,6 +347,12 @@ def run_dilution_sensitivity(workspace: CandidateWorkspace) -> Path:
         "work_package": "DILUTION_SENSITIVITY",
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "source": source,
+        "scientific_status": "exploratory-aperture-sensitivity-diagnostic",
+        "validation_eligible": False,
+        "validation_reason": (
+            "Gaia-band neighbor context and aperture-depth variation are not a "
+            "calibrated TESS-band dilution correction or validation constraint."
+        ),
         "apertures": aperture_rows,
         "aperture_summary_ppm": {
             name: {

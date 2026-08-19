@@ -115,6 +115,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     survey_search_parser.add_argument("survey_id")
     survey_search_parser.add_argument("candidate_id")
+    survey_sensitivity_parser = survey_commands.add_parser(
+        "sensitivity",
+        help="Run a fixed two-branch injection-recovery grid without changing survey routing.",
+    )
+    survey_sensitivity_parser.add_argument("survey_id")
+    survey_sensitivity_parser.add_argument("candidate_id")
     survey_exclude_parser = survey_commands.add_parser(
         "exclude", help="Record a pre-search exclusion without changing candidate lifecycle."
     )
@@ -171,6 +177,31 @@ def _build_parser() -> argparse.ArgumentParser:
         "report", help="Report catalog availability, ambiguity, staleness, and citations."
     )
     catalog_report_parser.add_argument("candidate_id", help="Target candidate identifier.")
+    catalog_match_parser = catalog_commands.add_parser(
+        "match-ephemeris",
+        help="Compare a candidate ephemeris with fresh supported known-signal catalog rows.",
+    )
+    catalog_match_parser.add_argument("candidate_id", help="Target candidate identifier.")
+    catalog_match_parser.add_argument(
+        "--signal",
+        default=None,
+        help="Per-signal configuration suffix (for example .01).",
+    )
+    catalog_record_ephemeris_parser = catalog_commands.add_parser(
+        "record-ephemeris",
+        help="Record one reviewed, raw-hash-bound BJD_TDB known-signal ephemeris.",
+    )
+    catalog_record_ephemeris_parser.add_argument("candidate_id", help="Target candidate identifier.")
+    catalog_record_ephemeris_parser.add_argument("--record-id", required=True)
+    catalog_record_ephemeris_parser.add_argument("--source-kind", required=True)
+    catalog_record_ephemeris_parser.add_argument("--source-name", required=True)
+    catalog_record_ephemeris_parser.add_argument("--source-uri", required=True)
+    catalog_record_ephemeris_parser.add_argument("--raw-artifact", required=True)
+    catalog_record_ephemeris_parser.add_argument("--period-days", required=True, type=float)
+    catalog_record_ephemeris_parser.add_argument("--epoch-bjd-tdb", required=True, type=float)
+    catalog_record_ephemeris_parser.add_argument("--duration-hours", required=True, type=float)
+    catalog_record_ephemeris_parser.add_argument("--retrieved-at", required=True)
+    catalog_record_ephemeris_parser.add_argument("--expires-at", required=True)
 
     triage_parser = commands.add_parser(
         "triage", help="Aggregate pre-vetting findings into an automated decision record."
@@ -491,6 +522,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 load_survey,
                 load_survey_candidate,
                 register_survey_target,
+                run_survey_sensitivity,
                 run_survey_search,
                 survey_summary,
             )
@@ -510,6 +542,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if args.survey_action == "search":
                 candidate = load_survey_candidate(repository_root, args.candidate_id)
                 output = run_survey_search(survey, candidate)
+                print(output.relative_to(repository_root).as_posix())
+                return 0
+            if args.survey_action == "sensitivity":
+                candidate = load_survey_candidate(repository_root, args.candidate_id)
+                output = run_survey_sensitivity(survey, candidate)
                 print(output.relative_to(repository_root).as_posix())
                 return 0
             if args.survey_action == "exclude":
@@ -574,6 +611,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 return 0
             if args.catalog_action == "report":
                 _print_json(catalog_report(candidate))
+                return 0
+            if args.catalog_action == "match-ephemeris":
+                from .ephemeris_matching import match_known_signal_ephemerides
+
+                output = match_known_signal_ephemerides(candidate, signal=args.signal)
+                print(output.relative_to(repository_root).as_posix())
+                return 0
+            if args.catalog_action == "record-ephemeris":
+                from .ephemeris_matching import record_known_signal_ephemeris
+
+                output = record_known_signal_ephemeris(
+                    candidate,
+                    args.record_id,
+                    args.source_kind,
+                    args.source_name,
+                    args.source_uri,
+                    args.raw_artifact,
+                    args.period_days,
+                    args.epoch_bjd_tdb,
+                    args.duration_hours,
+                    args.retrieved_at,
+                    args.expires_at,
+                )
+                print(output.relative_to(repository_root).as_posix())
                 return 0
 
         if args.command == "rv":
@@ -750,9 +811,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.command == "vet":
             from .vetting.tricera_parse import run_triceratops_simulation
-            from .statistical_vetting import require_vetting_readiness
 
-            require_vetting_readiness(candidate, signal=args.signal)
             output = run_triceratops_simulation(
                 candidate, n_draws=args.n_draws, signal=args.signal
             )

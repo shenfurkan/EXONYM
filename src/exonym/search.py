@@ -4,16 +4,18 @@ Implements blind and targeted periodic transit detection algorithms across photo
 time-series without hardcoded candidate designations or ephemerides:
 
 1. Box Least Squares (BLS) Search (Kovács, Zucker & Mazeh 2002):
-   Models transits as periodic step functions (top-hat boxes) defined by:
+   Uses Astropy's weighted ``BoxLeastSquares`` implementation to fit periodic
+   step functions (top-hat boxes) defined by:
    - Trial period P in [P_min, P_max] days
    - Fractional transit duration q = T_14 / P
    - Transit epoch / center time T_0 (BTJD)
    - Transit depth delta = <y_out> - <y_in>
-   - Signal-to-Noise Ratio (SNR) = (delta * sqrt(n_in * n_out / (n_in + n_out))) / sigma_out
+   - A fitted depth and formal uncertainty. The reported ``snr`` is their
+     ratio, not a calibrated false-alarm probability or detection reliability.
 
-2. Grid Refinement & Alias Resolution:
-   - Coarse-to-fine two-pass frequency grid to prevent peak smearing over multi-sector baselines.
-   - Harmonic and sub-harmonic screening (P/2, 2*P) to resolve alias ambiguities and eclipsing binary harmonics.
+2. Grid Resolution:
+   - Astropy's baseline-and-duration-aware frequency grid prevents a requested
+     sparse scan from under-resolving a multi-sector light curve.
 
 3. Optional Transit Least Squares (TLS) (Hippke & Heller 2019):
    Integrates realistic physical limb-darkened transit shapes (Mandel & Agol 2002) with ingress/egress
@@ -25,6 +27,7 @@ from __future__ import annotations
 import json
 import re
 import hashlib
+import importlib.metadata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -32,7 +35,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .lightcurve import phase_hours
-from .workspace import CandidateWorkspace
+from .workspace import CandidateWorkspace, validate_signal_suffix
 
 
 @dataclass
@@ -43,7 +46,9 @@ class BLSSearchResult:
     best_epoch: float           # Optimal transit epoch (BTJD)
     best_depth_ppm: float       # Optimal transit depth (parts per million)
     best_duration_hours: float  # Optimal total transit duration T_14 (hours)
-    snr: float                  # Detection signal-to-noise ratio
+    snr: float                  # Fitted depth / formal BLS depth uncertainty
+    n_distinct_transit_events: int
+    n_period_trials: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -52,36 +57,86 @@ class BLSSearchResult:
             "best_depth_ppm": float(self.best_depth_ppm),
             "best_duration_hours": float(self.best_duration_hours),
             "snr": float(self.snr),
+            "n_distinct_transit_events": int(self.n_distinct_transit_events),
+            "n_period_trials": int(self.n_period_trials),
         }
 
 
-def _epoch_score(
+def _frequency_period_grid(period_min: float, period_max: float, n_periods: int) -> np.ndarray:
+    """Return trial periods uniformly sampled in orbital frequency.
+
+    A uniform period grid under-resolves long-period signals on a multi-sector
+    baseline.  Keeping the number of samples fixed in frequency gives the
+    periodogram approximately constant phase drift resolution instead.  The
+    returned periods decrease from ``period_max`` to ``period_min``; callers
+    must not infer a ranking from their order.
+    """
+    if isinstance(n_periods, bool) or not isinstance(n_periods, (int, np.integer)):
+        raise ValueError("n_periods must be an integer of at least two")
+    if n_periods < 2:
+        raise ValueError("n_periods must be an integer of at least two")
+    frequencies = np.linspace(1.0 / period_max, 1.0 / period_min, int(n_periods))
+    return 1.0 / frequencies
+
+
+def _uncertainties_for_bls(
+    values: np.ndarray, flux_err: Optional[Sequence[float]]
+) -> np.ndarray:
+    """Return finite positive per-cadence uncertainties for weighted BLS.
+
+    Candidate-product loading normally supplies reported uncertainties. Public
+    array callers may omit them, in which case a robust constant scatter is
+    used solely to retain a dimensionless ranking statistic; the
+    candidate-facing runner records that fallback.
+    """
+    if flux_err is not None:
+        errors = np.asarray(flux_err, dtype=float)
+        if errors.shape != values.shape:
+            raise ValueError("flux_err must match the time and flux shapes")
+        if not np.all(np.isfinite(errors) & (errors > 0)):
+            raise ValueError("flux_err must contain only positive finite values")
+        return errors
+
+    median = float(np.median(values))
+    mad = float(np.median(np.abs(values - median)))
+    scatter = 1.4826 * mad
+    if not np.isfinite(scatter) or scatter <= 0:
+        scatter = 1e-4
+    return np.full(values.size, scatter, dtype=float)
+
+
+def _baseline_aware_frequency_factor(
     time: np.ndarray,
-    values: np.ndarray,
-    period: float,
-    epoch: float,
-    duration_hours: float,
-) -> Optional[Dict[str, float]]:
-    """Score one (period, epoch) trial; returns depth/snr counts or None."""
-    ph = phase_hours(time, period, epoch)
-    in_transit = np.abs(ph) <= 0.5 * duration_hours
-    out_transit = (np.abs(ph) > 1.0 * duration_hours) & (np.abs(ph) < 3.0 * duration_hours)
+    period_min: float,
+    period_max: float,
+    duration_days: float,
+    requested_minimum_trials: int,
+) -> float:
+    """Select an Astropy BLS frequency factor without under-resolving a grid.
 
-    in_vals = values[in_transit]
-    out_vals = values[out_transit]
-    if in_vals.size < 1 or out_vals.size < 3:
-        return None
+    ``BoxLeastSquares.autopower`` uses a duration/baseline-squared frequency
+    scale. A caller can request *more* samples through ``n_periods`` but never
+    a coarser-than-standard scan, preventing a fixed sparse grid from missing
+    narrow, long-baseline signals.
+    """
+    baseline_days = float(np.ptp(time))
+    if not np.isfinite(baseline_days) or baseline_days <= 0:
+        raise ValueError("BLS requires observations spanning a positive time baseline")
+    natural_step = duration_days / (baseline_days * baseline_days)
+    frequency_span = 1.0 / period_min - 1.0 / period_max
+    natural_trials = max(2, int(np.ceil(frequency_span / natural_step)) + 1)
+    return min(1.0, natural_trials / float(requested_minimum_trials))
 
-    depth = float(np.median(out_vals) - np.median(in_vals))
-    std_out = np.std(out_vals) if np.std(out_vals) > 1e-8 else 1e-4
-    n_eff = (in_vals.size * out_vals.size) / (in_vals.size + out_vals.size)
-    snr = (depth * np.sqrt(n_eff)) / std_out
-    return {"depth": depth, "snr": snr, "n_in": int(in_vals.size), "n_out": int(out_vals.size)}
 
-
-def _epoch_trial_count(period: float, duration_hours: float, cap: int = 500) -> int:
-    """Trial epochs dense enough that spacing never exceeds half the duration."""
-    return max(8, min(int(np.ceil(period / (duration_hours / 48.0))), cap))
+def _distinct_transit_events(
+    time: np.ndarray, period: float, epoch: float, duration_hours: float
+) -> int:
+    """Count observed event windows containing at least one cadence."""
+    in_transit = np.abs(phase_hours(time, period, epoch)) <= 0.5 * duration_hours
+    if not np.any(in_transit):
+        return 0
+    event_numbers = np.rint((time[in_transit] - epoch) / period).astype(int)
+    return int(np.unique(event_numbers).size)
 
 
 def find_transits(
@@ -91,22 +146,34 @@ def find_transits(
     period_max: float = 15.0,
     n_periods: int = 2000,
     duration_hours: float = 3.0,
+    flux_err: Optional[Sequence[float]] = None,
 ) -> BLSSearchResult:
     """Run a target-neutral BLS periodogram search over a light curve.
 
-    Returns the optimal (period, epoch, depth_ppm, duration_hours, snr).
+    Returns the optimal (period, epoch, depth_ppm, duration_hours, score).
+    ``snr`` is the fitted weighted BLS depth divided by its formal uncertainty.
+    It is retained as a compatibility field name only and is not a calibrated
+    detection significance, false-alarm probability, or reliability estimate.
 
-    The search is two-pass: a coarse period grid locates the strongest peak,
-    then a fine refinement re-scans around it so long baselines are not
-    smeared by grid quantization. Integer-multiple aliases are resolved by
-    testing for additional transits at fractional phase offsets: when a
-    folded period k*P shows transits at every j/k offset, the fundamental
-    period P is adopted instead.
+    The trial grid is generated by Astropy using the observed time baseline and
+    requested transit duration. ``n_periods`` is treated as a minimum requested
+    density: it can add samples but cannot make the standard BLS grid coarser.
+    A selected peak must contain at least two observed transit events.
     """
     time = np.asarray(time_btjd, dtype=float)
     values = np.asarray(flux, dtype=float)
 
+    if time.shape != values.shape:
+        raise ValueError("time and flux must have matching shapes")
     finite = np.isfinite(time) & np.isfinite(values)
+    if flux_err is not None:
+        raw_errors = np.asarray(flux_err, dtype=float)
+        if raw_errors.shape != values.shape:
+            raise ValueError("flux_err must match the time and flux shapes")
+        finite &= np.isfinite(raw_errors) & (raw_errors > 0)
+        raw_errors = raw_errors[finite]
+    else:
+        raw_errors = None
     time = time[finite]
     values = values[finite]
 
@@ -114,71 +181,67 @@ def find_transits(
         raise ValueError("insufficient data points for BLS transit search")
     if period_min <= 0 or period_max <= period_min:
         raise ValueError("invalid period search bounds")
+    _frequency_period_grid(period_min, period_max, n_periods)
 
-    t_min = float(np.min(time))
-    coarse_periods = np.linspace(period_min, period_max, n_periods)
-    grid_step = (period_max - period_min) / max(n_periods - 1, 1)
+    try:
+        from astropy.timeseries import BoxLeastSquares
+    except ImportError as exc:  # pragma: no cover - declared core dependency
+        raise RuntimeError("BLS search requires the core astropy dependency") from exc
 
-    def scan(period_values: np.ndarray) -> Optional[Dict[str, float]]:
-        best: Optional[Dict[str, float]] = None
-        for p in period_values:
-            n_epochs = _epoch_trial_count(p, duration_hours)
-            for trial_epoch in np.linspace(t_min, t_min + p, n_epochs):
-                scored = _epoch_score(time, values, float(p), float(trial_epoch), duration_hours)
-                if scored is None:
-                    continue
-                if best is None or scored["snr"] > best["snr"]:
-                    best = {"period": float(p), "epoch": float(trial_epoch), **scored}
-        return best
-
-    best = scan(coarse_periods)
+    duration_days = float(duration_hours) / 24.0
+    if not np.isfinite(duration_days) or duration_days <= 0:
+        raise ValueError("duration_hours must be positive and finite")
+    errors = _uncertainties_for_bls(values, raw_errors)
+    frequency_factor = _baseline_aware_frequency_factor(
+        time, period_min, period_max, duration_days, n_periods
+    )
+    periodogram = BoxLeastSquares(time, values, dy=errors).autopower(
+        duration_days,
+        objective="likelihood",
+        method="fast",
+        minimum_n_transit=2,
+        minimum_period=period_min,
+        maximum_period=period_max,
+        frequency_factor=frequency_factor,
+    )
+    valid = (
+        np.isfinite(periodogram.power)
+        & np.isfinite(periodogram.period)
+        & np.isfinite(periodogram.transit_time)
+        & np.isfinite(periodogram.depth)
+        & np.isfinite(periodogram.depth_err)
+        & (periodogram.depth > 0)
+        & (periodogram.depth_err > 0)
+    )
+    best: Optional[Dict[str, float]] = None
+    for index in np.argsort(periodogram.power)[::-1]:
+        if not valid[index]:
+            continue
+        period = float(periodogram.period[index])
+        epoch = float(periodogram.transit_time[index])
+        n_events = _distinct_transit_events(time, period, epoch, duration_hours)
+        if n_events < 2:
+            continue
+        depth = float(periodogram.depth[index])
+        depth_err = float(periodogram.depth_err[index])
+        best = {
+            "period": period,
+            "epoch": epoch,
+            "depth": depth,
+            "snr": depth / depth_err,
+            "n_events": n_events,
+        }
+        break
     if best is None:
         return BLSSearchResult(
             best_period=round(period_min, 5),
-            best_epoch=round(t_min, 5),
+            best_epoch=round(float(np.min(time)), 5),
             best_depth_ppm=0.0,
             best_duration_hours=round(duration_hours, 2),
             snr=0.0,
+            n_distinct_transit_events=0,
+            n_period_trials=0,
         )
-
-    def refine(center: float) -> Optional[Dict[str, float]]:
-        local = np.linspace(center - 2.0 * grid_step, center + 2.0 * grid_step, 241)
-        local = local[(local >= period_min) & (local <= period_max)]
-        if local.size == 0:
-            return None
-        return scan(local)
-
-    refined = refine(best["period"])
-    if refined is not None and refined["snr"] >= best["snr"]:
-        best = refined
-
-    for _ in range(4):
-        divided = False
-        for divisor in (2, 3):
-            sub_period = best["period"] / divisor
-            if sub_period < period_min:
-                continue
-            offset_ok = True
-            for j in range(1, divisor):
-                offset_score = _epoch_score(
-                    time, values, best["period"], best["epoch"] + j * sub_period, duration_hours
-                )
-                if (
-                    offset_score is None
-                    or offset_score["depth"] <= 0.5 * best["depth"]
-                    or offset_score["snr"] < 5.0
-                ):
-                    offset_ok = False
-                    break
-            if not offset_ok:
-                continue
-            sub_refined = refine(sub_period)
-            if sub_refined is not None and sub_refined["snr"] >= 0.8 * best["snr"]:
-                best = sub_refined
-                divided = True
-                break
-        if not divided:
-            break
 
     return BLSSearchResult(
         best_period=round(best["period"], 5),
@@ -186,7 +249,46 @@ def find_transits(
         best_depth_ppm=round(best["depth"] * 1e6, 2),
         best_duration_hours=round(duration_hours, 2),
         snr=round(max(best["snr"], 0.0), 2),
+        n_distinct_transit_events=int(best["n_events"]),
+        n_period_trials=int(periodogram.period.size),
     )
+
+
+def find_transits_duration_grid(
+    time_btjd: Sequence[float],
+    flux: Sequence[float],
+    duration_grid_hours: Sequence[float],
+    period_min: float = 0.5,
+    period_max: float = 15.0,
+    n_periods: int = 2000,
+    flux_err: Optional[Sequence[float]] = None,
+) -> Tuple[BLSSearchResult, List[Dict[str, Any]]]:
+    """Run the declared BLS duration grid and retain every trial result.
+
+    The returned best result is selected by the same uncalibrated ranking
+    statistic as an individual BLS search.  This is a deterministic model
+    selection step, not an additional significance calibration.
+    """
+    durations = [float(value) for value in duration_grid_hours]
+    if not durations or any(not np.isfinite(value) or value <= 0 for value in durations):
+        raise ValueError("duration_grid_hours must contain positive finite values")
+    if len(set(durations)) != len(durations):
+        raise ValueError("duration_grid_hours must not contain duplicates")
+
+    results: List[Tuple[BLSSearchResult, Dict[str, Any]]] = []
+    for duration_hours in durations:
+        result = find_transits(
+            time_btjd,
+            flux,
+            flux_err=flux_err,
+            period_min=period_min,
+            period_max=period_max,
+            n_periods=n_periods,
+            duration_hours=duration_hours,
+        )
+        results.append((result, result.to_dict()))
+    best, _ = max(results, key=lambda item: item[0].snr)
+    return best, [payload for _, payload in results]
 
 
 def find_transits_tls(
@@ -311,6 +413,19 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _bls_runtime_provenance() -> Dict[str, str]:
+    """Return the exact core BLS implementation and installed package version."""
+    try:
+        version = importlib.metadata.version("astropy")
+    except importlib.metadata.PackageNotFoundError:  # pragma: no cover - core dependency
+        version = "unknown"
+    return {
+        "implementation": "astropy.timeseries.BoxLeastSquares",
+        "package": "astropy",
+        "version": version,
+    }
+
+
 def _input_manifest_records(
     workspace: CandidateWorkspace, sectors: Optional[Sequence[int]] = None
 ) -> List[Dict[str, Any]]:
@@ -350,11 +465,12 @@ def run_bls_on_candidate(
     workspace: CandidateWorkspace,
     period_min: float = 0.5,
     period_max: float = 15.0,
+    n_periods: int = 2000,
     signal: Optional[str] = None,
-    allow_synthetic: bool = False,
     engine: str = "bls",
     sectors: Optional[Sequence[int]] = None,
     result_suffix: Optional[str] = None,
+    duration_grid_hours: Optional[Sequence[float]] = None,
 ) -> Path:
     """Run BLS transit search on candidate data and save JSON summary to outputs/.
 
@@ -365,15 +481,29 @@ def run_bls_on_candidate(
     overwrite one another. A run without ``signal`` retains the historical
     ``outputs/bls_search_results.json`` path and behavior.
 
-    Candidate searches require real, readable light-curve photometry. The
-    explicit ``allow_synthetic`` escape hatch exists only for demonstrations
-    and tests; it is not exposed by the CLI.
+    Candidate searches require real, readable light-curve photometry.
     """
+    if engine not in ("bls", "tls"):
+        raise ValueError("search engine must be 'bls' or 'tls'")
+    if duration_grid_hours is not None and engine != "bls":
+        raise ValueError("duration_grid_hours is supported only by BLS searches")
+    if engine == "bls":
+        _frequency_period_grid(period_min, period_max, n_periods)
+
+    duration_grid: Optional[List[float]] = None
+    if duration_grid_hours is not None:
+        duration_grid = [float(value) for value in duration_grid_hours]
+        if not duration_grid or any(not np.isfinite(value) or value <= 0 for value in duration_grid):
+            raise ValueError("duration_grid_hours must contain positive finite values")
+        if len(set(duration_grid)) != len(duration_grid):
+            raise ValueError("duration_grid_hours must not contain duplicates")
+
     duration_hours: Optional[float] = None
     signal_provenance: Optional[Dict[str, Any]] = None
     if signal is not None:
-        if not re.fullmatch(r"\.\d+", signal):
-            raise ValueError("signal must use the .NN format")
+        validate_signal_suffix(signal)
+        if duration_grid is not None:
+            raise ValueError("duration_grid_hours cannot be combined with a targeted signal search")
 
         from .inputs import load_transit_ephemeris
 
@@ -408,8 +538,6 @@ def run_bls_on_candidate(
             "period_max_days": period_max,
         }
 
-    if engine not in ("bls", "tls"):
-        raise ValueError("search engine must be 'bls' or 'tls'")
     if result_suffix is not None:
         if signal is not None:
             raise ValueError("result_suffix cannot be combined with a signal search")
@@ -417,6 +545,8 @@ def run_bls_on_candidate(
             raise ValueError("result_suffix must use the .label format")
 
     tls_errors: Optional[np.ndarray] = None
+    bls_errors: Optional[np.ndarray] = None
+    bls_error_sources: Optional[List[str]] = None
     if engine == "tls":
         from .inputs import load_light_curve_table
 
@@ -430,18 +560,25 @@ def run_bls_on_candidate(
             tls_errors = np.asarray(native_table["flux_err"], dtype=float)
     else:
         loaded = load_candidate_light_curve(workspace, sectors=sectors)
+        if loaded is not None:
+            # Keep the compact public loader compatible while acquiring the
+            # per-cadence uncertainties needed by the weighted BLS engine.
+            # A test or third-party caller may provide only (time, flux); in
+            # that case find_transits uses its explicit robust-scatter fallback.
+            from .inputs import load_light_curve_table
+
+            bls_table = load_light_curve_table(workspace, sectors=sectors)
+            if bls_table is not None:
+                candidate_time = np.asarray(bls_table["time"], dtype=float)
+                candidate_errors = np.asarray(bls_table["flux_err"], dtype=float)
+                if candidate_time.shape == loaded[0].shape and np.array_equal(candidate_time, loaded[0]):
+                    bls_errors = candidate_errors
+                    bls_error_sources = list(bls_table.get("flux_err_sources", []))
     if loaded is None:
-        if not allow_synthetic:
-            raise ValueError("no readable candidate light-curve photometry available for BLS transit search")
-        time = np.linspace(0, 30, 1000)
-        flux = 1.0 - 0.001 * (np.abs((time - 2.0) % 3.5) < 0.05).astype(float)
-        source = "synthetic-demo"
-        input_records: List[Dict[str, Any]] = []
-        tls_errors = np.full_like(flux, 0.0002)
-    else:
-        time, flux = loaded
-        source = "candidate-data"
-        input_records = _input_manifest_records(workspace, sectors=sectors)
+        raise ValueError("no readable candidate light-curve photometry available for BLS transit search")
+    time, flux = loaded
+    source = "candidate-data"
+    input_records = _input_manifest_records(workspace, sectors=sectors)
 
     if engine == "tls":
         if tls_errors is None:
@@ -454,15 +591,46 @@ def run_bls_on_candidate(
             period_max=period_max,
         )
     else:
-        search_kwargs: Dict[str, float] = {
+        search_kwargs: Dict[str, Any] = {
             "period_min": period_min,
             "period_max": period_max,
+            "n_periods": n_periods,
         }
-        if duration_hours is not None:
-            search_kwargs["duration_hours"] = duration_hours
-        payload = find_transits(time, flux, **search_kwargs).to_dict()
+        duration_trials: Optional[List[Dict[str, Any]]] = None
+        if duration_grid is not None:
+            result, duration_trials = find_transits_duration_grid(
+                time,
+                flux,
+                duration_grid,
+                period_min=period_min,
+                period_max=period_max,
+                n_periods=n_periods,
+                flux_err=bls_errors,
+            )
+            payload = result.to_dict()
+        else:
+            if duration_hours is not None:
+                search_kwargs["duration_hours"] = duration_hours
+            payload = find_transits(time, flux, flux_err=bls_errors, **search_kwargs).to_dict()
+        if duration_trials is not None:
+            payload["duration_grid_trials"] = duration_trials
     payload["source"] = source
     payload["n_points"] = int(time.size)
+    payload["statistic"] = {
+        "name": (
+            "weighted BLS fitted-depth signal-to-noise"
+            if engine == "bls"
+            else "TLS signal detection efficiency"
+        ),
+        "value_field": "snr" if engine == "bls" else "sde",
+        "calibrated_false_alarm_probability": None,
+        "population_detection_reliability": None,
+        "scientific_use": "ranking and human-review triage only",
+    }
+    if engine == "bls":
+        payload["statistic"]["uncertainty_source"] = (
+            bls_error_sources if bls_errors is not None else ["robust-scatter-fallback"]
+        )
     if signal_provenance is not None:
         payload["signal"] = signal
         payload["search_provenance"] = signal_provenance
@@ -482,13 +650,20 @@ def run_bls_on_candidate(
         "configuration": {
             "period_min_days": period_min,
             "period_max_days": period_max,
-            "duration_hours": duration_hours if duration_hours is not None else 3.0,
-            "n_periods": 2000 if engine == "bls" else None,
+            "duration_hours": duration_hours if duration_grid is None else None,
+            "duration_grid_hours": duration_grid,
+            "n_periods": n_periods if engine == "bls" else None,
+            "n_periods_role": (
+                "minimum requested trial density; Astropy baseline-duration grid may use more"
+                if engine == "bls"
+                else None
+            ),
+            "period_grid": "astropy-autopower-baseline-duration-resolved" if engine == "bls" else None,
             "max_points": 4000 if engine == "bls" else None,
             "quality_filter": "quality == 0 when available",
             "normalization": "lightkurve.remove_nans().normalize()",
             "binning": (
-                "per-product median binning; final median binning"
+                "per-product median binning; no global rebinning"
                 if engine == "bls"
                 else "none; native cadence"
             ),
@@ -496,8 +671,11 @@ def run_bls_on_candidate(
             "engine": engine,
             "cadence": "native" if engine == "tls" else "median-binned",
             "use_threads": 1 if engine == "tls" else None,
+            "uncertainty_source": bls_error_sources if engine == "bls" else None,
             "sectors": list(sectors) if sectors is not None else None,
         },
+        "search_statistic": payload["statistic"],
+        "runtime": _bls_runtime_provenance() if engine == "bls" else None,
     }
     if signal_provenance is not None:
         prior_path = workspace.path / signal_provenance["prior_path"]

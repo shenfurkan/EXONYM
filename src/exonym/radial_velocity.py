@@ -28,6 +28,8 @@ RV_FIT_SCHEMA = "rv-keplerian-fit.schema.json"
 RV_ENGINE_NAME = "rv-keplerian"
 MAX_INGEST_BYTES = 10 * 1024 * 1024
 _TAU = 2.0 * math.pi
+KEPLER_SOLVER_TOLERANCE_RAD = 1e-12
+KEPLER_SOLVER_MAX_ITERATIONS = 64
 
 
 def _sha256(path: Path) -> str:
@@ -135,6 +137,53 @@ def load_radial_velocity_observations(workspace: CandidateWorkspace) -> Dict[str
     return _validate_observation_record(workspace, _read_safe_json(path))
 
 
+def _solve_kepler_equation(
+    mean_anomaly_rad: np.ndarray,
+    eccentricity: float,
+    tolerance_rad: float = KEPLER_SOLVER_TOLERANCE_RAD,
+    max_iterations: int = KEPLER_SOLVER_MAX_ITERATIONS,
+) -> np.ndarray:
+    """Solve ``E - e sin(E) = M`` to a checked residual tolerance.
+
+    A fixed number of Newton iterations can silently return a non-solution for
+    high eccentricity or an unfortunate starting phase.  This vectorized
+    solver rejects non-finite inputs and raises if every requested cadence has
+    not converged to the declared angular residual tolerance.
+    """
+    mean_anomaly = np.asarray(mean_anomaly_rad, dtype=float)
+    if (
+        not 0 <= eccentricity < 1
+        or not math.isfinite(eccentricity)
+        or not math.isfinite(tolerance_rad)
+        or tolerance_rad <= 0
+        or isinstance(max_iterations, bool)
+        or not isinstance(max_iterations, int)
+        or max_iterations < 1
+        or not np.all(np.isfinite(mean_anomaly))
+    ):
+        raise ValueError("Kepler equation inputs are outside their physical or numerical bounds")
+    if mean_anomaly.size == 0:
+        return mean_anomaly.copy()
+
+    reduced_mean_anomaly = np.mod(mean_anomaly, _TAU)
+    eccentric_anomaly = reduced_mean_anomaly + eccentricity * np.sin(reduced_mean_anomaly)
+    for _ in range(max_iterations):
+        residual = eccentric_anomaly - eccentricity * np.sin(eccentric_anomaly) - reduced_mean_anomaly
+        derivative = 1.0 - eccentricity * np.cos(eccentric_anomaly)
+        correction = residual / derivative
+        eccentric_anomaly -= correction
+        if np.all(np.isfinite(correction)) and float(np.max(np.abs(correction))) <= tolerance_rad:
+            break
+    final_residual = eccentric_anomaly - eccentricity * np.sin(eccentric_anomaly) - reduced_mean_anomaly
+    if not np.all(np.isfinite(final_residual)) or float(np.max(np.abs(final_residual))) > tolerance_rad:
+        raise RuntimeError(
+            "Kepler equation did not converge within {0} iterations to {1:.1e} rad".format(
+                max_iterations, tolerance_rad
+            )
+        )
+    return eccentric_anomaly
+
+
 def keplerian_velocity_m_per_s(
     time_bjd_tdb: Sequence[float],
     semi_amplitude_m_per_s: float,
@@ -145,17 +194,29 @@ def keplerian_velocity_m_per_s(
     period_days: float,
 ) -> np.ndarray:
     """Evaluate a Keplerian radial-velocity curve in m/s at BJD_TDB days."""
-    if period_days <= 0 or not 0 <= eccentricity < 1 or semi_amplitude_m_per_s < 0:
+    scalar_values = (
+        semi_amplitude_m_per_s,
+        mean_anomaly_reference_rad,
+        eccentricity,
+        argument_periastron_rad,
+        reference_time_bjd_tdb,
+        period_days,
+    )
+    if (
+        not all(math.isfinite(float(value)) for value in scalar_values)
+        or period_days <= 0
+        or not 0 <= eccentricity < 1
+        or semi_amplitude_m_per_s < 0
+    ):
         raise ValueError("Keplerian parameters are outside their physical bounds")
+    time = np.asarray(time_bjd_tdb, dtype=float)
+    if not np.all(np.isfinite(time)):
+        raise ValueError("Keplerian observation times must be finite")
     mean_anomaly = (
         mean_anomaly_reference_rad
-        + _TAU * (np.asarray(time_bjd_tdb, dtype=float) - reference_time_bjd_tdb) / period_days
+        + _TAU * (time - reference_time_bjd_tdb) / period_days
     )
-    eccentric_anomaly = np.mod(mean_anomaly, _TAU)
-    for _ in range(16):
-        numerator = eccentric_anomaly - eccentricity * np.sin(eccentric_anomaly) - mean_anomaly
-        denominator = 1.0 - eccentricity * np.cos(eccentric_anomaly)
-        eccentric_anomaly -= numerator / denominator
+    eccentric_anomaly = _solve_kepler_equation(mean_anomaly, eccentricity)
     true_anomaly = 2.0 * np.arctan2(
         math.sqrt(1.0 + eccentricity) * np.sin(eccentric_anomaly / 2.0),
         math.sqrt(1.0 - eccentricity) * np.cos(eccentric_anomaly / 2.0),
@@ -409,6 +470,11 @@ def fit_radial_velocity(
             "optimizer": "scipy.optimize.least_squares method=trf",
             "optimizer_status": int(result.status),
             "optimizer_message": str(result.message),
+            "kepler_equation_solver": {
+                "method": "Newton-Raphson with residual convergence check",
+                "tolerance_rad": KEPLER_SOLVER_TOLERANCE_RAD,
+                "max_iterations": KEPLER_SOLVER_MAX_ITERATIONS,
+            },
         },
         "caveat": "This candidate-local RV fit is non-claim evidence and does not determine scientific disposition or lifecycle state.",
     }

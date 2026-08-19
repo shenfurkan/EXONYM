@@ -111,10 +111,12 @@ def _write_passing_pre_vetting_artifacts(candidate_path: Path, candidate_id: str
     (outputs / "prf_localization_results.json").write_text(
         json.dumps(
             {
+                "candidate_id": candidate_id,
                 "source": "candidate-data",
+                "calibration_status": "uncalibrated",
                 "summary": {
-                    "conclusion": "target_dominant_among_modeled_sources",
-                    "median_target_to_other_ratio": 2.0,
+                    "conclusion": "inconclusive_uncalibrated_prf",
+                    "median_target_to_other_difference_ratio": 2.0,
                 },
             }
         ),
@@ -136,6 +138,23 @@ def _write_passing_pre_vetting_artifacts(candidate_path: Path, candidate_id: str
         ),
         encoding="utf-8",
     )
+
+
+def _write_remaining_real_data_prerequisites(candidate_path: Path) -> None:
+    """Complete the provenance-only prerequisites for readiness-order tests."""
+    outputs = candidate_path / "outputs"
+    for filename in (
+        "bls_search_results.json",
+        "bls_search_manifest.json",
+        "asteroseismic_results.json",
+        "sed_fit_results.json",
+        "mcmc_transit_fit.json",
+        "ttv_analysis_results.json",
+        "phase_curve_results.json",
+    ):
+        (outputs / filename).write_text(
+            json.dumps({"source": "candidate-data"}), encoding="utf-8"
+        )
 
 
 def test_engine_run_generates_valid_schema_manifest(tmp_path: Path):
@@ -170,7 +189,7 @@ def test_engine_report_lists_completed_runs(tmp_path: Path):
     assert runs[0]["status"] == "succeeded"
 
 
-def test_automated_triage_pass_verdict(tmp_path: Path):
+def test_automated_triage_requires_review_for_uncalibrated_activity(tmp_path: Path):
     candidate_path = _setup_synthetic_workspace(tmp_path, "synth-triage-pass")
     cand = load_candidate(tmp_path, "synth-triage-pass")
 
@@ -181,12 +200,12 @@ def test_automated_triage_pass_verdict(tmp_path: Path):
     triage_data = json.loads(triage_path.read_text(encoding="utf-8"))
     assert triage_data["schema_version"] == 1
     assert triage_data["candidate_id"] == "synth-triage-pass"
-    assert triage_data["status"] == "pass"
+    assert triage_data["status"] == "review-required"
     assert len(triage_data["records"]) == 5
     evidence = json.loads(
         (candidate_path / "outputs" / "statistical_vetting_evidence.json").read_text(encoding="utf-8")
     )
-    assert evidence["status"] == "pass"
+    assert evidence["status"] == "review-required"
     assert {item["name"] for item in evidence["diagnostics"]} == {
         "screening", "archive", "localization", "activity", "dilution"
     }
@@ -234,6 +253,82 @@ def test_automated_triage_review_required_on_odd_even_anomaly(tmp_path: Path):
     report = IsolationReport()
     validate_schemas(tmp_path, report)
     assert report.ok, f"Schema violations: {[v.message for v in report.violations]}"
+
+
+def test_statistical_vetting_requires_review_for_alternating_events(tmp_path: Path):
+    from exonym.statistical_vetting import build_statistical_vetting_evidence
+
+    candidate_path = _setup_synthetic_workspace(tmp_path, "synth-alternating-events")
+    candidate = load_candidate(tmp_path, "synth-alternating-events")
+    _write_passing_pre_vetting_artifacts(candidate_path, candidate.candidate_id)
+    screen_path = candidate_path / "outputs" / "fixed_ephemeris_screen.json"
+    screen = json.loads(screen_path.read_text(encoding="utf-8"))
+    screen["screen"]["double_period_hypothesis"]["alternating_event"]["depth_significance_sigma"] = 3.1
+    screen_path.write_text(json.dumps(screen), encoding="utf-8")
+
+    evidence = json.loads(build_statistical_vetting_evidence(candidate).read_text(encoding="utf-8"))
+
+    screening = next(record for record in evidence["diagnostics"] if record["name"] == "screening")
+    assert screening["status"] == "review-required"
+    assert evidence["status"] == "review-required"
+
+
+def test_statistical_vetting_requires_review_for_inconclusive_localization(tmp_path: Path):
+    from exonym.statistical_vetting import build_statistical_vetting_evidence
+
+    candidate_path = _setup_synthetic_workspace(tmp_path, "synth-inconclusive-localization")
+    candidate = load_candidate(tmp_path, "synth-inconclusive-localization")
+    _write_passing_pre_vetting_artifacts(candidate_path, candidate.candidate_id)
+    localization_path = candidate_path / "outputs" / "prf_localization_results.json"
+    localization = json.loads(localization_path.read_text(encoding="utf-8"))
+    localization["summary"]["conclusion"] = "inconclusive_no_competing_sources_modeled"
+    localization_path.write_text(json.dumps(localization), encoding="utf-8")
+
+    evidence = json.loads(build_statistical_vetting_evidence(candidate).read_text(encoding="utf-8"))
+
+    record = next(item for item in evidence["diagnostics"] if item["name"] == "localization")
+    assert record["status"] == "review-required"
+    assert evidence["status"] == "review-required"
+
+
+def test_statistical_vetting_blocks_self_declared_localization_calibration(tmp_path: Path):
+    from exonym.statistical_vetting import build_statistical_vetting_evidence
+
+    # Arrange
+    candidate_path = _setup_synthetic_workspace(tmp_path, "synth-forged-localization-calibration")
+    candidate = load_candidate(tmp_path, "synth-forged-localization-calibration")
+    _write_passing_pre_vetting_artifacts(candidate_path, candidate.candidate_id)
+    localization_path = candidate_path / "outputs" / "prf_localization_results.json"
+    localization = json.loads(localization_path.read_text(encoding="utf-8"))
+    localization["calibration_status"] = "calibrated"
+    localization["summary"]["conclusion"] = "target_dominant_among_modeled_sources"
+    localization_path.write_text(json.dumps(localization), encoding="utf-8")
+
+    # Act
+    evidence = json.loads(build_statistical_vetting_evidence(candidate).read_text(encoding="utf-8"))
+
+    # Assert
+    record = next(item for item in evidence["diagnostics"] if item["name"] == "localization")
+    assert record["status"] == "blocked"
+    assert evidence["status"] == "blocked"
+
+
+def test_statistical_vetting_requires_review_for_aperture_sensitive_depths(tmp_path: Path):
+    from exonym.statistical_vetting import build_statistical_vetting_evidence
+
+    candidate_path = _setup_synthetic_workspace(tmp_path, "synth-aperture-sensitive")
+    candidate = load_candidate(tmp_path, "synth-aperture-sensitive")
+    _write_passing_pre_vetting_artifacts(candidate_path, candidate.candidate_id)
+    dilution_path = candidate_path / "outputs" / "dilution_sensitivity_results.json"
+    dilution = json.loads(dilution_path.read_text(encoding="utf-8"))
+    dilution["depth_stability"]["interpretation"] = "aperture-sensitive"
+    dilution_path.write_text(json.dumps(dilution), encoding="utf-8")
+
+    evidence = json.loads(build_statistical_vetting_evidence(candidate).read_text(encoding="utf-8"))
+
+    record = next(item for item in evidence["diagnostics"] if item["name"] == "dilution")
+    assert record["status"] == "review-required"
+    assert evidence["status"] == "review-required"
 
 
 def test_cli_engine_run_and_triage(tmp_path: Path, capsys: pytest.CaptureFixture):
@@ -328,9 +423,16 @@ def test_vetting_readiness_refuses_review_required_evidence_without_claims(tmp_p
     cand = load_candidate(tmp_path, "synth-vet-review")
     run_engine(cand, "screen")
     _write_passing_pre_vetting_artifacts(candidate_path, cand.candidate_id)
+    _write_remaining_real_data_prerequisites(candidate_path)
     localization = candidate_path / "outputs" / "prf_localization_results.json"
     localization.write_text(
-        json.dumps({"source": "candidate-data", "summary": {"conclusion": "inconclusive_no_competing_sources_modeled"}}),
+        json.dumps(
+            {
+                "source": "candidate-data",
+                "calibration_status": "uncalibrated",
+                "summary": {"conclusion": "inconclusive_g_band_flux_bound_exceeded"},
+            }
+        ),
         encoding="utf-8",
     )
 

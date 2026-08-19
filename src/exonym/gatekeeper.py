@@ -10,13 +10,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .resources import ResourceUnavailableError, read_schema_text
-from .schemas import NOVELTY_AUDIT_SCHEMA
+from .schemas import NOVELTY_AUDIT_SCHEMA, PROVENANCE_SCHEMA
 from .tracking import phase_document_path, parse_checklist
 from .workspace import (
     CandidateWorkspace,
@@ -62,73 +61,92 @@ def next_phase(phase: str) -> Optional[str]:
     return WORKFLOW_PHASES[index + 1]
 
 
+def _sha256_file(path: Path) -> str:
+    """Return a SHA-256 digest without loading a FITS product into memory."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _reject_json_constant(value: str) -> object:
+    """Reject non-finite JSON constants in an acquisition-sidecar record."""
+    raise ValueError("non-finite JSON constant: {0}".format(value))
+
+
+def _unique_json_object(pairs: Sequence[Tuple[str, object]]) -> Dict[str, object]:
+    """Parse a JSON object only when every field name is unique."""
+    result: Dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key: {0}".format(key))
+        result[key] = value
+    return result
+
+
+def _load_provenance_schema(workspace: CandidateWorkspace) -> object:
+    """Load the authoritative provenance schema for direct acquisition gating."""
+    try:
+        return json.loads(read_schema_text(workspace.repository_root, PROVENANCE_SCHEMA))
+    except (FileNotFoundError, ResourceUnavailableError, OSError, UnicodeError, ValueError) as exc:
+        raise RuntimeError("provenance schema is unavailable: {0}".format(exc)) from exc
+
+
 def _gate_provenance_ready(workspace: CandidateWorkspace) -> Tuple[bool, str]:
-    """acquisition gate: every raw FITS product has a provenance sidecar."""
+    """Require schema-valid, hash-matched sidecars for every raw FITS product."""
     raw_root = workspace.path / "data" / "raw"
     products = sorted(raw_root.rglob("*")) if raw_root.is_dir() else []
     fits_files = [p for p in products if p.is_file() and p.suffix.lower() in (".fits", ".fz")]
     if not fits_files:
         return False, "data/raw contains no FITS products; acquisition gate not met"
-    missing = [
-        p.name
-        for p in fits_files
-        if not p.with_name(p.stem + ".provenance.json").is_file()
-    ]
-    if missing:
-        return False, "raw products missing provenance sidecars: {0}".format(", ".join(missing[:5]))
-    return True, "{0} raw products with provenance sidecars".format(len(fits_files))
+    try:
+        import jsonschema
+    except ImportError:
+        return False, "provenance schema validation is unavailable: jsonschema is not installed"
+    try:
+        schema = _load_provenance_schema(workspace)
+    except RuntimeError as exc:
+        return False, str(exc)
+    errors: List[str] = []
+    for product in fits_files:
+        sidecar = product.with_name(product.stem + ".provenance.json")
+        if not sidecar.is_file():
+            errors.append("{0}: missing sidecar".format(product.name))
+            continue
+        try:
+            record = json.loads(
+                sidecar.read_text(encoding="utf-8"),
+                parse_constant=_reject_json_constant,
+                object_pairs_hook=_unique_json_object,
+            )
+            jsonschema.validate(record, schema, format_checker=jsonschema.FormatChecker())
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError, jsonschema.ValidationError) as exc:
+            errors.append("{0}: invalid sidecar ({1})".format(product.name, str(exc).splitlines()[0]))
+            continue
+        except jsonschema.SchemaError as exc:
+            return False, "provenance schema is invalid: {0}".format(exc.message)
+        if not isinstance(record, dict) or record.get("sha256") != _sha256_file(product):
+            errors.append("{0}: sidecar SHA-256 does not match product bytes".format(product.name))
+    if errors:
+        return False, "raw provenance failures: {0}".format("; ".join(errors[:5]))
+    return True, "{0} raw products with schema-valid hash-matched sidecars".format(len(fits_files))
 
 
 def _gate_fpp_claim(workspace: CandidateWorkspace, threshold: float = 0.01) -> Tuple[bool, str]:
-    """Require a low FPP claim bound to its real TRICERATOPS report."""
-    claims_root = workspace.path / "claims"
-    if not claims_root.is_dir():
-        return False, "no claims directory; FPP gate not met"
-    for claim in sorted(claims_root.glob("*.json")):
-        try:
-            data = json.loads(claim.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, UnicodeError):
-            continue
-        if not isinstance(data, dict) or data.get("parameter") != "fpp":
-            continue
-        value = data.get("value")
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-            continue
-        if data.get("candidate_id") != workspace.candidate_id:
-            continue
-        report_path_value = data.get("report_path")
-        report_hash = data.get("report_sha256")
-        if not isinstance(report_path_value, str) or not isinstance(report_hash, str):
-            continue
-        candidate_root = workspace.path.resolve()
-        report_path = (candidate_root / report_path_value).resolve()
-        try:
-            report_path.relative_to(candidate_root)
-        except ValueError:
-            continue
-        if not report_path.is_file():
-            continue
-        actual_hash = hashlib.sha256(report_path.read_bytes()).hexdigest()
-        if actual_hash != report_hash:
-            continue
-        try:
-            report = json.loads(report_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, UnicodeError):
-            continue
-        report_fpp = report.get("FPP") if isinstance(report, dict) else None
-        if (
-            not isinstance(report, dict)
-            or report.get("candidate_id") != workspace.candidate_id
-            or report.get("source") != "triceratops-monte-carlo"
-            or isinstance(report_fpp, bool)
-            or not isinstance(report_fpp, (int, float))
-            or not math.isfinite(report_fpp)
-            or value != report_fpp
-        ):
-            continue
-        if 0.0 <= value < threshold:
-            return True, "FPP={0:.4f} < {1:.2f}".format(value, threshold)
-    return False, "no verified TRICERATOPS FPP claim below threshold {0:.2f} found in claims/".format(threshold)
+    """Block FPP claims until the scene model is calibration-ready.
+
+    A real Monte Carlo report is necessary but not sufficient for a validation
+    claim. The current pipeline has provenance-bound observed photometry, but
+    its PRF scene model is deliberately marked uncalibrated and is not yet an
+    input to TRICERATOPS. No claim file, including a hand-written one, may
+    advance the analysis gate before that gap is closed.
+    """
+    return (
+        False,
+        "FPP claims are disabled until provenance-bound observed photometry and "
+        "calibrated scene constraints are integrated into TRICERATOPS.",
+    )
 
 
 def _parse_utc_timestamp(value: object) -> Optional[datetime]:

@@ -26,7 +26,8 @@ from .discovery import (
     robustness_diagnostics,
 )
 from .inputs import load_light_curve_table
-from .search import run_bls_on_candidate
+from .search import _input_manifest_records, run_bls_on_candidate
+from .screening import fixed_ephemeris_screen
 from .workspace import CandidateWorkspace, load_candidate, validate_candidate_id
 
 
@@ -40,7 +41,11 @@ ROBUSTNESS_CONFIGURATION = {
     "period_min_days": 0.5,
     "period_max_days": 20.0,
     "n_periods": 200,
+    "period_grid": "astropy-autopower-baseline-duration-resolved",
+    "injection_model": "finite-exposure-box-overlap",
+    "exposure_model": "median-positive-cadence-inferred",
     "detrend_window_days": 1.0,
+    "detrend_gap_break_window_fraction": 0.5,
     "scramble_seeds": [5, 7, 11],
     "period_agreement_fraction": 0.01,
     "injection_recovery": {
@@ -49,6 +54,49 @@ ROBUSTNESS_CONFIGURATION = {
         "minimum_recovery_fraction": 2.0 / 3.0,
         "epoch_tolerance_duration_fraction": 1.0,
     },
+}
+SENSITIVITY_CONFIGURATION = {
+    "period_days": [0.75, 3.0, 10.0],
+    "duration_hours": [1.0, 2.0, 4.0],
+    "depth_ppm": [250.0, 1000.0, 2500.0],
+    "phase_offsets": [0.125, 0.375, 0.625, 0.875],
+    "duration_grid_hours": [1.0, 2.0, 4.0],
+    "period_min_days": 0.5,
+    "period_max_days": 20.0,
+    "n_periods": 200,
+    "period_grid": "astropy-autopower-baseline-duration-resolved",
+    "injection_model": "finite-exposure-box-overlap",
+    "exposure_model": "median-positive-cadence-inferred",
+    "period_agreement_fraction": 0.01,
+    "epoch_tolerance_duration_fraction": 1.0,
+    "detrend_window_days": 1.0,
+    "detrend_gap_break_window_fraction": 0.5,
+    "preprocessing_branches": ["normalized", "running-median"],
+}
+WILSON_CONFIDENCE_LEVEL = 0.95
+WILSON_Z_95 = 1.959963984540054
+ALIAS_CONTROL_METHOD = "fixed-ephemeris-odd-even-half-phase-double-period-v1"
+ALIAS_CONTROL_INTERPRETATION = (
+    "Diagnostic only: odd-even, half-phase, and doubled-period measurements "
+    "preserve possible aliases for human review; they do not identify an "
+    "eclipsing binary or validate a planet."
+)
+REFERENCE_BLS_CONFIGURATION = {
+    "period_min_days": ROBUSTNESS_CONFIGURATION["period_min_days"],
+    "period_max_days": ROBUSTNESS_CONFIGURATION["period_max_days"],
+    "duration_hours": None,
+    "duration_grid_hours": ROBUSTNESS_CONFIGURATION["duration_grid_hours"],
+    "n_periods": ROBUSTNESS_CONFIGURATION["n_periods"],
+    "n_periods_role": "minimum requested trial density; Astropy baseline-duration grid may use more",
+    "period_grid": ROBUSTNESS_CONFIGURATION["period_grid"],
+    "max_points": 4000,
+    "quality_filter": "quality == 0 when available",
+    "normalization": "lightkurve.remove_nans().normalize()",
+    "binning": "per-product median binning; no global rebinning",
+    "signal": None,
+    "engine": "bls",
+    "cadence": "median-binned",
+    "use_threads": None,
 }
 
 
@@ -301,6 +349,188 @@ def _robustness_path(survey: SurveyWorkspace, candidate: CandidateWorkspace) -> 
     return candidate.path / "outputs" / ("survey_robustness" + _survey_result_suffix(survey) + ".json")
 
 
+def _sensitivity_path(survey: SurveyWorkspace, candidate: CandidateWorkspace) -> Path:
+    """Return the candidate-local sensitivity diagnostic path for one survey."""
+    return candidate.path / "outputs" / ("survey_sensitivity" + _survey_result_suffix(survey) + ".json")
+
+
+def _sensitivity_injections(
+    time_btjd: Sequence[float], configuration: Dict[str, Any]
+) -> List[Dict[str, float]]:
+    """Construct a fixed candidate-level injection grid from observed timestamps."""
+    finite_times = [float(value) for value in time_btjd if math.isfinite(float(value))]
+    if not finite_times:
+        raise RuntimeError("survey sensitivity diagnostics require finite candidate timestamps")
+    anchor_epoch = min(finite_times)
+    injections: List[Dict[str, float]] = []
+    for period_days in configuration["period_days"]:
+        for duration_hours in configuration["duration_hours"]:
+            for depth_ppm in configuration["depth_ppm"]:
+                for phase_offset in configuration["phase_offsets"]:
+                    period = float(period_days)
+                    injections.append(
+                        {
+                            "period_days": period,
+                            "epoch_btjd": anchor_epoch + float(phase_offset) * period,
+                            "duration_hours": float(duration_hours),
+                            "depth_ppm": float(depth_ppm),
+                            "phase_offset": float(phase_offset),
+                        }
+                    )
+    return injections
+
+
+def _sensitivity_summary(
+    injections: Sequence[Dict[str, float]], recovery: Sequence[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Aggregate a fixed grid without converting it into a completeness claim."""
+    expected = {
+        (
+            float(injection["period_days"]),
+            float(injection["duration_hours"]),
+            float(injection["depth_ppm"]),
+        ): []
+        for injection in injections
+    }
+    for entry in recovery:
+        injection = entry["injection"]
+        key = (
+            float(injection["period_days"]),
+            float(injection["duration_hours"]),
+            float(injection["depth_ppm"]),
+        )
+        if key in expected:
+            expected[key].append(bool(entry["recovered"]))
+    cells: List[Dict[str, Any]] = []
+    recovered_count = 0
+    for period_days, duration_hours, depth_ppm in sorted(expected):
+        outcomes = expected[(period_days, duration_hours, depth_ppm)]
+        count = sum(outcomes)
+        recovered_count += count
+        cells.append(
+            {
+                "period_days": period_days,
+                "duration_hours": duration_hours,
+                "depth_ppm": depth_ppm,
+                "trial_count": len(outcomes),
+                "recovered_count": count,
+                "recovery_fraction": float(count) / len(outcomes) if outcomes else 0.0,
+                "recovery_interval_95": _wilson_interval(count, len(outcomes)),
+            }
+        )
+    trial_count = len(recovery)
+    return {
+        "grid_cell_count": len(cells),
+        "trial_count": trial_count,
+        "recovered_count": recovered_count,
+        "recovery_fraction": float(recovered_count) / trial_count if trial_count else 0.0,
+        "recovery_interval_95": _wilson_interval(recovered_count, trial_count),
+        "cells": cells,
+    }
+
+
+def _wilson_interval(recovered_count: int, trial_count: int) -> Dict[str, Any]:
+    """Return a finite-sample Wilson interval for a recovery proportion.
+
+    The interval describes repeated injections from this fixed candidate-level
+    grid only. It is included to expose the uncertainty caused by the limited
+    number of phase trials, not to turn the grid into a population completeness
+    calibration.
+    """
+    if trial_count < 1 or recovered_count < 0 or recovered_count > trial_count:
+        raise ValueError("Wilson recovery interval requires bounded non-empty counts")
+    proportion = float(recovered_count) / trial_count
+    z_squared = WILSON_Z_95 * WILSON_Z_95
+    denominator = 1.0 + z_squared / trial_count
+    center = (proportion + z_squared / (2.0 * trial_count)) / denominator
+    half_width = (
+        WILSON_Z_95
+        * math.sqrt(
+            (proportion * (1.0 - proportion) + z_squared / (4.0 * trial_count))
+            / trial_count
+        )
+        / denominator
+    )
+    lower = max(0.0, center - half_width)
+    upper = min(1.0, center + half_width)
+    if recovered_count == 0:
+        lower = 0.0
+    if recovered_count == trial_count:
+        upper = 1.0
+    return {
+        "method": "wilson-score",
+        "confidence_level": WILSON_CONFIDENCE_LEVEL,
+        "lower": lower,
+        "upper": upper,
+    }
+
+
+def run_survey_sensitivity(
+    survey: SurveyWorkspace, candidate: CandidateWorkspace
+) -> Path:
+    """Write a two-branch candidate-level injection-recovery grid.
+
+    This operation is deliberately separate from survey alert routing. It uses
+    a frozen box-transit grid on one candidate's observed light curve and
+    reports only the recovery outcomes for that configuration. It does not
+    estimate a survey selection function, population completeness, false-alarm
+    probability, or scientific validation probability.
+    """
+    _load_target_record(survey, candidate.candidate_id)
+    if not _current_eligible_audit(candidate):
+        raise RuntimeError("survey sensitivity requires a current eligible novelty audit")
+    table = load_light_curve_table(candidate, sectors=survey.metadata["sectors"])
+    if table is None:
+        raise RuntimeError("survey sensitivity diagnostics require real candidate photometry")
+    input_manifest = _input_manifest_records(candidate, sectors=survey.metadata["sectors"])
+    if not input_manifest:
+        raise RuntimeError("survey sensitivity diagnostics require hashable candidate inputs")
+    configuration = json.loads(json.dumps(SENSITIVITY_CONFIGURATION))
+    configuration["minimum_snr"] = _validate_review_snr(survey.metadata["review_snr"])
+    injections = _sensitivity_injections(table["time"], configuration)
+    recovery = injection_recovery_diagnostics(
+        table["time"],
+        table["flux"],
+        injections,
+        configuration["duration_grid_hours"],
+        configuration["period_min_days"],
+        configuration["period_max_days"],
+        configuration["n_periods"],
+        configuration["period_agreement_fraction"],
+        minimum_snr=configuration["minimum_snr"],
+        epoch_tolerance_duration_fraction=configuration[
+            "epoch_tolerance_duration_fraction"
+        ],
+        sectors=table["sector"],
+        detrend_window_days=configuration["detrend_window_days"],
+        flux_err=table.get("flux_err"),
+        gap_break_window_fraction=configuration["detrend_gap_break_window_fraction"],
+    )
+    artifact = {
+        "schema_version": 1,
+        "source": "candidate-data",
+        "survey_id": survey.survey_id,
+        "candidate_id": candidate.candidate_id,
+        "sectors": list(survey.metadata["sectors"]),
+        "scientific_status": "candidate-level-injection-recovery-diagnostic",
+        "validation_eligible": False,
+        "completeness_eligible": False,
+        "configuration": configuration,
+        "input_files": [path.relative_to(candidate.path).as_posix() for path in table["input_files"]],
+        "input_manifest": input_manifest,
+        "injection_recovery": recovery,
+        "summary": _sensitivity_summary(injections, recovery),
+        "calibration_limits": {
+            "population_false_alarm_probability": None,
+            "population_detection_reliability": None,
+            "reason": "One candidate, fixed box injections, and deterministic BLS recovery do not calibrate a survey population selection function.",
+        },
+    }
+    path = _sensitivity_path(survey, candidate)
+    _atomic_write(path, json.dumps(artifact, indent=2, sort_keys=True) + "\n")
+    return path
+
+
 def _reference_signal(search_result: Dict[str, Any]) -> Dict[str, Any]:
     """Extract the BLS scale that candidate-specific injections must reproduce."""
     try:
@@ -310,6 +540,7 @@ def _reference_signal(search_result: Dict[str, Any]) -> Dict[str, Any]:
             "best_duration_hours": float(search_result["best_duration_hours"]),
             "best_depth_ppm": float(search_result["best_depth_ppm"]),
             "snr": float(search_result["snr"]),
+            "n_distinct_transit_events": int(search_result["n_distinct_transit_events"]),
         }
     except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeError("survey BLS result is missing a usable signal scale") from exc
@@ -318,6 +549,7 @@ def _reference_signal(search_result: Dict[str, Any]) -> Dict[str, Any]:
         and result["best_period"] > 0
         and result["best_duration_hours"] > 0
         and result["best_depth_ppm"] > 0
+        and result["n_distinct_transit_events"] >= 2
     )
     return result
 
@@ -341,12 +573,103 @@ def _candidate_scale_injections(
     ]
 
 
+def _injection_entry_matches(
+    entry: Dict[str, Any],
+    reference_signal: Dict[str, Any],
+    phase_offset: float,
+    recovery_configuration: Dict[str, Any],
+    period_agreement_fraction: float,
+    require_all_branches: bool,
+) -> bool:
+    """Check one recovery entry against its declared injection and branches."""
+    try:
+        injection = entry["injection"]
+        expected_injection = {
+            "period_days": reference_signal["best_period"],
+            "epoch_btjd": reference_signal["best_epoch"]
+            + phase_offset * reference_signal["best_period"],
+            "duration_hours": reference_signal["best_duration_hours"],
+            "depth_ppm": reference_signal["best_depth_ppm"],
+            "phase_offset": phase_offset,
+        }
+        if injection != expected_injection:
+            return False
+        epoch_tolerance_hours = (
+            injection["duration_hours"]
+            * recovery_configuration["epoch_tolerance_duration_fraction"]
+        )
+        if entry.get("epoch_tolerance_hours") != epoch_tolerance_hours:
+            return False
+        branches = entry.get("branches")
+        if branches is None:
+            if require_all_branches:
+                return False
+            branches = {
+                "normalized": {
+                    "period_match": entry["period_match"],
+                    "epoch_match": entry["epoch_match"],
+                    "snr_pass": entry["snr_pass"],
+                    "recovered": entry["recovered"],
+                    "best": entry["best"],
+                }
+            }
+        expected_branch_names = {"normalized", "running-median"}
+        if require_all_branches:
+            if set(branches) != expected_branch_names:
+                return False
+        elif set(branches) != {"normalized"}:
+            return False
+
+        expected_outcomes: List[Dict[str, Any]] = []
+        for branch in sorted(branches):
+            branch_result = branches[branch]
+            best = branch_result["best"]
+            period_match = recovered_period(
+                injection["period_days"], best["best_period"], period_agreement_fraction
+            )
+            epoch_match = recovered_epoch(
+                injection["period_days"],
+                injection["epoch_btjd"],
+                best["best_epoch"],
+                epoch_tolerance_hours,
+            )
+            snr_pass = bool(
+                best["snr"] >= recovery_configuration["minimum_snr"]
+                and int(best["n_distinct_transit_events"]) >= 2
+            )
+            expected = {
+                "period_match": period_match,
+                "epoch_match": epoch_match,
+                "snr_pass": snr_pass,
+                "recovered": bool(period_match and epoch_match and snr_pass),
+                "best": best,
+            }
+            if branch_result != expected:
+                return False
+            expected_outcomes.append(expected)
+        normalized = branches["normalized"]
+        return bool(
+            entry.get("best") == normalized["best"]
+            and entry.get("period_match")
+            == all(outcome["period_match"] for outcome in expected_outcomes)
+            and entry.get("epoch_match")
+            == all(outcome["epoch_match"] for outcome in expected_outcomes)
+            and entry.get("snr_pass")
+            == all(outcome["snr_pass"] for outcome in expected_outcomes)
+            and entry.get("recovered")
+            == all(outcome["recovered"] for outcome in expected_outcomes)
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def _injection_recovery_summary(
     reference_signal: Dict[str, Any],
     recovery: Sequence[Dict[str, Any]],
     recovery_configuration: Dict[str, Any],
     period_agreement_fraction: float,
     masked_cadences: int,
+    require_all_branches: bool = False,
 ) -> Dict[str, Any]:
     """Summarize the frozen candidate-scale recovery rule for one artifact."""
     phase_offsets = recovery_configuration["phase_offsets"]
@@ -357,35 +680,13 @@ def _injection_recovery_summary(
     matching_injections = trial_count == expected_trial_count
     if matching_injections:
         for entry, phase_offset in zip(recovery, phase_offsets):
-            injection = entry["injection"]
-            best = entry["best"]
-            epoch_tolerance_hours = (
-                injection["duration_hours"]
-                * recovery_configuration["epoch_tolerance_duration_fraction"]
-            )
-            period_match = recovered_period(
-                injection["period_days"], best["best_period"], period_agreement_fraction
-            )
-            epoch_match = recovered_epoch(
-                injection["period_days"],
-                injection["epoch_btjd"],
-                best["best_epoch"],
-                epoch_tolerance_hours,
-            )
-            snr_pass = bool(best["snr"] >= recovery_configuration["minimum_snr"])
-            matching_injections = (
-                injection["period_days"] == reference_signal["best_period"]
-                and injection["duration_hours"] == reference_signal["best_duration_hours"]
-                and injection["depth_ppm"] == reference_signal["best_depth_ppm"]
-                and injection["phase_offset"] == phase_offset
-                and injection["epoch_btjd"]
-                == reference_signal["best_epoch"]
-                + phase_offset * reference_signal["best_period"]
-                and entry["epoch_tolerance_hours"] == epoch_tolerance_hours
-                and entry["period_match"] is period_match
-                and entry["epoch_match"] is epoch_match
-                and entry["snr_pass"] is snr_pass
-                and entry["recovered"] is (period_match and epoch_match and snr_pass)
+            matching_injections = _injection_entry_matches(
+                entry,
+                reference_signal,
+                phase_offset,
+                recovery_configuration,
+                period_agreement_fraction,
+                require_all_branches,
             )
             if not matching_injections:
                 break
@@ -405,6 +706,51 @@ def _injection_recovery_summary(
         "minimum_recovered_trials": recovery_configuration["minimum_recovered_trials"],
         "minimum_recovery_fraction": recovery_configuration["minimum_recovery_fraction"],
         "passed": passed,
+    }
+
+
+def _survey_alias_controls(
+    table: Dict[str, Any], reference_signal: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Preserve fixed-ephemeris alias diagnostics for a survey review.
+
+    These measurements intentionally do not change the survey's triage outcome.
+    A survey alert is still only a request for human review, and unresolved
+    windows are retained instead of being treated as evidence against an alias.
+    """
+    if not reference_signal["usable_for_injection_recovery"]:
+        return {
+            "status": "not-run-unusable-reference-signal",
+            "method": ALIAS_CONTROL_METHOD,
+            "odd_even": None,
+            "half_phase_control": None,
+            "double_period_hypothesis": None,
+            "interpretation": ALIAS_CONTROL_INTERPRETATION,
+        }
+    try:
+        result = fixed_ephemeris_screen(
+            table["time"],
+            table["flux"],
+            reference_signal["best_period"],
+            reference_signal["best_epoch"],
+            reference_signal["best_duration_hours"],
+        )
+    except (KeyError, TypeError, ValueError):
+        return {
+            "status": "unavailable-invalid-input",
+            "method": ALIAS_CONTROL_METHOD,
+            "odd_even": None,
+            "half_phase_control": None,
+            "double_period_hypothesis": None,
+            "interpretation": ALIAS_CONTROL_INTERPRETATION,
+        }
+    return {
+        "status": "computed",
+        "method": ALIAS_CONTROL_METHOD,
+        "odd_even": result["odd_even"],
+        "half_phase_control": result["half_phase_control"],
+        "double_period_hypothesis": result["double_period_hypothesis"],
+        "interpretation": ALIAS_CONTROL_INTERPRETATION,
     }
 
 
@@ -436,6 +782,8 @@ def _run_survey_robustness(
         configuration["n_periods"],
         configuration["detrend_window_days"],
         configuration["scramble_seeds"],
+        flux_err=table.get("flux_err"),
+        gap_break_window_fraction=configuration["detrend_gap_break_window_fraction"],
     )
     reference_signal = _reference_signal(search_result)
     masked_cadences = 0
@@ -461,6 +809,10 @@ def _run_survey_robustness(
             epoch_tolerance_duration_fraction=recovery_configuration[
                 "epoch_tolerance_duration_fraction"
             ],
+            sectors=table["sector"],
+            detrend_window_days=configuration["detrend_window_days"],
+            flux_err=table.get("flux_err"),
+            gap_break_window_fraction=configuration["detrend_gap_break_window_fraction"],
         )
     artifact = {
         "schema_version": 1,
@@ -472,6 +824,7 @@ def _run_survey_robustness(
         "input_files": [path.relative_to(candidate.path).as_posix() for path in table["input_files"]],
         "reference_signal": reference_signal,
         "diagnostics": diagnostics,
+        "alias_controls": _survey_alias_controls(table, reference_signal),
         "injection_recovery": injections,
         "injection_recovery_summary": _injection_recovery_summary(
             reference_signal,
@@ -479,6 +832,7 @@ def _run_survey_robustness(
             recovery_configuration,
             configuration["period_agreement_fraction"],
             masked_cadences,
+            require_all_branches=True,
         ),
     }
     path = _robustness_path(survey, candidate)
@@ -504,6 +858,8 @@ def _robustness_passes(artifact: Dict[str, Any], review_snr: float) -> bool:
         reference_signal = artifact["reference_signal"]
         recovery = artifact["injection_recovery"]
         summary = artifact["injection_recovery_summary"]
+        controls = diagnostics["controls"]
+        branch_controls = controls["by_variant"]
         tolerance = float(configuration["period_agreement_fraction"])
         reference = float(normalized["best_period"])
         comparison = float(detrended["best_period"])
@@ -517,6 +873,7 @@ def _robustness_passes(artifact: Dict[str, Any], review_snr: float) -> bool:
             "period_min_days",
             "period_max_days",
             "n_periods",
+            "period_grid",
             "detrend_window_days",
             "scramble_seeds",
             "period_agreement_fraction",
@@ -534,12 +891,36 @@ def _robustness_passes(artifact: Dict[str, Any], review_snr: float) -> bool:
                 return False
         if not math.isclose(float(recovery_configuration["minimum_snr"]), review_snr):
             return False
+        if controls["scramble_method"] != "independent-sector-circular-shift":
+            return False
+        if set(branch_controls) != {"normalized", "running-median"}:
+            return False
+        if controls["inverted"] != branch_controls["normalized"]["inverted"]:
+            return False
+        if controls["scrambles"] != branch_controls["normalized"]["scrambles"]:
+            return False
+        control_scores: List[float] = []
+        for branch in ("normalized", "running-median"):
+            branch_control = branch_controls[branch]
+            if [entry["seed"] for entry in branch_control["scrambles"]] != configuration["scramble_seeds"]:
+                return False
+            scores = [float(branch_control["inverted"]["snr"])] + [
+                float(entry["best"]["snr"]) for entry in branch_control["scrambles"]
+            ]
+            if any(not math.isfinite(score) or score < 0 for score in scores):
+                return False
+            if not math.isclose(float(branch_control["max_snr"]), max(scores)):
+                return False
+            control_scores.extend(scores)
+        if not math.isclose(float(controls["max_snr"]), max(control_scores)):
+            return False
         recomputed_summary = _injection_recovery_summary(
             reference_signal,
             recovery,
             recovery_configuration,
             tolerance,
             int(summary["masked_cadences"]),
+            require_all_branches=True,
         )
         normalized_agrees = abs(reference / signal_period - 1.0) <= tolerance
         detrended_agrees = abs(comparison / signal_period - 1.0) <= tolerance
@@ -547,6 +928,9 @@ def _robustness_passes(artifact: Dict[str, Any], review_snr: float) -> bool:
             float(reference_signal["snr"]) >= review_snr
             and float(normalized["snr"]) >= review_snr
             and float(detrended["snr"]) >= review_snr
+            and int(reference_signal["n_distinct_transit_events"]) >= 2
+            and int(normalized["n_distinct_transit_events"]) >= 2
+            and int(detrended["n_distinct_transit_events"]) >= 2
             and normalized_agrees
             and detrended_agrees
             and float(diagnostics["controls"]["max_snr"]) < review_snr
@@ -566,16 +950,27 @@ def _existing_sector_bls_result(
     manifest = candidate.path / "outputs" / ("bls_search_manifest" + suffix + ".json")
     try:
         payload = json.loads(output.read_text(encoding="utf-8"))
-        configuration = json.loads(manifest.read_text(encoding="utf-8"))["configuration"]
+        manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
+        configuration = manifest_payload["configuration"]
     except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
+    expected_configuration = dict(REFERENCE_BLS_CONFIGURATION)
+    expected_configuration["sectors"] = list(sectors)
     if (
         not isinstance(payload, dict)
+        or not isinstance(manifest_payload, dict)
         or payload.get("source") != "candidate-data"
-        or configuration.get("engine") != "bls"
-        or configuration.get("signal") is not None
-        or configuration.get("sectors") != list(sectors)
+        or manifest_payload.get("candidate_id") != candidate.candidate_id
+        or manifest_payload.get("source") != "candidate-data"
+        or manifest_payload.get("result_path") != output.relative_to(candidate.path).as_posix()
+        or manifest_payload.get("inputs") != _input_manifest_records(candidate, sectors=sectors)
     ):
+        return None
+    for key, expected_value in expected_configuration.items():
+        if configuration.get(key) != expected_value:
+            return None
+    uncertainty_source = configuration.get("uncertainty_source")
+    if not isinstance(uncertainty_source, list) or not uncertainty_source:
         return None
     return output, payload
 
@@ -605,8 +1000,12 @@ def run_survey_search(
     if existing is None:
         output = run_bls_on_candidate(
             candidate,
+            period_min=REFERENCE_BLS_CONFIGURATION["period_min_days"],
+            period_max=REFERENCE_BLS_CONFIGURATION["period_max_days"],
+            n_periods=REFERENCE_BLS_CONFIGURATION["n_periods"],
             sectors=survey.metadata["sectors"],
             result_suffix=_survey_result_suffix(survey),
+            duration_grid_hours=ROBUSTNESS_CONFIGURATION["duration_grid_hours"],
         )
         payload = json.loads(output.read_text(encoding="utf-8"))
         record["search_reused"] = False
@@ -627,9 +1026,9 @@ def run_survey_search(
         else "searched-no-alert"
     )
     record["reason"] = (
-        "BLS and robustness checks exceeded the survey review threshold; complete candidate-local vetting."
+        "Uncalibrated search-score and robustness checks exceeded the survey review threshold; complete candidate-local vetting."
         if record["status"] == "alert-for-human-review"
-        else "BLS or required robustness checks did not exceed the survey review threshold."
+        else "The uncalibrated search score or required robustness checks did not exceed the survey review threshold."
     )
     record["search_result_path"] = output.relative_to(candidate.path).as_posix()
     record["search_snr"] = snr

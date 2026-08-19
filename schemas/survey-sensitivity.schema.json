@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/survey-sensitivity-1.0.json",
+  "title": "Candidate-local Survey Sensitivity Diagnostic",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source", "survey_id", "candidate_id", "sectors", "scientific_status", "validation_eligible", "completeness_eligible", "configuration", "input_files", "input_manifest", "injection_recovery", "summary", "calibration_limits"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "source": {"const": "candidate-data"},
+    "survey_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+    "candidate_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+    "sectors": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "integer", "minimum": 1}},
+    "scientific_status": {"const": "candidate-level-injection-recovery-diagnostic"},
+    "validation_eligible": {"const": false},
+    "completeness_eligible": {"const": false},
+    "configuration": {"$ref": "#/$defs/configuration"},
+    "input_files": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/input_path"}},
+    "input_manifest": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/input_manifest"}},
+    "injection_recovery": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/recovery_entry"}},
+    "summary": {"$ref": "#/$defs/summary"},
+    "calibration_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["population_false_alarm_probability", "population_detection_reliability", "reason"],
+      "properties": {
+        "population_false_alarm_probability": {"const": null},
+        "population_detection_reliability": {"const": null},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    }
+  },
+  "$defs": {
+    "input_path": {"type": "string", "pattern": "^data/(?:raw|processed)/(?:[A-Za-z0-9][A-Za-z0-9._-]*/)*[A-Za-z0-9][A-Za-z0-9._-]*\\.(?:fits|fz)$"},
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["period_days", "duration_hours", "depth_ppm", "phase_offsets", "duration_grid_hours", "period_min_days", "period_max_days", "n_periods", "period_grid", "injection_model", "exposure_model", "period_agreement_fraction", "epoch_tolerance_duration_fraction", "detrend_window_days", "detrend_gap_break_window_fraction", "preprocessing_branches", "minimum_snr"],
+      "properties": {
+        "period_days": {"const": [0.75, 3.0, 10.0]},
+        "duration_hours": {"const": [1.0, 2.0, 4.0]},
+        "depth_ppm": {"const": [250.0, 1000.0, 2500.0]},
+        "phase_offsets": {"const": [0.125, 0.375, 0.625, 0.875]},
+        "duration_grid_hours": {"const": [1.0, 2.0, 4.0]},
+        "period_min_days": {"const": 0.5},
+        "period_max_days": {"const": 20.0},
+        "n_periods": {"const": 200},
+        "period_grid": {"const": "astropy-autopower-baseline-duration-resolved"},
+        "injection_model": {"const": "finite-exposure-box-overlap"},
+        "exposure_model": {"const": "median-positive-cadence-inferred"},
+        "period_agreement_fraction": {"const": 0.01},
+        "epoch_tolerance_duration_fraction": {"const": 1.0},
+        "detrend_window_days": {"const": 1.0},
+        "detrend_gap_break_window_fraction": {"const": 0.5},
+        "preprocessing_branches": {"const": ["normalized", "running-median"]},
+        "minimum_snr": {"type": "number", "exclusiveMinimum": 0}
+      }
+    },
+    "input_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "provenance_path", "provenance"],
+      "properties": {
+        "path": {"$ref": "#/$defs/input_path"},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "provenance_path": {"type": ["string", "null"]},
+        "provenance": {"type": ["object", "null"]}
+      }
+    },
+    "bls_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["best_period", "best_epoch", "best_depth_ppm", "best_duration_hours", "snr", "n_distinct_transit_events"],
+      "properties": {
+        "best_period": {"type": "number", "exclusiveMinimum": 0},
+        "best_epoch": {"type": "number"},
+        "best_depth_ppm": {"type": "number"},
+        "best_duration_hours": {"type": "number", "exclusiveMinimum": 0},
+        "snr": {"type": "number", "minimum": 0},
+        "n_distinct_transit_events": {"type": "integer", "minimum": 0},
+        "n_period_trials": {"type": "integer", "minimum": 0}
+      }
+    },
+    "branch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["period_match", "epoch_match", "snr_pass", "recovered", "best"],
+      "properties": {
+        "period_match": {"type": "boolean"},
+        "epoch_match": {"type": "boolean"},
+        "snr_pass": {"type": "boolean"},
+        "recovered": {"type": "boolean"},
+        "best": {"$ref": "#/$defs/bls_result"}
+      }
+    },
+    "recovery_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["injection", "period_match", "epoch_match", "snr_pass", "epoch_tolerance_hours", "recovered", "best", "branches"],
+      "properties": {
+        "injection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["period_days", "epoch_btjd", "duration_hours", "depth_ppm", "phase_offset"],
+          "properties": {
+            "period_days": {"type": "number", "exclusiveMinimum": 0},
+            "epoch_btjd": {"type": "number"},
+            "duration_hours": {"type": "number", "exclusiveMinimum": 0},
+            "depth_ppm": {"type": "number", "exclusiveMinimum": 0},
+            "phase_offset": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1}
+          }
+        },
+        "period_match": {"type": "boolean"},
+        "epoch_match": {"type": "boolean"},
+        "snr_pass": {"type": "boolean"},
+        "epoch_tolerance_hours": {"type": "number", "exclusiveMinimum": 0},
+        "recovered": {"type": "boolean"},
+        "best": {"$ref": "#/$defs/bls_result"},
+        "branches": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["normalized", "running-median"],
+          "properties": {
+            "normalized": {"$ref": "#/$defs/branch"},
+            "running-median": {"$ref": "#/$defs/branch"}
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["grid_cell_count", "trial_count", "recovered_count", "recovery_fraction", "recovery_interval_95", "cells"],
+      "properties": {
+        "grid_cell_count": {"type": "integer", "minimum": 1},
+        "trial_count": {"type": "integer", "minimum": 1},
+        "recovered_count": {"type": "integer", "minimum": 0},
+        "recovery_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "recovery_interval_95": {"$ref": "#/$defs/recovery_interval"},
+        "cells": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["period_days", "duration_hours", "depth_ppm", "trial_count", "recovered_count", "recovery_fraction", "recovery_interval_95"],
+            "properties": {
+              "period_days": {"type": "number", "exclusiveMinimum": 0},
+              "duration_hours": {"type": "number", "exclusiveMinimum": 0},
+              "depth_ppm": {"type": "number", "exclusiveMinimum": 0},
+              "trial_count": {"type": "integer", "minimum": 0},
+              "recovered_count": {"type": "integer", "minimum": 0},
+              "recovery_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+              "recovery_interval_95": {"$ref": "#/$defs/recovery_interval"}
+            }
+          }
+        }
+      }
+    },
+    "recovery_interval": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["method", "confidence_level", "lower", "upper"],
+        "properties": {
+          "method": {"const": "wilson-score"},
+          "confidence_level": {"const": 0.95},
+          "lower": {"type": "number", "minimum": 0, "maximum": 1},
+          "upper": {"type": "number", "minimum": 0, "maximum": 1}
+        }
+    }
+  }
+}

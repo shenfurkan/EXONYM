@@ -1,3 +1,4 @@
+import json
 import shutil
 
 import pytest
@@ -30,6 +31,7 @@ def _repo(tmp_path):
         "survey.schema.json",
         "survey-target.schema.json",
         "survey-robustness.schema.json",
+        "survey-sensitivity.schema.json",
         "engine-run.schema.json",
         "automated-triage.schema.json",
         "radial-velocity-observations.schema.json",
@@ -49,6 +51,13 @@ def _repo(tmp_path):
         "catalog-contrast-curves.schema.json",
         "catalog-context.schema.json",
         "catalog-cross-match.schema.json",
+        "known-signal-ephemeris-match.schema.json",
+        "known-signal-ephemeris-evidence.schema.json",
+        "stellar-activity.schema.json",
+        "phase-curve.schema.json",
+        "detrending-manifest.schema.json",
+        "ldtk-quadratic-limb-darkening-prior.schema.json",
+        "exofop-prior-retrieval.schema.json",
     ):
         shutil.copy2("schemas/{0}".format(name), tmp_path / "schemas" / name)
     (tmp_path / "requirements-lock.txt").write_text(
@@ -59,6 +68,8 @@ def _repo(tmp_path):
 
 def test_cli_full_lifecycle(tmp_path, capsys):
     repo = _repo(tmp_path)
+    shutil.copy2("pyproject.toml", repo / "pyproject.toml")
+    shutil.copytree("src", repo / "src")
     root = ["--root", str(repo)]
 
     assert main(root + ["init", "candidate-alpha", "--toi", "1234.01", "--tic", "123456789"]) == 0
@@ -74,10 +85,33 @@ def test_cli_full_lifecycle(tmp_path, capsys):
     assert main(root + ["tag", "candidate-alpha", "sg1-cleared"]) == 0
     assert main(root + ["freeze", "candidate-alpha", "--version", "v1.0.0"]) == 0
     assert main(root + ["verify"]) == 0
-
     output = capsys.readouterr().out
     assert "ISOLATION: PASS" in output
 
+
+def test_cli_survey_sensitivity_dispatches_without_changing_candidate_state(
+    tmp_path, capsys, monkeypatch
+):
+    # Arrange
+    repo = _repo(tmp_path)
+    root = ["--root", str(repo)]
+    assert main(root + ["init", "survey-target", "--tic", "123456789", "--mission", "tess"]) == 0
+    assert main(root + ["survey", "init", "test-survey", "--mission", "tess", "--sectors", "17"]) == 0
+    assert main(root + ["survey", "add-target", "test-survey", "survey-target"]) == 0
+    calls = []
+
+    def fake_sensitivity(survey, candidate):
+        calls.append((survey.survey_id, candidate.candidate_id))
+        output = candidate.path / "outputs" / "survey_sensitivity.survey-test-survey.json"
+        output.write_text("{}\n", encoding="utf-8")
+        return output
+
+    monkeypatch.setattr("exonym.survey.run_survey_sensitivity", fake_sensitivity)
+
+    # Act / Assert
+    assert main(root + ["survey", "sensitivity", "test-survey", "survey-target"]) == 0
+    assert calls == [("test-survey", "survey-target")]
+    assert "survey_sensitivity.survey-test-survey.json" in capsys.readouterr().out
 
 def test_cli_init_sets_mission_and_tags(tmp_path, capsys):
     repo = _repo(tmp_path)
@@ -160,19 +194,13 @@ def test_cli_vet_blocks_before_triceratops_without_required_evidence(tmp_path, m
     repo = _repo(tmp_path)
     root = ["--root", str(repo)]
     main(root + ["init", "candidate-alpha", "--tic", "123456789"])
-    called = []
-    monkeypatch.setattr(
-        "exonym.vetting.tricera_parse.run_triceratops_simulation",
-        lambda *args, **kwargs: called.append(True),
-    )
 
     with pytest.raises(SystemExit) as exc_info:
         main(root + ["vet", "candidate-alpha"])
 
     assert exc_info.value.code == 2
-    assert called == []
     assert (repo / "candidate" / "candidate-alpha" / "outputs" / "statistical_vetting_evidence.json").is_file()
-    assert (repo / "candidate" / "candidate-alpha" / "decisions" / "automated_triage.json").is_file()
+    assert not (repo / "candidate" / "candidate-alpha" / "decisions" / "automated_triage.json").exists()
 
 
 def test_cli_vet_does_not_accept_force_bypass(tmp_path, monkeypatch):
@@ -256,16 +284,20 @@ def test_cli_asteroseismology_command(tmp_path, capsys):
     repo = _repo(tmp_path)
     root = ["--root", str(repo)]
     main(_init_alpha(repo))
-    assert main(root + ["asteroseismology", "candidate-alpha"]) == 0
-    assert "asteroseismic_results.json" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as exc_info:
+        main(root + ["asteroseismology", "candidate-alpha"])
+    assert exc_info.value.code == 2
+    assert not (repo / "candidate" / "candidate-alpha" / "outputs" / "asteroseismic_results.json").exists()
 
 
 def test_cli_asteroseismology_accepts_numax_bounds(tmp_path, capsys):
     repo = _repo(tmp_path)
     root = ["--root", str(repo)]
     main(_init_alpha(repo))
-    assert main(root + ["asteroseismology", "candidate-alpha", "--numax-min", "50", "--numax-max", "900"]) == 0
-    assert "asteroseismic_results.json" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as exc_info:
+        main(root + ["asteroseismology", "candidate-alpha", "--numax-min", "50", "--numax-max", "900"])
+    assert exc_info.value.code == 2
+    assert not (repo / "candidate" / "candidate-alpha" / "outputs" / "asteroseismic_results.json").exists()
 
 
 def test_cli_localization_command(tmp_path, capsys):
@@ -276,20 +308,49 @@ def test_cli_localization_command(tmp_path, capsys):
     assert "prf_localization_results.json" in capsys.readouterr().out
 
 
+def _write_candidate_sed_photometry(repo):
+    path = repo / "candidate" / "candidate-alpha" / "data" / "external" / "stellar_photometry.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "2MASS": {
+                    "J": {"mag": 10.1, "error": 0.03},
+                    "H": {"mag": 9.8, "error": 0.03},
+                    "Ks": {"mag": 9.7, "error": 0.03},
+                },
+                "AllWISE": {"W1": {"mag": 9.6, "error": 0.03}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (path.parent / "stellar_params.json").write_text(
+        json.dumps(
+            {"teff_k": 5700.0, "logg_cgs": 4.4, "feh": 0.0, "mass_solar": 1.0,
+             "radius_solar": 1.0, "parallax_mas": 10.0, "parallax_mas_err": 0.05}
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_cli_sed_command(tmp_path, capsys):
     repo = _repo(tmp_path)
     root = ["--root", str(repo)]
     main(_init_alpha(repo))
+    _write_candidate_sed_photometry(repo)
     assert main(root + ["sed", "candidate-alpha"]) == 0
     assert "sed_fit_results.json" in capsys.readouterr().out
 
 
-def test_cli_fit_command(tmp_path, capsys):
+def test_cli_fit_requires_candidate_derived_inputs(tmp_path):
     repo = _repo(tmp_path)
     root = ["--root", str(repo)]
     main(_init_alpha(repo))
-    assert main(root + ["fit", "candidate-alpha", "--n-samples", "200"]) == 0
-    assert "mcmc_transit_fit.json" in capsys.readouterr().out
+    _write_candidate_sed_photometry(repo)
+    with pytest.raises(SystemExit) as exc_info:
+        main(root + ["fit", "candidate-alpha", "--n-samples", "200"])
+    assert exc_info.value.code == 2
+    assert not (repo / "candidate" / "candidate-alpha" / "outputs" / "mcmc_transit_fit.json").exists()
 
 
 def test_cli_fit_passes_dynesty_sampler(tmp_path, capsys, mocker):
@@ -304,69 +365,70 @@ def test_cli_fit_passes_dynesty_sampler(tmp_path, capsys, mocker):
     assert "mcmc_transit_fit.json" in capsys.readouterr().out
 
 
-def test_cli_fit_eccentric_command(tmp_path, capsys):
+def test_cli_eccentric_fit_requires_candidate_derived_inputs(tmp_path):
     repo = _repo(tmp_path)
     root = ["--root", str(repo)]
     main(_init_alpha(repo))
-    assert main(root + ["fit", "candidate-alpha", "--n-samples", "200", "--eccentric"]) == 0
-    assert "mcmc_transit_fit.json" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as exc_info:
+        main(root + ["fit", "candidate-alpha", "--n-samples", "200", "--eccentric"])
+    assert exc_info.value.code == 2
+    assert not (repo / "candidate" / "candidate-alpha" / "outputs" / "mcmc_transit_fit.json").exists()
 
 
 def test_cli_phasecurve_command(tmp_path, capsys):
     repo = _repo(tmp_path)
     root = ["--root", str(repo)]
     main(_init_alpha(repo))
-    assert main(root + ["phasecurve", "candidate-alpha"]) == 0
-    assert "phase_curve_results.json" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as exc_info:
+        main(root + ["phasecurve", "candidate-alpha"])
+    assert exc_info.value.code == 2
+    assert not (repo / "candidate" / "candidate-alpha" / "outputs" / "phase_curve_results.json").exists()
 
 
-def test_cli_ttv_command(tmp_path, capsys):
+def test_cli_ttv_requires_observed_candidate_photometry(tmp_path):
     repo = _repo(tmp_path)
     root = ["--root", str(repo)]
     main(_init_alpha(repo))
-    assert main(root + ["ttv", "candidate-alpha"]) == 0
-    assert "ttv_analysis_results.json" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as exc_info:
+        main(root + ["ttv", "candidate-alpha"])
+    assert exc_info.value.code == 2
+    assert not (repo / "candidate" / "candidate-alpha" / "outputs" / "ttv_analysis_results.json").exists()
 
 
 def test_cli_activity_command(tmp_path, capsys):
     repo = _repo(tmp_path)
     root = ["--root", str(repo)]
     main(_init_alpha(repo))
-    assert main(root + ["activity", "candidate-alpha"]) == 0
-    assert "stellar_activity_results.json" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as exc_info:
+        main(root + ["activity", "candidate-alpha"])
+    assert exc_info.value.code == 2
+    assert not (repo / "candidate" / "candidate-alpha" / "outputs" / "stellar_activity_results.json").exists()
 
 
 def test_cli_dilution_command(tmp_path, capsys):
     repo = _repo(tmp_path)
     root = ["--root", str(repo)]
     main(_init_alpha(repo))
-    assert main(root + ["dilution", "candidate-alpha"]) == 0
-    assert "dilution_sensitivity_results.json" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as exc_info:
+        main(root + ["dilution", "candidate-alpha"])
+    assert exc_info.value.code == 2
+    assert not (repo / "candidate" / "candidate-alpha" / "outputs" / "dilution_sensitivity_results.json").exists()
 
 
 def test_cli_science_outputs_exist_on_disk(tmp_path):
     repo = _repo(tmp_path)
     root = ["--root", str(repo)]
     main(_init_alpha(repo))
+    _write_candidate_sed_photometry(repo)
     commands = [
-        ["asteroseismology", "candidate-alpha"],
         ["localization", "candidate-alpha"],
         ["sed", "candidate-alpha"],
-        ["phasecurve", "candidate-alpha"],
-        ["ttv", "candidate-alpha"],
-        ["activity", "candidate-alpha"],
-        ["dilution", "candidate-alpha"],
     ]
     for command in commands:
         assert main(root + command) == 0
     outputs_dir = repo / "candidate" / "candidate-alpha" / "outputs"
     for filename in (
-        "asteroseismic_results.json",
         "prf_localization_results.json",
         "sed_fit_results.json",
-        "phase_curve_results.json",
-        "ttv_analysis_results.json",
-        "stellar_activity_results.json",
-        "dilution_sensitivity_results.json",
     ):
         assert (outputs_dir / filename).is_file()

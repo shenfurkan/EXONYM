@@ -135,6 +135,111 @@ def _vet_workspace_stub(tmp_path, candidate_id="vet-stub", tic=None):
     return stub, outputs
 
 
+def _observed_input_stub(tmp_path):
+    input_path = tmp_path / "data" / "raw" / "s0001_lc.fits"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_bytes(b"observed-photometry")
+    return {
+        "time_days": np.array([-0.10, -0.02, 0.0, 0.02, 0.10]),
+        "flux": np.array([1.0, 0.999, 0.998, 0.999, 1.0]),
+        "flux_err": 0.0002,
+        "period_days": 2.0,
+        "duration_hours": 2.4,
+        "depth_ppm": 2000.0,
+        "exposure_days": 120.0 / 86400.0,
+        "sectors": [1],
+        "provenance": {
+            "representation": "phase-folded observed candidate photometry",
+            "input_files": [
+                {
+                    "path": "data/raw/s0001_lc.fits",
+                    "sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+                }
+            ],
+            "ephemeris_source": "candidate-config",
+        },
+    }
+
+
+def test_prepare_observed_transit_input_uses_measured_candidate_photometry(tmp_path, monkeypatch):
+    from exonym.vetting.tricera_parse import _prepare_observed_transit_input
+
+    workspace, _ = _vet_workspace_stub(tmp_path, tic="123456789")
+    input_path = tmp_path / "data" / "raw" / "s0001_lc.fits"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_bytes(b"observed-photometry")
+    time = np.arange(995.0, 1005.0, 0.01)
+    phase = np.remainder(time - 1000.0 + 1.0, 2.0) - 1.0
+    flux = np.ones_like(time)
+    flux[np.abs(phase) <= 0.0625] -= 0.002
+    table = {
+        "time": time,
+        "flux": flux,
+        "flux_err": np.full_like(time, 0.0002),
+        "flux_err_sources": ["reported"],
+        "sector": np.ones(time.size, dtype=int),
+        "input_files": [input_path],
+    }
+    ephemeris = {
+        "period_days": 2.0,
+        "epoch_btjd": 1000.0,
+        "duration_days": 0.125,
+        "source": "candidate-config",
+        "field_sources": {
+            "period_days": "candidate-config",
+            "epoch_btjd": "candidate-config",
+            "duration_days": "candidate-config",
+        },
+    }
+    monkeypatch.setattr("exonym.inputs.load_light_curve_table", lambda *_args, **_kwargs: table)
+    monkeypatch.setattr("exonym.inputs.load_transit_ephemeris", lambda *_args, **_kwargs: ephemeris)
+
+    prepared = _prepare_observed_transit_input(workspace, signal=None)
+
+    assert 10 <= prepared["time_days"].size <= 100
+    assert np.max(np.abs(prepared["time_days"])) <= 1.0
+    assert prepared["depth_ppm"] == pytest.approx(2000.0, rel=0.05)
+    assert prepared["exposure_days"] == pytest.approx(0.01)
+    assert prepared["flux_err"] > 0.0
+    provenance = prepared["provenance"]
+    assert provenance["raw_cadence_count"] == time.size
+    assert provenance["input_files"] == [
+        {
+            "path": "data/raw/s0001_lc.fits",
+            "sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+        }
+    ]
+    assert provenance["ephemeris_field_sources"] == {
+        "period_days": "candidate-config",
+        "epoch_btjd": "candidate-config",
+        "duration_days": "candidate-config",
+    }
+
+
+def test_prepare_observed_transit_input_rejects_estimated_errors(tmp_path, monkeypatch):
+    from exonym.vetting.tricera_parse import _prepare_observed_transit_input
+
+    workspace, _ = _vet_workspace_stub(tmp_path, tic="123456789")
+    table = {
+        "flux_err_sources": ["mad-estimate"],
+    }
+    ephemeris = {
+        "period_days": 2.0,
+        "epoch_btjd": 1000.0,
+        "duration_days": 0.125,
+        "field_sources": {
+            "period_days": "candidate-config",
+            "epoch_btjd": "candidate-config",
+            "duration_days": "candidate-config",
+        },
+    }
+    monkeypatch.setattr("exonym.inputs.load_light_curve_table", lambda *_args, **_kwargs: table)
+    monkeypatch.setattr("exonym.inputs.load_transit_ephemeris", lambda *_args, **_kwargs: ephemeris)
+
+    with pytest.raises(ValueError, match="reported per-cadence flux uncertainties"):
+        _prepare_observed_transit_input(workspace, signal=None)
+
+
 @pytest.mark.parametrize("period_key", ("period_days", "period", "p"))
 def test_run_triceratops_prefers_signal_config_over_bls(tmp_path, period_key):
     from exonym.vetting.tricera_parse import run_triceratops_simulation
@@ -225,9 +330,19 @@ def test_run_triceratops_does_not_monkeypatch_tls_client(tmp_path, monkeypatch):
     from exonym.vetting.tricera_parse import run_triceratops_simulation
 
     stub, _ = _vet_workspace_stub(tmp_path, tic="123456789")
+    monkeypatch.setattr(
+        "exonym.statistical_vetting.require_vetting_readiness",
+        lambda *_args, **_kwargs: tmp_path / "outputs" / "statistical_vetting_evidence.json",
+    )
+    observed_input = _observed_input_stub(tmp_path)
+    monkeypatch.setattr(
+        "exonym.vetting.tricera_parse._prepare_observed_transit_input",
+        lambda *_args, **_kwargs: observed_input,
+    )
     package = types.ModuleType("triceratops")
     package.__path__ = []
     module = types.ModuleType("triceratops.triceratops")
+    captured = {}
 
     def query_trilegal(*args, **kwargs):
         return None
@@ -241,12 +356,18 @@ def test_run_triceratops_does_not_monkeypatch_tls_client(tmp_path, monkeypatch):
             return None
 
         def calc_probs(self, **kwargs):
+            captured.update(kwargs)
             return None
 
     module.query_TRILEGAL = query_trilegal
     module.target = FakeTarget
     monkeypatch.setitem(sys.modules, "triceratops", package)
     monkeypatch.setitem(sys.modules, "triceratops.triceratops", module)
+
+    import requests
+
+    original_request = requests.Session.request
+    rng_state_before = np.random.get_state()
 
     # Act
     report_path = run_triceratops_simulation(stub, allow_fallback=False)
@@ -255,12 +376,38 @@ def test_run_triceratops_does_not_monkeypatch_tls_client(tmp_path, monkeypatch):
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["source"] == "triceratops-monte-carlo"
     assert module.query_TRILEGAL is query_trilegal
+    assert requests.Session.request is original_request
+    assert report["random_seed"] == 1729
+    assert report["backend"]["package"] == "triceratops"
+    rng_state_after = np.random.get_state()
+    assert rng_state_after[0] == rng_state_before[0]
+    assert np.array_equal(rng_state_after[1], rng_state_before[1])
+    assert rng_state_after[2:] == rng_state_before[2:]
+    assert np.array_equal(captured["time"], observed_input["time_days"])
+    assert np.array_equal(captured["flux_0"], observed_input["flux"])
+    assert captured["flux_err_0"] == observed_input["flux_err"]
+    assert captured["exptime"] == observed_input["exposure_days"]
+    assert report["input_provenance"] == observed_input["provenance"]
+    assert report["claim_eligible"] is False
+    assert "provenance-bound observed photometry" in report["claim_block_reason"]
     claim_path = tmp_path / "claims" / "fpp_claim.json"
-    claim = json.loads(claim_path.read_text(encoding="utf-8"))
-    assert claim["candidate_id"] == "vet-stub"
-    assert claim["report_path"] == "outputs/triceratops_report.json"
-    assert claim["report_sha256"] == hashlib.sha256(report_path.read_bytes()).hexdigest()
-    assert claim["value"] == report["FPP"]
+    assert not claim_path.exists()
+
+
+def test_run_triceratops_requires_readiness_inside_public_function(tmp_path, monkeypatch):
+    from exonym.vetting.tricera_parse import run_triceratops_simulation
+
+    stub, _ = _vet_workspace_stub(tmp_path, tic="123456789")
+
+    def reject_readiness(*_args, **_kwargs):
+        raise RuntimeError("pre-vetting evidence is incomplete")
+
+    monkeypatch.setattr("exonym.statistical_vetting.require_vetting_readiness", reject_readiness)
+
+    with pytest.raises(RuntimeError, match="pre-vetting evidence is incomplete"):
+        run_triceratops_simulation(stub, allow_fallback=True)
+
+    assert not (tmp_path / "outputs" / "triceratops_report.json").exists()
 
 
 def test_run_triceratops_does_not_claim_nonfinite_monte_carlo_fpp(tmp_path, monkeypatch):
@@ -269,6 +416,14 @@ def test_run_triceratops_does_not_claim_nonfinite_monte_carlo_fpp(tmp_path, monk
     from exonym.vetting.tricera_parse import run_triceratops_simulation
 
     stub, _ = _vet_workspace_stub(tmp_path, tic="123456789")
+    monkeypatch.setattr(
+        "exonym.statistical_vetting.require_vetting_readiness",
+        lambda *_args, **_kwargs: tmp_path / "outputs" / "statistical_vetting_evidence.json",
+    )
+    monkeypatch.setattr(
+        "exonym.vetting.tricera_parse._prepare_observed_transit_input",
+        lambda *_args, **_kwargs: _observed_input_stub(tmp_path),
+    )
     package = types.ModuleType("triceratops")
     package.__path__ = []
     module = types.ModuleType("triceratops.triceratops")
@@ -309,6 +464,16 @@ def test_run_triceratops_allow_fallback_writes_null_fpp_without_claim(tmp_path):
 
     claim_path = tmp_path / "claims" / "fpp_claim.json"
     assert not claim_path.exists()
+
+
+@pytest.mark.parametrize("random_seed", (True, -1, 2**32))
+def test_run_triceratops_rejects_invalid_random_seed(tmp_path, random_seed):
+    from exonym.vetting.tricera_parse import run_triceratops_simulation
+
+    stub, _ = _vet_workspace_stub(tmp_path)
+
+    with pytest.raises(ValueError, match="random_seed"):
+        run_triceratops_simulation(stub, allow_fallback=True, random_seed=random_seed)
 
 
 def test_run_triceratops_config_parse_error_emits_warning(tmp_path):
@@ -357,12 +522,80 @@ def test_load_transit_ephemeris_signal_takes_precedence(tmp_path):
     assert per_signal["period_days"] == pytest.approx(14.7157672)
     assert per_signal["depth_ppm"] == pytest.approx(560.7)
     assert per_signal["source"] == "candidate-config-signal"
+    assert per_signal["field_sources"] == {
+        "period_days": "candidate-config-signal",
+        "epoch_btjd": "candidate-config-signal",
+        "duration_days": "candidate-config-signal",
+        "depth_ppm": "candidate-config-signal",
+    }
 
     fallback = load_transit_ephemeris(workspace, signal=".99")
     assert fallback["source"] == "synthetic-demo"
+    assert fallback["field_sources"]["epoch_btjd"] == "synthetic-demo"
 
     default = load_transit_ephemeris(workspace)
     assert default["source"] == "synthetic-demo"
+
+
+@pytest.mark.parametrize("signal", [".1", ".001", "01", "../escape", ".0/"])
+def test_signal_suffix_requires_exactly_two_digits(tmp_path, signal):
+    from exonym.inputs import load_transit_ephemeris
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "signal-validation")
+
+    with pytest.raises(ValueError, match="\\.NN"):
+        load_transit_ephemeris(workspace, signal=signal)
+
+
+def test_load_transit_ephemeris_keeps_partial_config_provenance_explicit(tmp_path):
+    from exonym.inputs import load_transit_ephemeris
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "partial-ephemeris-test")
+    (workspace.path / "config" / "transit_config.json").write_text(
+        json.dumps({"transit": {"period_days": 6.5}}), encoding="utf-8"
+    )
+
+    ephemeris = load_transit_ephemeris(workspace)
+
+    assert ephemeris["source"] == "candidate-config"
+    assert ephemeris["field_sources"] == {
+        "period_days": "candidate-config",
+        "epoch_btjd": "synthetic-demo",
+        "duration_days": "synthetic-demo",
+        "depth_ppm": "synthetic-demo",
+    }
+
+
+def test_load_transit_ephemeris_uses_matching_signal_bls_result(tmp_path):
+    from exonym.inputs import load_transit_ephemeris
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "signal-bls-ephemeris-test")
+    (workspace.path / "outputs" / "bls_search_results.02.json").write_text(
+        json.dumps(
+            {
+                "best_period": 4.25,
+                "best_epoch": 1742.5,
+                "best_duration_hours": 3.0,
+                "best_depth_ppm": 700.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ephemeris = load_transit_ephemeris(workspace, signal=".02")
+
+    assert ephemeris["period_days"] == pytest.approx(4.25)
+    assert ephemeris["epoch_btjd"] == pytest.approx(1742.5)
+    assert ephemeris["duration_days"] == pytest.approx(0.125)
+    assert ephemeris["field_sources"] == {
+        "period_days": "bls-search",
+        "epoch_btjd": "bls-search",
+        "duration_days": "bls-search",
+        "depth_ppm": "bls-search",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -504,7 +737,7 @@ def test_asteroseismic_optional_adapters_write_hashed_candidate_local_manifests(
 
 
 def test_prf_localization_recovers_deficit_offset():
-    from exonym.localization import build_depth_map, localize_depth_deficit
+    from exonym.localization import build_difference_image, localize_difference_image
 
     shape = (11, 11)
     target_x, target_y = 5.0, 5.0
@@ -517,28 +750,29 @@ def test_prf_localization_recovers_deficit_offset():
     deficit = 14.0 * np.exp(
         -((xx - deficit_x) ** 2 + (yy - deficit_y) ** 2) / (2.0 * sigma**2)
     )
-    depth_map, valid = build_depth_map(out_image - deficit, out_image)
+    difference_image, valid = build_difference_image(out_image - deficit, out_image)
+    assert np.allclose(difference_image[valid], deficit[valid])
     aperture = np.zeros(shape, dtype=bool)
     aperture[2:-2, 2:-2] = True
-    offset = localize_depth_deficit(depth_map, aperture, target_x, target_y)
+    offset = localize_difference_image(difference_image, aperture, target_x, target_y)
     assert offset["ra_offset_arcsec"] == pytest.approx(6.3, abs=2.5)
     assert offset["dec_offset_arcsec"] == pytest.approx(-4.2, abs=2.5)
     assert offset["offset_arcsec"] > 2.0
-    assert offset["n_depth_pixels"] >= 3
+    assert offset["n_difference_pixels"] >= 3
 
 
 def test_prf_localization_marks_a_two_pixel_depth_core_unresolved():
-    from exonym.localization import localize_depth_deficit
+    from exonym.localization import localize_difference_image
 
     depth_map = np.full((3, 3), 0.001, dtype=float)
     depth_map[1, 1] = 0.010
     depth_map[1, 2] = 0.009
 
-    result = localize_depth_deficit(
+    result = localize_difference_image(
         depth_map, np.ones_like(depth_map, dtype=bool), target_x=1.0, target_y=1.0
     )
 
-    assert result["n_depth_pixels"] == 2
+    assert result["n_difference_pixels"] == 2
     assert np.isnan(result["offset_arcsec"])
 
 
@@ -552,7 +786,7 @@ def test_prf_localization_requires_a_competing_source_for_target_dominance(tmp_p
     from exonym.localization import run_prf_localization
 
     # Arrange
-    workspace = type("Workspace", (), {"path": tmp_path})()
+    workspace = type("Workspace", (), {"path": tmp_path, "candidate_id": "test-target"})()
 
     # Act
     with patch("exonym.localization.load_transit_ephemeris", return_value={}), patch(
@@ -562,21 +796,22 @@ def test_prf_localization_requires_a_competing_source_for_target_dominance(tmp_p
     report = json.loads(output.read_text(encoding="utf-8"))
 
     # Assert
-    assert report["summary"]["conclusion"] == "inconclusive_no_competing_sources_modeled"
+    assert report["source"] == "not-run-no-candidate-tpf"
+    assert report["summary"]["conclusion"] == "not-run-no-candidate-tpf"
     assert report["summary"]["sectors_with_competing_sources_modeled"] == 0
-    assert report["sector_results"][0]["target_to_max_other_ratio"] is None
+    assert report["sector_results"] == []
 
 
-def test_prf_nnls_assigns_depth_to_target():
-    from exonym.localization import fit_depth_map_prf, gaussian_prf_kernel
+def test_prf_nnls_assigns_difference_flux_to_target():
+    from exonym.localization import fit_difference_image_prf, gaussian_prf_kernel
 
     shape = (11, 11)
     yy, xx = np.indices(shape, dtype=float)
     kernel = gaussian_prf_kernel(xx, yy, 5.0, 5.0)
-    depth_map = 0.01 * kernel
+    difference_image = 14.0 * kernel
     pixel_mask = np.ones(shape, dtype=bool)
-    amplitudes, residual, n_pixels = fit_depth_map_prf(
-        depth_map, pixel_mask, [5.0, 8.0], [5.0, 5.0]
+    amplitudes, residual, n_pixels = fit_difference_image_prf(
+        difference_image, pixel_mask, [5.0, 8.0], [5.0, 5.0]
     )
     assert n_pixels > 5
     assert amplitudes[0] > 10.0 * amplitudes[1]
@@ -598,6 +833,7 @@ def test_sed_recovers_synthetic_photometry():
         "mass_solar": 1.0,
         "radius_solar": 1.0,
         "parallax_mas": 10.0,
+        "parallax_mas_err": 0.05,
     }
     observations = _synthetic_photometry(stellar)
     result = _fit_blackbody(observations, stellar, n_walkers=24, burn_in=150, production=250)
@@ -617,16 +853,61 @@ def test_sed_percentile_summary():
     assert summary["plus"] == pytest.approx(summary["p84"] - summary["median"])
 
 
+def test_sed_fit_requires_candidate_owned_photometry(tmp_path, monkeypatch):
+    from exonym.sed import run_sed_fit
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "sed-no-photometry")
+    monkeypatch.setattr("exonym.sed.load_stellar_parameters", lambda _: {"teff_k": 5700.0})
+    monkeypatch.setattr("exonym.sed.load_photometry", lambda _: None)
+
+    with pytest.raises(RuntimeError, match="candidate-owned broadband photometry"):
+        run_sed_fit(workspace)
+    assert not (workspace.path / "outputs" / "sed_fit_results.json").exists()
+
+
 # ---------------------------------------------------------------------------
 # Scientific analysis modules: transit fit
 # ---------------------------------------------------------------------------
 
 
-def test_transit_fit_recovers_synthetic_parameters(tmp_path):
+def _mock_candidate_fit_inputs(monkeypatch):
+    from exonym.transit_fit import _synthetic_transit_table
+
+    ephemeris = {
+        "period_days": 3.2,
+        "epoch_btjd": 1.0,
+        "duration_days": 0.12,
+        "depth_ppm": 1200.0,
+        "source": "candidate-config",
+        "field_sources": {
+            "period_days": "candidate-config",
+            "epoch_btjd": "candidate-config",
+            "duration_days": "candidate-config",
+            "depth_ppm": "candidate-config",
+        },
+    }
+    stellar = {
+        "mass_solar": 1.0,
+        "mass_solar_err": 0.1,
+        "radius_solar": 1.0,
+        "radius_solar_err": 0.05,
+        "source": "candidate-data",
+    }
+    monkeypatch.setattr("exonym.transit_fit.load_transit_ephemeris", lambda *args, **kwargs: ephemeris)
+    monkeypatch.setattr("exonym.transit_fit.load_stellar_parameters", lambda *args, **kwargs: stellar)
+    monkeypatch.setattr(
+        "exonym.transit_fit.load_light_curve_table",
+        lambda *args, **kwargs: _synthetic_transit_table(ephemeris),
+    )
+
+
+def test_transit_fit_recovers_synthetic_parameters(tmp_path, monkeypatch):
     from exonym.transit_fit import run_mcmc_transit_fit
     from exonym.workspace import create_candidate
 
     workspace = create_candidate(tmp_path, "fit-test")
+    _mock_candidate_fit_inputs(monkeypatch)
     output = run_mcmc_transit_fit(
         workspace, n_samples=160, n_walkers=16, burn_in=40
     )
@@ -638,14 +919,57 @@ def test_transit_fit_recovers_synthetic_parameters(tmp_path):
     assert posterior["rho_star_solar"]["median"] == pytest.approx(1.0, rel=0.3)
     assert posterior["q1"]["median"] == pytest.approx(0.35, abs=0.05)
     assert posterior["q2"]["median"] == pytest.approx(0.3, abs=0.05)
-    assert payload["source"] == "synthetic-demo"
+    assert payload["source"] == "candidate-data"
+    assert payload["likelihood"]["cadence"] == "native"
+    assert payload["likelihood"]["exposure_seconds_by_sector"] == {"1": pytest.approx(120.0)}
+    assert payload["density_prior"]["log10_sigma"] == pytest.approx(
+        np.sqrt(0.1**2 + 0.15**2) / np.log(10.0)
+    )
 
 
-def test_transit_fit_eccentric_mode_runs(tmp_path):
+def test_native_transit_window_preserves_sector_cadence_and_baselines():
+    from exonym.transit_fit import (
+        _initial_fit_parameters,
+        _log_prior,
+        _native_transit_window_data,
+        _parameter_names,
+    )
+
+    cadence_days = 120.0 / 86400.0
+    first_sector_time = np.arange(0.0, 0.4, cadence_days)
+    second_sector_time = np.arange(9.0, 9.4, cadence_days)
+    time = np.concatenate((first_sector_time, second_sector_time))
+    table = {
+        "time": time,
+        "flux": np.ones_like(time),
+        "flux_err": np.full_like(time, 100e-6),
+        "sector": np.concatenate((
+            np.full(first_sector_time.size, 701),
+            np.full(second_sector_time.size, 703),
+        )),
+    }
+    ephemeris = {"period_days": 3.0, "epoch_btjd": 0.0}
+
+    phase, flux, flux_err, sector_index, labels, exposures = _native_transit_window_data(
+        table, ephemeris
+    )
+
+    assert phase.size == flux.size == flux_err.size == sector_index.size
+    assert labels == [701, 703]
+    assert np.allclose(exposures, 120.0)
+    assert set(sector_index) == {0, 1}
+    names = _parameter_names(False, n_sectors=2, sector_labels=labels)
+    assert names[3:5] == ["baseline_sector_701", "baseline_sector_703"]
+    theta = _initial_fit_parameters(1000.0, 1.0, 100e-6, eccentric=False, n_sectors=2)
+    assert np.isfinite(_log_prior(theta, 1.0, 0.1, eccentric=False, n_sectors=2))
+
+
+def test_transit_fit_eccentric_mode_runs(tmp_path, monkeypatch):
     from exonym.transit_fit import run_mcmc_transit_fit
     from exonym.workspace import create_candidate
 
     workspace = create_candidate(tmp_path, "fit-ecc-test")
+    _mock_candidate_fit_inputs(monkeypatch)
     output = run_mcmc_transit_fit(
         workspace, n_samples=120, eccentric=True, n_walkers=20, burn_in=30
     )
@@ -655,7 +979,24 @@ def test_transit_fit_eccentric_mode_runs(tmp_path):
     assert payload["posterior"]["eccentricity"]["median"] < 0.3
 
 
-def test_dynesty_fit_writes_evidence_and_reproducible_compatibility_chain(tmp_path):
+def test_transit_fit_emcee_chain_is_reproducible_for_a_fixed_seed(tmp_path, monkeypatch):
+    from exonym.transit_fit import run_mcmc_transit_fit
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "fit-emcee-reproducible")
+    _mock_candidate_fit_inputs(monkeypatch)
+    output = run_mcmc_transit_fit(workspace, n_samples=60, n_walkers=16, burn_in=20, seed=19)
+    first_chain = np.load(workspace.path / "outputs" / "mcmc_transit_fit_chain.npy")
+    run_mcmc_transit_fit(workspace, n_samples=60, n_walkers=16, burn_in=20, seed=19)
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    second_chain = np.load(workspace.path / "outputs" / "mcmc_transit_fit_chain.npy")
+    assert payload["mcmc"]["random_seed"] == 19
+    assert payload["mcmc"]["random_generator"] == "numpy.random.RandomState (MT19937)"
+    assert np.array_equal(second_chain, first_chain)
+
+
+def test_dynesty_fit_writes_evidence_and_reproducible_compatibility_chain(tmp_path, monkeypatch):
     from exonym.transit_fit import run_mcmc_transit_fit
     from exonym.workspace import create_candidate
 
@@ -680,6 +1021,7 @@ def test_dynesty_fit_writes_evidence_and_reproducible_compatibility_chain(tmp_pa
             assert kwargs["nlive_init"] > 0
 
     workspace = create_candidate(tmp_path, "fit-dynesty-test")
+    _mock_candidate_fit_inputs(monkeypatch)
     fake_dynesty = SimpleNamespace(DynamicNestedSampler=FakeDynamicNestedSampler, __version__="test")
 
     with patch.dict(sys.modules, {"dynesty": fake_dynesty}):
@@ -720,6 +1062,76 @@ def test_stellar_density_a_rs_monotonic():
         stellar_density_a_rs(0.0, 3.5)
 
 
+def test_transit_fit_initial_jitter_uses_natural_log_likelihood_units():
+    from exonym.transit_fit import _initial_fit_parameters
+
+    start = _initial_fit_parameters(1200.0, 1.0, 1e-4, eccentric=False)
+
+    assert start[1] == pytest.approx(0.0)
+    assert start[4] == pytest.approx(np.log(1e-4))
+    assert np.exp(start[4]) == pytest.approx(1e-4)
+
+
+def test_transit_fit_propagates_candidate_stellar_density_uncertainty():
+    from exonym.transit_fit import _stellar_density_prior
+
+    density_prior = _stellar_density_prior(
+        {"mass_solar": 1.0, "mass_solar_err": 0.1, "radius_solar": 1.0, "radius_solar_err": 0.05}
+    )
+
+    assert density_prior["rho_solar"] == pytest.approx(1.0)
+    assert density_prior["log10_sigma"] == pytest.approx(np.sqrt(0.1**2 + 0.15**2) / np.log(10.0))
+
+
+def test_stellar_parameter_loader_retains_density_prior_uncertainties(tmp_path):
+    from exonym.inputs import load_stellar_parameters
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "fit-stellar-uncertainties")
+    parameter_path = workspace.path / "data" / "external" / "stellar_params.json"
+    parameter_path.parent.mkdir(parents=True, exist_ok=True)
+    parameter_path.write_text(
+        json.dumps(
+            {
+                "teff_k": 5700.0,
+                "logg_cgs": 4.4,
+                "feh": 0.0,
+                "mass_solar": 1.0,
+                "mass_solar_err": 0.1,
+                "radius_solar": 1.0,
+                "radius_solar_err": 0.05,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    stellar = load_stellar_parameters(workspace)
+
+    assert stellar["source"] == "candidate-data"
+    assert stellar["mass_solar_err"] == pytest.approx(0.1)
+    assert stellar["radius_solar_err"] == pytest.approx(0.05)
+
+
+def test_transit_fit_rejects_stellar_density_without_candidate_uncertainties():
+    from exonym.transit_fit import _stellar_density_prior
+
+    with pytest.raises(RuntimeError, match="mass_solar_err and radius_solar_err"):
+        _stellar_density_prior({"mass_solar": 1.0, "radius_solar": 1.0})
+
+
+def test_eccentric_transit_geometry_preserves_semimajor_axis_and_adjusts_inclination():
+    from exonym.transit_fit import (
+        conjunction_distance_a_rs,
+        inclination_deg_from_impact_parameter,
+    )
+
+    conjunction_distance = conjunction_distance_a_rs(10.0, 0.5, 90.0)
+    inclination = inclination_deg_from_impact_parameter(10.0, 1.0, 0.5, 90.0)
+
+    assert conjunction_distance == pytest.approx(5.0)
+    assert inclination == pytest.approx(np.degrees(np.arccos(1.0 / 5.0)))
+
+
 # ---------------------------------------------------------------------------
 # Scientific analysis modules: phase curve
 # ---------------------------------------------------------------------------
@@ -740,6 +1152,96 @@ def test_phase_curve_recovers_injected_reflection():
     reflection = result["components"]["reflection_semiamplitude"]
     assert reflection["value_ppm"] == pytest.approx(150.0, abs=50.0)
     assert result["maximum_absolute_significance_sigma"] >= 2.0
+
+
+def test_phase_curve_eccentric_secondary_control_uses_candidate_posterior(tmp_path):
+    from exonym.phasecurve import (
+        _secondary_eclipse_geometry_samples,
+        resolve_secondary_eclipse_control,
+    )
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "phase-ecc-test")
+    outputs = workspace.path / "outputs"
+    ephemeris = {"period_days": 3.0, "epoch_btjd": 100.0, "duration_days": 0.1}
+    (outputs / "mcmc_transit_fit.json").write_text(
+        json.dumps(
+            {
+                "source": "candidate-data",
+                "model": "batman quadratic limb darkening, stellar-density locked, eccentric orbit",
+                "ephemeris": {"period_days": 3.0, "epoch_btjd": 100.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    eccentricity = 0.2
+    chain = np.tile(
+        np.array([0.1, 0.0, 0.2, 1.0, -8.0, 0.3, 0.3, eccentricity**0.5, 0.0]),
+        (16, 1),
+    )
+    np.save(str(outputs / "mcmc_transit_fit_chain.npy"), chain)
+
+    arguments, report = resolve_secondary_eclipse_control(workspace, ephemeris)
+
+    phases, duration_ratios, occulting = _secondary_eclipse_geometry_samples(
+        np.array([0.0, eccentricity]),
+        np.array([0.0, 0.0]),
+        np.array([0.1, 0.1]),
+        np.array([0.2, 0.2]),
+    )
+    assert occulting.tolist() == [True, True]
+    assert phases[0] == pytest.approx(0.5)
+    assert phases[1] == pytest.approx(0.5 + 2.0 * eccentricity / np.pi, abs=0.003)
+    assert duration_ratios.tolist() == pytest.approx([1.0, 1.0])
+    assert report["mode"] == "eccentric-posterior-marginalized-box-control"
+    assert report["phase"]["median"] == pytest.approx(phases[1])
+    assert report["duration_hours"]["median"] == pytest.approx(2.4)
+    assert arguments["secondary_eclipse_template_total_samples"] == 16
+    assert arguments["secondary_eclipse_phase_samples"].size == 16
+
+
+def test_phase_curve_run_records_eccentric_secondary_control(tmp_path, monkeypatch):
+    from exonym import phasecurve
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "phase-ecc-output-test")
+    outputs = workspace.path / "outputs"
+    ephemeris = {
+        "period_days": 3.0,
+        "epoch_btjd": 100.0,
+        "duration_days": 0.1,
+        "source": "candidate-data",
+        "field_sources": {},
+    }
+    (outputs / "mcmc_transit_fit.json").write_text(
+        json.dumps(
+            {
+                "source": "candidate-data",
+                "model": "batman quadratic limb darkening, stellar-density locked, eccentric orbit",
+                "ephemeris": {"period_days": 3.0, "epoch_btjd": 100.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    chain = np.tile(
+        np.array([0.1, 0.0, 0.2, 1.0, -8.0, 0.3, 0.3, 0.2**0.5, 0.0]),
+        (32, 1),
+    )
+    np.save(str(outputs / "mcmc_transit_fit_chain.npy"), chain)
+    table = phasecurve._synthetic_phase_curve_table()
+    table.pop("_duration_days")
+    table.pop("_epoch_btjd")
+    table.pop("_period_days")
+    monkeypatch.setattr(phasecurve, "load_light_curve_table", lambda _workspace: table)
+    monkeypatch.setattr(phasecurve, "load_transit_ephemeris", lambda _workspace: ephemeris)
+
+    output = phasecurve.run_phase_curve_search(workspace)
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["secondary_eclipse_control"]["mode"] == "eccentric-posterior-marginalized-box-control"
+    assert payload["secondary_box_template_method"] == "posterior-marginalized-eccentric-box"
+    assert payload["secondary_box_phase"] == pytest.approx(0.5 + 0.4 / np.pi, abs=0.003)
+    assert payload["secondary_eclipse_control"]["transit_fit"]["chain_path"] == "outputs/mcmc_transit_fit_chain.npy"
 
 
 def test_phase_curve_cluster_covariance_shapes():
@@ -821,7 +1323,8 @@ def _write_test_lightcurve(path, sector, n_points=400, seed=1):
     table["FLUX_ERR"] = np.full(n_points, 0.001)
     table["QUALITY"] = np.zeros(n_points, dtype=np.int32)
     extension = fitsio.BinTableHDU(table)
-    extension.header["SECTOR"] = sector
+    if sector is not None:
+        extension.header["SECTOR"] = sector
     extension.header["TIMEDEL"] = 120.0 / 86400.0
     extension.header["BJDREFI"] = 2457000
     extension.header["BJDREFF"] = 0.0
@@ -864,6 +1367,68 @@ def test_light_curve_table_dedupes_duplicate_sectors(tmp_path):
     assert table is not None
     assert set(np.unique(table["sector"])) == {30, 70}
     assert len(table["time"]) == 700
+
+
+def test_scoped_light_curve_requires_verified_or_canonical_sector(tmp_path):
+    from exonym.inputs import load_light_curve_table
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "scoped-sector-resolution-test")
+    raw = workspace.path / "data" / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
+    _write_test_lightcurve(raw / "s0701_lc.fits", sector=None, n_points=200, seed=1)
+    _write_test_lightcurve(raw / "unlabeled_lc.fits", sector=None, n_points=200, seed=2)
+
+    with pytest.warns(UserWarning, match="sector cannot be verified"):
+        table = load_light_curve_table(workspace, sectors=[701])
+
+    assert table is not None
+    assert set(np.unique(table["sector"])) == {701}
+    assert [path.name for path in table["input_files"]] == ["s0701_lc.fits"]
+
+
+def test_light_curve_table_skips_an_unusable_quality_column(tmp_path, monkeypatch):
+    import types
+
+    from exonym.inputs import load_light_curve_table
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "unusable-quality-test")
+    product = workspace.path / "data" / "raw" / "s0001_lc.fits"
+    product.parent.mkdir(parents=True, exist_ok=True)
+    product.write_bytes(b"placeholder")
+
+    fake_light_curve = types.SimpleNamespace(
+        quality=types.SimpleNamespace(value=np.zeros(99, dtype=int)),
+        time=types.SimpleNamespace(value=np.arange(100.0)),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "lightkurve",
+        types.SimpleNamespace(read=lambda _path: fake_light_curve),
+    )
+
+    with pytest.warns(UserWarning, match="unusable quality column"):
+        table = load_light_curve_table(workspace)
+
+    assert table is None
+
+
+def test_light_curve_table_keeps_the_per_sector_binning_budget(tmp_path):
+    from exonym.inputs import load_light_curve_table
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "per-sector-binning-test")
+    raw = workspace.path / "data" / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
+    _write_test_lightcurve(raw / "s0001_lc.fits", sector=1, n_points=4500, seed=1)
+    _write_test_lightcurve(raw / "s0002_lc.fits", sector=2, n_points=4500, seed=2)
+
+    table = load_light_curve_table(workspace, max_points=4000)
+
+    assert table is not None
+    assert len(table["time"]) == 8000
+    assert set(np.unique(table["sector"])) == {1, 2}
 
 
 def test_load_gaia_neighbors_parses_csv(tmp_path):
@@ -914,7 +1479,23 @@ def test_ttv_linear_ephemeris_has_small_residuals():
     assert calculate_ttv_super_period(3.5, 5.0, j_resonance=2) == pytest.approx(8.75, rel=0.01)
 
 
-def test_ttv_injected_signal_is_detected():
+def test_ttv_refits_a_weighted_linear_ephemeris():
+    from exonym.ttv import fit_weighted_linear_ephemeris
+
+    fit = fit_weighted_linear_ephemeris(
+        np.array([10, 11, 12, 13]),
+        np.array([100.0, 102.5, 105.0, 107.5]),
+        np.full(4, 0.001),
+    )
+
+    assert fit["status"] == "fit"
+    assert fit["reference_epoch"] == 12
+    assert fit["period_days"] == pytest.approx(2.5)
+    assert fit["period_uncertainty_days"] > 0
+    assert fit["chi_square"] == pytest.approx(0.0)
+
+
+def test_ttv_injected_signal_has_nonzero_refit_residuals():
     from exonym.transit_fit import stellar_density_a_rs
     from exonym.ttv import _synthetic_timing_table, transit_timing_analysis
 
@@ -941,6 +1522,8 @@ def test_activity_recovers_rotation_period():
     from exonym.activity import (
         _synthetic_rotation_table,
         gls_periodogram,
+        sampling_window_diagnostics,
+        segment_harmonic_persistence,
         sinusoid_amplitude_ppm,
         weighted_period_summary,
     )
@@ -956,6 +1539,65 @@ def test_activity_recovers_rotation_period():
 
     summary = weighted_period_summary([5.0, 5.1], [1.0, 1.0])
     assert summary["weighted_mean_period_days"] == pytest.approx(5.05)
+
+    sampling = sampling_window_diagnostics(
+        table["time"], 1.0 / periods, 1.0 / best_period
+    )
+    assert sampling["method"] == "normalized-spectral-window-v1"
+    assert sampling["frequency_resolution_days_inverse"] > 0.0
+    assert sampling["top_window_peaks"]
+    assert all(np.isfinite(peak["window_power"]) for peak in sampling["top_window_peaks"])
+
+    persistence = segment_harmonic_persistence(
+        [
+            {"sector": 1, "best_period_days": 5.0, "baseline_days": 25.0},
+            {"sector": 2, "best_period_days": 2.5, "baseline_days": 25.0},
+        ]
+    )
+    assert persistence["status"] == "descriptive-harmonic-consistency"
+    assert persistence["consistent_segment_count"] == 2
+    assert persistence["segments"][1]["nearest_harmonic_frequency_factor"] == 2.0
+
+
+def test_activity_does_not_mask_with_a_synthetic_ephemeris(tmp_path, monkeypatch):
+    import exonym.activity as activity
+    from exonym.workspace import create_candidate
+
+    # Arrange
+    workspace = create_candidate(tmp_path, "activity-mask-provenance-test")
+    time = np.linspace(0.0, 27.0, 800)
+    table = {
+        "time": time,
+        "flux": 1.0 + 300e-6 * np.sin(2.0 * np.pi * time / 5.0),
+        "flux_err": np.full(time.size, 100e-6),
+        "sector": np.full(time.size, 701),
+    }
+    synthetic_ephemeris = {
+        "period_days": 3.5,
+        "epoch_btjd": 2.0,
+        "duration_days": 0.12,
+        "source": "synthetic-demo",
+        "field_sources": {
+            "period_days": "synthetic-demo",
+            "epoch_btjd": "synthetic-demo",
+            "duration_days": "synthetic-demo",
+        },
+    }
+    monkeypatch.setattr(activity, "load_light_curve_table", lambda _workspace: table)
+    monkeypatch.setattr(activity, "load_transit_ephemeris", lambda _workspace: synthetic_ephemeris)
+
+    # Act
+    output = activity.run_stellar_activity(workspace)
+    payload = json.loads(output.read_text(encoding="utf-8"))
+
+    # Assert
+    assert payload["source"] == "candidate-data"
+    assert payload["transit_mask_status"] == "not-applied-no-candidate-ephemeris"
+    assert payload["validation_eligible"] is False
+    assert "best_analytic_white_noise_false_alarm_probability" in payload
+    assert "best_false_alarm_probability" not in payload
+    assert payload["segments"][0]["sampling_window"]["top_window_peaks"]
+    assert payload["harmonic_persistence"]["status"] == "unresolved-insufficient-segments"
 
 
 # ---------------------------------------------------------------------------

@@ -67,6 +67,7 @@ PUBLICATION_STATES = ("none", "draft", "submitted", "published")
 MISSIONS = ("tess", "kepler", "k2", "plato", "cheops")
 
 _CANDIDATE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+_SIGNAL_SUFFIX = re.compile(r"^\.\d{2}$")
 _RESERVED_WINDOWS_NAMES = {
     "CON", "PRN", "AUX", "NUL",
     *(f"COM{i}" for i in range(1, 10)),
@@ -96,21 +97,18 @@ def validate_candidate_id(candidate_id: str) -> str:
     return normalized
 
 
+def validate_signal_suffix(signal: Optional[str]) -> Optional[str]:
+    """Validate one fixed-width per-signal suffix before it is used in a path."""
+    if signal is None:
+        return None
+    if not isinstance(signal, str) or _SIGNAL_SUFFIX.fullmatch(signal) is None:
+        raise ValueError("signal must use the .NN format")
+    return signal
+
+
 def _candidate_path(repository_root: Path, candidate_id: str) -> Path:
-    root = repository_root.resolve() / CANDIDATE_DIRECTORY
-    normalized = validate_candidate_id(candidate_id)
-    direct = root / normalized
-    if direct.is_dir() and (direct / METADATA_FILENAME).is_file():
-        return direct
-    if root.is_dir():
-        for meta in root.rglob(METADATA_FILENAME):
-            parent = meta.parent
-            rel_parts = parent.relative_to(root).parts
-            if any(part.startswith("_") for part in rel_parts):
-                continue
-            if parent.name.lower() == normalized:
-                return parent
-    return direct
+    """Return the one permitted direct workspace path for a candidate ID."""
+    return repository_root.resolve() / CANDIDATE_DIRECTORY / validate_candidate_id(candidate_id)
 
 
 def _created_at() -> str:
@@ -322,24 +320,26 @@ def load_candidate(repository_root: Path, candidate_id: str) -> CandidateWorkspa
 
 
 def discover_candidates(repository_root: Path) -> List[CandidateWorkspace]:
-    """Return registered candidate workspaces ordered by identifier."""
+    """Return direct candidate workspaces ordered by identifier.
+
+    Candidate IDs are part of the ownership boundary, so only
+    ``candidate/<candidate-id>/candidate.json`` is a registered workspace.
+    Collection directories beginning with an underscore are reserved for
+    candidate-local cohorts and never represent individual candidates.
+    """
     candidate_root = repository_root.resolve() / CANDIDATE_DIRECTORY
     if not candidate_root.is_dir():
         return []
     candidates = []
-    seen = set()
-    for meta in sorted(candidate_root.rglob(METADATA_FILENAME), key=lambda item: item.parent.name):
-        path = meta.parent
-        rel_parts = path.relative_to(candidate_root).parts
-        if any(part.startswith("_") for part in rel_parts):
+    for path in sorted(candidate_root.iterdir(), key=lambda item: item.name):
+        if not path.is_dir() or path.name.startswith("_"):
             continue
         cid = path.name.lower()
-        if cid in seen:
+        if not (path / METADATA_FILENAME).is_file():
             continue
-        seen.add(cid)
         try:
             candidates.append(load_candidate(repository_root, cid))
-        except Exception:
+        except (FileNotFoundError, ValueError):
             continue
     return candidates
 

@@ -101,11 +101,11 @@ def read_schema_text(repository_root: Path, filename: str) -> str:
         path = schema_root / filename
         if not path.is_file():
             raise FileNotFoundError("schema file not found: {0}".format(path))
-        return path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8-sig")
 
     resource = _bundled_directory(SCHEMA_DIRECTORY).joinpath(filename)
     if not resource.is_file():
         raise ResourceUnavailableError(
             "installed package is missing bundled schema {0}".format(filename)
         )
-    return resource.read_text(encoding="utf-8")
+    return resource.read_text(encoding="utf-8-sig")

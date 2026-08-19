@@ -6,7 +6,7 @@ Target: {{TOI}} / {{TIC}} | Created: {{TIMESTAMP}} | Phase: vetting
 
 - [ ] [MANDATORY] Evaluate odd-even transit depth asymmetry
 - [ ] [MANDATORY] Evaluate difference-image centroid offset
-- [ ] [MANDATORY] Run ephemeris match filter against known eclipsing binaries
+- [ ] [MANDATORY] Record a candidate-local known-signal ephemeris comparison and separate eclipsing-binary, variable-star, ExoFOP, and literature searches
 - [ ] [MANDATORY] Complete secondary eclipse search
 - [ ] Evaluate transit duration asymmetry
 - [ ] Record all SPOC diagnostic flags and dispositions

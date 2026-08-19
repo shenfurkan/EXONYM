@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 import math
 import re
 from datetime import datetime, timezone
@@ -97,15 +99,24 @@ def write_provenance_sidecar(
     """
     product_path = Path(product_path)
     sidecar = product_path.with_name(product_path.stem + ".provenance.json")
-    sidecar.write_text(
-        json.dumps(
-            make_provenance(product_path, source_uri, fetched_by, download_timestamp_utc),
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix="." + sidecar.name + ".", suffix=".tmp", dir=str(sidecar.parent)
     )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    make_provenance(product_path, source_uri, fetched_by, download_timestamp_utc),
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+        temporary.replace(sidecar)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
     return sidecar
 
 

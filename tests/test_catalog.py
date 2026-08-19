@@ -87,6 +87,27 @@ def test_ingest_products_copies_and_sidecars(tmp_path):
         ingest_products(candidate, [(product, "https://archive.stsci.edu/example")])
 
 
+def test_ingest_products_rolls_back_when_sidecar_staging_fails(tmp_path, monkeypatch):
+    # Arrange
+    create_candidate(tmp_path, "candidate-alpha")
+    candidate = discover_candidates(tmp_path)[0]
+    product = tmp_path / "s0037_lc.fits"
+    product.write_bytes(b"fits")
+
+    def fail_sidecar(*args, **kwargs):
+        raise OSError("simulated sidecar failure")
+
+    monkeypatch.setattr("exonym.ingest.write_provenance_sidecar", fail_sidecar)
+
+    # Act / Assert
+    with pytest.raises(OSError, match="sidecar failure"):
+        ingest_products(candidate, [(product, "https://archive.stsci.edu/example")])
+    raw = candidate.path / "data" / "raw"
+    assert not (raw / product.name).exists()
+    assert not (raw / "s0037_lc.provenance.json").exists()
+    assert not list(raw.glob(".ingest-staging-*"))
+
+
 def test_ingest_products_requires_tic_for_network_fetch(tmp_path):
     create_candidate(tmp_path, "candidate-beta")
     candidate = [c for c in discover_candidates(tmp_path) if c.candidate_id == "candidate-beta"][0]

@@ -8,6 +8,7 @@ products into ``candidate/<id>/data/raw/`` and writes
 
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -55,15 +56,48 @@ def ingest_products(
     """
     raw = workspace.path / "data" / "raw"
     raw.mkdir(parents=True, exist_ok=True)
-    written: List[Path] = []
+    planned = []
+    seen_destinations = set()
     for product, source_uri in products:
         destination = raw / Path(product).name
-        if destination.exists():
-            raise FileExistsError("raw product already exists: {0}".format(destination))
-        shutil.copy2(product, destination)
-        write_provenance_sidecar(destination, source_uri, fetched_by=fetched_by)
-        written.append(destination)
-    return written
+        sidecar = destination.with_name(destination.stem + ".provenance.json")
+        if destination.exists() or sidecar.exists():
+            raise FileExistsError("raw product or provenance sidecar already exists: {0}".format(destination))
+        if destination.name in seen_destinations or sidecar.name in seen_destinations:
+            raise ValueError("ingest batch contains colliding product or sidecar names")
+        seen_destinations.update((destination.name, sidecar.name))
+        planned.append((Path(product), str(source_uri), destination, sidecar))
+    if not planned:
+        return []
+
+    staging = Path(tempfile.mkdtemp(prefix=".ingest-staging-", dir=str(raw)))
+    committed: List[Path] = []
+    try:
+        staged_pairs = []
+        for product, source_uri, destination, sidecar in planned:
+            staged_product = staging / destination.name
+            shutil.copy2(product, staged_product)
+            staged_sidecar = write_provenance_sidecar(
+                staged_product, source_uri, fetched_by=fetched_by
+            )
+            staged_pairs.append((staged_product, staged_sidecar, destination, sidecar))
+        for staged_product, staged_sidecar, destination, sidecar in staged_pairs:
+            os.link(staged_product, destination)
+            committed.append(destination)
+            try:
+                os.link(staged_sidecar, sidecar)
+                committed.append(sidecar)
+            except OSError:
+                destination.unlink(missing_ok=True)
+                committed.pop()
+                raise
+        return [destination for _, _, destination, _ in planned]
+    except Exception:
+        for path in reversed(committed):
+            path.unlink(missing_ok=True)
+        raise
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def fetch_tess_products(

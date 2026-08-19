@@ -43,6 +43,18 @@ def test_discover_and_load_candidates(tmp_path):
     assert loaded.metadata["identifiers"]["toi"] is None
 
 
+def test_discovery_and_loading_reject_nested_candidate_workspaces(tmp_path):
+    nested = tmp_path / "candidate" / "legacy-group" / "candidate-alpha"
+    nested.mkdir(parents=True)
+    (nested / "candidate.json").write_text(
+        '{"schema_version": 2, "candidate_id": "candidate-alpha"}\n', encoding="utf-8"
+    )
+
+    assert discover_candidates(tmp_path) == []
+    with pytest.raises(FileNotFoundError):
+        load_candidate(tmp_path, "candidate-alpha")
+
+
 def test_candidate_creation_never_overwrites_an_existing_workspace(tmp_path):
     create_candidate(tmp_path, "candidate-alpha")
 

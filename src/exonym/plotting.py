@@ -17,7 +17,7 @@ import numpy as np
 from .inputs import load_transit_ephemeris
 from .lightcurve import bin_phase_folded_flux, phase_hours
 from .search import load_candidate_light_curve
-from .workspace import CandidateWorkspace
+from .workspace import CandidateWorkspace, validate_signal_suffix
 
 
 def plot_phase_folded_lc(
@@ -76,12 +76,12 @@ def plot_centroid_offsets(
     output_path: Path,
     threshold_sigma: float = 3.0,
 ) -> Path:
-    """Render a centroid difference-image offset map with threshold circle."""
+    """Render supplied centroid-offset samples and an uncertainty threshold."""
     ra = np.asarray(ra_offsets_arcsec, dtype=float)
     dec = np.asarray(dec_offsets_arcsec, dtype=float)
 
     fig, ax = plt.subplots(figsize=(6, 6))
-    ax.scatter(ra, dec, color="#337ab7", alpha=0.7, s=40, label="Transit Center Offsets")
+    ax.scatter(ra, dec, color="#337ab7", alpha=0.7, s=40, label="Supplied offset samples")
 
     # Draw 3-sigma threshold circle
     circle_radius = threshold_sigma * sigma_arcsec
@@ -98,7 +98,7 @@ def plot_centroid_offsets(
 
     ax.set_xlabel("RA Offset [arcsec]")
     ax.set_ylabel("Dec Offset [arcsec]")
-    ax.set_title("Difference-Image Centroid Significance Map")
+    ax.set_title("Centroid offset samples")
     ax.axhline(0, color="gray", linestyle=":", alpha=0.5)
     ax.axvline(0, color="gray", linestyle=":", alpha=0.5)
     ax.legend(loc="upper right")
@@ -185,19 +185,17 @@ def generate_candidate_plots(
     """Generate default diagnostic plots under candidate/<id>/figures/.
 
     Missing phase-fold parameters come from the candidate's transit
-    configuration, optionally from the named per-signal configuration. If no
-    configuration is available, the generic BLS result or a deterministic
-    demonstration ephemeris is used. Real candidate light curves are used when
-    available; otherwise a deterministic synthetic grid is rendered. Corner
-    plots require the matching saved MCMC chain. Random offsets use a fixed seed
-    for reproducibility.
+    configuration, optionally from the named per-signal configuration. The
+    command requires a candidate-data ephemeris and light curve. Corner plots
+    require the matching saved MCMC chain.
     """
+    signal = validate_signal_suffix(signal)
     figures_dir = workspace.path / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
-    rng = np.random.default_rng(seed=0)
-
     if period_days is None or epoch_btjd is None:
         ephemeris = load_transit_ephemeris(workspace, signal=signal)
+        if ephemeris.get("source") == "synthetic-demo":
+            raise ValueError("candidate plot requires a candidate-data ephemeris")
         if period_days is None:
             period_days = ephemeris["period_days"]
         if epoch_btjd is None:
@@ -205,22 +203,14 @@ def generate_candidate_plots(
 
     loaded = load_candidate_light_curve(workspace)
     if loaded is None:
-        time = np.linspace(0, 27, 2000)
-        flux = 1.0 - 0.0015 * (np.abs((time - epoch_btjd) % period_days) < 0.08).astype(float)
-        flux += rng.normal(0, 0.0003, size=time.shape)
-    else:
-        time, flux = loaded
+        raise ValueError("candidate plot requires a readable candidate light curve")
+    time, flux = loaded
 
     suffix = f".{signal.lstrip('.')}" if signal else ""
     lc_plot = figures_dir / f"phase_folded_lc{suffix}.png"
     plot_phase_folded_lc(time, flux, period_days, epoch_btjd, lc_plot)
 
-    ra_offsets = rng.normal(0.05, 0.08, size=15)
-    dec_offsets = rng.normal(-0.04, 0.08, size=15)
-    centroid_plot = figures_dir / f"centroid_offset{suffix}.png"
-    plot_centroid_offsets(ra_offsets, dec_offsets, sigma_arcsec=0.10, output_path=centroid_plot)
-
-    results: List[Path] = [lc_plot, centroid_plot]
+    results: List[Path] = [lc_plot]
 
     if include_corner:
         chain_path = workspace.path / "outputs" / f"mcmc_transit_fit_chain{suffix}.npy"

@@ -1,7 +1,8 @@
 """Target-neutral transit timing variation (TTV / O-C) engine.
 
-Measures per-transit timing deviations (O - C) from a linear ephemeris to detect
-gravitational perturbations from non-transiting companions and resonant multi-planet systems
+Measures per-transit timing deviations (O - C) from a refitted linear ephemeris
+for diagnostic investigation of possible gravitational perturbations from
+non-transiting companions and resonant multi-planet systems
 (Agol et al. 2005, Holman & Murray 2005):
 
 1. Linear Ephemeris Reference:
@@ -35,7 +36,7 @@ from .inputs import load_light_curve_table, load_stellar_parameters, load_transi
 from .lightcurve import kipping_to_quadratic_limb_darkening
 from .search import calculate_ttv_super_period
 from .transit_fit import stellar_density_a_rs
-from .workspace import CandidateWorkspace
+from .workspace import CandidateWorkspace, validate_signal_suffix
 
 MIN_POINTS_PER_TRANSIT = 30     # Minimum photometric cadences required to fit a single transit epoch
 WINDOW_DAYS = 0.35              # Half-width of individual transit isolation window (days)
@@ -137,6 +138,95 @@ def fit_transit_epoch(
     return t0_fit, sigma_t0
 
 
+def fit_weighted_linear_ephemeris(
+    epochs: np.ndarray,
+    observed_btjd: np.ndarray,
+    timing_errors_days: np.ndarray,
+) -> Dict[str, Any]:
+    """Fit a formal weighted linear ephemeris to measured transit centers.
+
+    The timing errors are treated as independent Gaussian measurement errors.
+    The resulting covariance is therefore formal only: it does not model
+    correlated photometric noise, template mismatch, or uncertain epoch-cycle
+    assignment.
+    """
+    valid = (
+        np.isfinite(epochs)
+        & np.isfinite(observed_btjd)
+        & np.isfinite(timing_errors_days)
+        & (timing_errors_days > 0)
+    )
+    epochs = np.asarray(epochs[valid], dtype=int)
+    observed_btjd = np.asarray(observed_btjd[valid], dtype=float)
+    timing_errors_days = np.asarray(timing_errors_days[valid], dtype=float)
+    if epochs.size < 2:
+        return {
+            "status": "not-fit-insufficient-transits",
+            "method": "weighted-linear-least-squares",
+            "n_transits_used": int(epochs.size),
+            "reference_epoch": None,
+            "reference_epoch_btjd": None,
+            "reference_epoch_uncertainty_days": None,
+            "period_days": None,
+            "period_uncertainty_days": None,
+            "covariance_reference_epoch_period_days2": None,
+            "chi_square": None,
+            "degrees_of_freedom": None,
+            "reduced_chi_square": None,
+            "uncertainty_interpretation": "not available without at least two timed events",
+        }
+
+    reference_epoch = int(np.rint(np.median(epochs)))
+    centered_epochs = epochs.astype(float) - float(reference_epoch)
+    design = np.column_stack((np.ones(epochs.size), centered_epochs))
+    weights = 1.0 / timing_errors_days**2
+    normal_matrix = design.T @ (weights[:, None] * design)
+    try:
+        covariance = np.linalg.inv(normal_matrix)
+        coefficients = covariance @ (design.T @ (weights * observed_btjd))
+    except np.linalg.LinAlgError:
+        return {
+            "status": "not-fit-singular-normal-matrix",
+            "method": "weighted-linear-least-squares",
+            "n_transits_used": int(epochs.size),
+            "reference_epoch": reference_epoch,
+            "reference_epoch_btjd": None,
+            "reference_epoch_uncertainty_days": None,
+            "period_days": None,
+            "period_uncertainty_days": None,
+            "covariance_reference_epoch_period_days2": None,
+            "chi_square": None,
+            "degrees_of_freedom": None,
+            "reduced_chi_square": None,
+            "uncertainty_interpretation": "not available because the weighted fit was singular",
+        }
+
+    fitted_btjd = design @ coefficients
+    residuals = observed_btjd - fitted_btjd
+    chi_square = float(np.sum((residuals / timing_errors_days) ** 2))
+    degrees_of_freedom = int(epochs.size - 2)
+    return {
+        "status": "fit",
+        "method": "weighted-linear-least-squares",
+        "n_transits_used": int(epochs.size),
+        "reference_epoch": reference_epoch,
+        "reference_epoch_btjd": float(coefficients[0]),
+        "reference_epoch_uncertainty_days": float(math.sqrt(covariance[0, 0])),
+        "period_days": float(coefficients[1]),
+        "period_uncertainty_days": float(math.sqrt(covariance[1, 1])),
+        "covariance_reference_epoch_period_days2": float(covariance[0, 1]),
+        "chi_square": chi_square,
+        "degrees_of_freedom": degrees_of_freedom,
+        "reduced_chi_square": (
+            float(chi_square / degrees_of_freedom) if degrees_of_freedom > 0 else None
+        ),
+        "uncertainty_interpretation": (
+            "formal independent-timing-error covariance; correlated noise, template mismatch, "
+            "and cycle-count uncertainty are not included"
+        ),
+    }
+
+
 def transit_timing_analysis(
     time: np.ndarray,
     flux: np.ndarray,
@@ -171,9 +261,21 @@ def transit_timing_analysis(
 
     epochs_arr = np.asarray(epochs, dtype=int)
     t_observed_arr = np.asarray(t_observed, dtype=float)
-    t_calculated_arr = np.asarray(t_calculated, dtype=float)
     t_errors_arr = np.asarray(t_errors, dtype=float)
+    input_t_calculated_arr = np.asarray(t_calculated, dtype=float)
+    linear_ephemeris = fit_weighted_linear_ephemeris(
+        epochs_arr, t_observed_arr, t_errors_arr
+    )
+    if linear_ephemeris["status"] == "fit":
+        t_calculated_arr = (
+            float(linear_ephemeris["reference_epoch_btjd"])
+            + (epochs_arr - int(linear_ephemeris["reference_epoch"]))
+            * float(linear_ephemeris["period_days"])
+        )
+    else:
+        t_calculated_arr = input_t_calculated_arr
     oc_minutes = (t_observed_arr - t_calculated_arr) * 1440.0
+    input_ephemeris_oc_minutes = (t_observed_arr - input_t_calculated_arr) * 1440.0
     oc_errors_minutes = t_errors_arr * 1440.0
     rms_oc = float(np.sqrt(np.mean(oc_minutes**2))) if oc_minutes.size else None
     mean_uncertainty = float(np.mean(oc_errors_minutes)) if oc_errors_minutes.size else None
@@ -182,10 +284,12 @@ def transit_timing_analysis(
         "t_observed_btjd": [float(value) for value in t_observed_arr],
         "t_calculated_btjd": [float(value) for value in t_calculated_arr],
         "oc_minutes": [float(value) for value in oc_minutes],
+        "input_ephemeris_oc_minutes": [float(value) for value in input_ephemeris_oc_minutes],
         "oc_error_minutes": [float(value) for value in oc_errors_minutes],
         "oc_rms_minutes": rms_oc,
         "mean_uncertainty_minutes": mean_uncertainty,
         "n_transits_fit": int(epochs_arr.size),
+        "linear_ephemeris": linear_ephemeris,
     }
 
 
@@ -309,6 +413,7 @@ def _synthetic_timing_table(
 
 def run_ttv_analysis(workspace: CandidateWorkspace, signal: Optional[str] = None) -> Path:
     """Run the TTV analysis and write outputs/ttv_analysis_results.json."""
+    signal = validate_signal_suffix(signal)
     outputs_dir = workspace.path / "outputs"
     figures_dir = workspace.path / "figures"
     outputs_dir.mkdir(parents=True, exist_ok=True)
@@ -316,20 +421,17 @@ def run_ttv_analysis(workspace: CandidateWorkspace, signal: Optional[str] = None
 
     table = load_light_curve_table(workspace)
     if table is None:
-        table = _synthetic_timing_table()
-        source = "synthetic-demo"
-        ephemeris = {
-            "period_days": table.pop("_period_days"),
-            "epoch_btjd": table.pop("_epoch_btjd"),
-            "duration_days": table.pop("_duration_days"),
-            "depth_ppm": table.pop("_depth_ppm"),
-            "source": source,
-        }
-    else:
-        source = "candidate-data"
-        ephemeris = load_transit_ephemeris(workspace, signal=signal)
+        raise RuntimeError("TTV analysis requires observed candidate photometry")
+    source = "candidate-data"
+    ephemeris = load_transit_ephemeris(workspace, signal=signal)
+    if ephemeris["source"] == "synthetic-demo" or any(
+        value == "synthetic-demo" for value in ephemeris.get("field_sources", {}).values()
+    ):
+        raise RuntimeError("TTV analysis requires a complete candidate-derived transit ephemeris")
 
     stellar = load_stellar_parameters(workspace)
+    if stellar["source"] != "candidate-data":
+        raise RuntimeError("TTV analysis requires complete candidate-derived stellar parameters")
     rho_prior_solar = float(stellar["mass_solar"]) / float(stellar["radius_solar"]) ** 3
     a_rs = stellar_density_a_rs(rho_prior_solar, ephemeris["period_days"])
 
@@ -381,6 +483,16 @@ def run_ttv_analysis(workspace: CandidateWorkspace, signal: Optional[str] = None
             "period_days": ephemeris["period_days"],
             "epoch_btjd": ephemeris["epoch_btjd"],
             "source": ephemeris["source"],
+            "field_sources": ephemeris.get("field_sources", {}),
+        },
+        "input_provenance": {
+            "photometry_source": source,
+            "photometry_files": [
+                str(Path(path).relative_to(workspace.path)).replace("\\", "/")
+                for path in table.get("input_files", [])
+                if Path(path).is_relative_to(workspace.path)
+            ],
+            "stellar_parameters_source": stellar["source"],
         },
         "timing": {
             "n_transits_fit": analysis["n_transits_fit"],
@@ -390,7 +502,9 @@ def run_ttv_analysis(workspace: CandidateWorkspace, signal: Optional[str] = None
             "t_observed_btjd": analysis["t_observed_btjd"],
             "t_calculated_btjd": analysis["t_calculated_btjd"],
             "oc_minutes": analysis["oc_minutes"],
+            "input_ephemeris_oc_minutes": analysis["input_ephemeris_oc_minutes"],
             "oc_error_minutes": analysis["oc_error_minutes"],
+            "linear_ephemeris": analysis["linear_ephemeris"],
         },
         "companion_super_periods": super_periods,
         "timing_diagram": (
@@ -399,8 +513,8 @@ def run_ttv_analysis(workspace: CandidateWorkspace, signal: Optional[str] = None
             else None
         ),
         "caveat": (
-            "Per-transit timing in SNR-limited cadences is noise-dominated; "
-            "no TTV detection is claimed without a significance threshold."
+            "Per-transit timing is exploratory. Linear-ephemeris covariance is formal only, "
+            "and no TTV detection or companion inference is claimed by this artifact."
         ),
     }
     output_path = outputs_dir / f"ttv_analysis_results{suffix}.json"

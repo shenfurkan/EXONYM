@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/known-signal-ephemeris-evidence-1.0.json",
+  "title": "Candidate-local Known-signal Ephemeris Evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "candidate_id", "source", "records"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "candidate_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+    "source": {"const": "candidate-evidence"},
+    "records": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/record"}}
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^(?:data/external|literature)/(?:[A-Za-z0-9][A-Za-z0-9._-]*/)*[A-Za-z0-9][A-Za-z0-9._-]*(?:\\.[A-Za-z0-9][A-Za-z0-9._-]*)?$"},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_id", "source_kind", "source_name", "source_uri", "retrieved_at", "expires_at", "raw_artifact", "native_time_scale", "ephemeris"],
+      "properties": {
+        "record_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+        "source_kind": {"enum": ["eclipsing-binary-catalog", "variable-star-catalog", "exofop", "literature"]},
+        "source_name": {"type": "string", "minLength": 1},
+        "source_uri": {"type": "string", "pattern": "^https://"},
+        "retrieved_at": {"type": "string", "format": "date-time"},
+        "expires_at": {"type": "string", "format": "date-time"},
+        "raw_artifact": {"$ref": "#/$defs/artifact"},
+        "native_time_scale": {"const": "BJD_TDB"},
+        "ephemeris": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["period_days", "epoch_bjd_tdb", "duration_hours"],
+          "properties": {
+            "period_days": {"type": "number", "exclusiveMinimum": 0},
+            "epoch_bjd_tdb": {"type": "number"},
+            "duration_hours": {"type": "number", "exclusiveMinimum": 0}
+          }
+        }
+      }
+    }
+  }
+}

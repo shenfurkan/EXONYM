@@ -13,6 +13,10 @@ from exonym.catalog_federation import (
     normalize_cross_matches,
     refresh_catalog,
 )
+from exonym.ephemeris_matching import (
+    match_known_signal_ephemerides,
+    record_known_signal_ephemeris,
+)
 from exonym.__main__ import main
 from exonym.isolation import IsolationReport
 from exonym.schemas import validate_schemas
@@ -20,6 +24,14 @@ from exonym.workspace import create_candidate, load_candidate
 
 
 def _candidate(tmp_path):
+    package_dir = tmp_path / "src" / "exonym"
+    package_dir.mkdir(parents=True, exist_ok=True)
+    (package_dir / "__init__.py").write_text('__version__ = "test"\n', encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = [\"setuptools\"]\nbuild-backend = \"setuptools.build_meta\"\n"
+        "[project]\nname = \"exonym\"\nversion = \"0.0.0\"\n",
+        encoding="utf-8",
+    )
     create_candidate(tmp_path, "catalog-target", tic="123456789", mission="tess")
     metadata_path = tmp_path / "candidate" / "catalog-target" / "candidate.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -40,6 +52,21 @@ def _transport(status_code, body, calls=None):
 def _write_coordinate_context(candidate):
     (candidate.path / "outputs" / "archival_vetting_report.json").write_text(
         json.dumps({"target_coordinates": {"ra_deg": 10.0, "dec_deg": 20.0}}),
+        encoding="utf-8",
+    )
+
+
+def _write_candidate_ephemeris(candidate, period_days=3.0, epoch_btjd=1.0, duration_hours=2.0):
+    (candidate.path / "config" / "transit_config.json").write_text(
+        json.dumps(
+            {
+                "transit": {
+                    "period_days": period_days,
+                    "epoch_btjd": epoch_btjd,
+                    "duration_hours": duration_hours,
+                }
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -275,6 +302,195 @@ def test_catalog_schema_rejects_mismatched_snapshot_ownership(tmp_path):
 
     # Assert
     assert any(violation.path == snapshot.as_posix() for violation in report.violations)
+
+
+def test_known_signal_match_is_hash_bound_and_review_required(tmp_path):
+    candidate = _candidate(tmp_path)
+    _write_candidate_ephemeris(candidate)
+    body = (
+        b"pl_orbper,pl_tranmid,pl_trandur,pl_name\n"
+        b"3.0,2457001.0,2.0,Known Planet b\n"
+    )
+    fetch_catalog(candidate, ["nasa-exoplanet-archive"], _transport(200, body))
+
+    output = match_known_signal_ephemerides(candidate)
+    record = json.loads(output.read_text(encoding="utf-8"))
+
+    assert record["status"] == "review-required-known-signal-match"
+    assert record["comparisons"][0]["period_harmonic_match"] is True
+    assert record["comparisons"][0]["epoch_match"] is True
+    assert record["comparisons"][0]["review_required"] is True
+    assert record["source_snapshots"][0]["snapshot"]["sha256"]
+    assert _audit(tmp_path).ok
+
+
+def test_known_signal_match_never_treats_absent_supported_retrievals_as_novelty(tmp_path):
+    candidate = _candidate(tmp_path)
+    _write_candidate_ephemeris(candidate)
+
+    output = match_known_signal_ephemerides(candidate)
+    record = json.loads(output.read_text(encoding="utf-8"))
+
+    assert record["status"] == "insufficient-current-supported-catalog-evidence"
+    assert record["comparisons"] == []
+    assert "does not establish novelty" in record["limitations"]
+
+
+def test_known_signal_match_no_match_is_limited_to_the_current_snapshot(tmp_path):
+    candidate = _candidate(tmp_path)
+    _write_candidate_ephemeris(candidate)
+    body = b"pl_orbper,pl_tranmid,pl_trandur\n5.0,2457001.0,2.0\n"
+    fetch_catalog(candidate, ["nasa-exoplanet-archive"], _transport(200, body))
+
+    output = match_known_signal_ephemerides(candidate)
+    record = json.loads(output.read_text(encoding="utf-8"))
+
+    assert record["status"] == "no-ephemeris-match-in-current-supported-catalog"
+    assert record["comparisons"][0]["review_required"] is False
+    assert "does not establish novelty" in record["limitations"]
+
+
+def test_known_signal_match_excludes_stale_retrievals(tmp_path):
+    candidate = _candidate(tmp_path)
+    _write_candidate_ephemeris(candidate)
+    body = b"pl_orbper,pl_tranmid,pl_trandur\n3.0,2457001.0,2.0\n"
+    manifest_path = fetch_catalog(candidate, ["nasa-exoplanet-archive"], _transport(200, body))[0]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["expires_at"] = "2000-01-01T00:00:00Z"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    output = match_known_signal_ephemerides(candidate)
+    record = json.loads(output.read_text(encoding="utf-8"))
+
+    assert record["status"] == "insufficient-current-supported-catalog-evidence"
+    assert record["comparisons"] == []
+    assert record["excluded_retrievals"][0]["reason"] == "retrieval-stale-or-invalid-time"
+
+
+def test_known_signal_match_schema_rejects_tampered_snapshot_binding(tmp_path):
+    candidate = _candidate(tmp_path)
+    _write_candidate_ephemeris(candidate)
+    body = b"pl_orbper,pl_tranmid,pl_trandur\n3.0,2457001.0,2.0\n"
+    manifest = fetch_catalog(candidate, ["nasa-exoplanet-archive"], _transport(200, body))[0]
+    match_known_signal_ephemerides(candidate)
+    snapshot = manifest.with_name("snapshot.json")
+    snapshot.write_text(snapshot.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+    report = _audit(tmp_path)
+
+    assert any(
+        violation.rule == "artifact-hash-mismatch" and "known-signal catalog inputs" in violation.detail
+        for violation in report.violations
+    )
+
+
+def test_recorded_known_signal_evidence_is_hash_bound_and_requires_review(tmp_path):
+    candidate = _candidate(tmp_path)
+    _write_candidate_ephemeris(candidate)
+    raw_artifact = candidate.path / "literature" / "known-eb-row.txt"
+    raw_artifact.write_text("reviewed source row", encoding="utf-8")
+
+    evidence = record_known_signal_ephemeris(
+        candidate,
+        "eb-row-01",
+        "eclipsing-binary-catalog",
+        "Reviewed known binary",
+        "https://example.invalid/known-binary",
+        "literature/known-eb-row.txt",
+        3.0,
+        2457001.0,
+        2.0,
+        "2026-08-01T00:00:00Z",
+        "2026-09-01T00:00:00Z",
+    )
+
+    output = match_known_signal_ephemerides(candidate)
+    record = json.loads(output.read_text(encoding="utf-8"))
+
+    assert evidence == candidate.path / "decisions" / "known_signal_ephemerides.json"
+    assert record["status"] == "review-required-known-signal-match"
+    assert record["source_snapshots"][0]["provider"] == "candidate-recorded-evidence"
+    assert record["comparisons"][0]["provider"] == "candidate-recorded-evidence"
+    assert _audit(tmp_path).ok
+
+
+def test_recorded_known_signal_evidence_rejects_unbound_or_tampered_inputs(tmp_path):
+    candidate = _candidate(tmp_path)
+    raw_artifact = candidate.path / "literature" / "known-variable-row.txt"
+    raw_artifact.write_text("reviewed source row", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="BJD_TDB"):
+        record_known_signal_ephemeris(
+            candidate,
+            "variable-row-01",
+            "variable-star-catalog",
+            "Reviewed variable",
+            "https://example.invalid/variable",
+            "literature/known-variable-row.txt",
+            3.0,
+            float("nan"),
+            2.0,
+            "2026-08-01T00:00:00Z",
+            "2026-09-01T00:00:00Z",
+        )
+
+    evidence = record_known_signal_ephemeris(
+        candidate,
+        "variable-row-01",
+        "variable-star-catalog",
+        "Reviewed variable",
+        "https://example.invalid/variable",
+        "literature/known-variable-row.txt",
+        3.0,
+        2457001.0,
+        2.0,
+        "2026-08-01T00:00:00Z",
+        "2026-09-01T00:00:00Z",
+    )
+    raw_artifact.write_text("tampered source row", encoding="utf-8")
+
+    report = _audit(tmp_path)
+
+    assert evidence.is_file()
+    assert any(
+        violation.rule == "artifact-hash-mismatch" and "known-signal evidence raw input" in violation.detail
+        for violation in report.violations
+    )
+
+
+def test_catalog_match_ephemeris_cli_dispatches_candidate_local_output(tmp_path, capsys):
+    candidate = _candidate(tmp_path)
+    _write_candidate_ephemeris(candidate)
+
+    result = main(["--root", str(tmp_path), "catalog", "match-ephemeris", candidate.candidate_id])
+
+    assert result == 0
+    assert "known_signal_ephemeris_match.json" in capsys.readouterr().out
+
+
+def test_catalog_record_ephemeris_cli_writes_candidate_local_evidence(tmp_path, capsys):
+    candidate = _candidate(tmp_path)
+    raw_artifact = candidate.path / "literature" / "reviewed-row.txt"
+    raw_artifact.write_text("reviewed source row", encoding="utf-8")
+
+    result = main(
+        [
+            "--root", str(tmp_path), "catalog", "record-ephemeris", candidate.candidate_id,
+            "--record-id", "literature-row-01",
+            "--source-kind", "literature",
+            "--source-name", "Reviewed source",
+            "--source-uri", "https://example.invalid/source",
+            "--raw-artifact", "literature/reviewed-row.txt",
+            "--period-days", "3.0",
+            "--epoch-bjd-tdb", "2457001.0",
+            "--duration-hours", "2.0",
+            "--retrieved-at", "2026-08-01T00:00:00Z",
+            "--expires-at", "2026-09-01T00:00:00Z",
+        ]
+    )
+
+    assert result == 0
+    assert "decisions/known_signal_ephemerides.json" in capsys.readouterr().out
 
 
 def test_catalog_cli_dispatches_only_allowlisted_provider_names(tmp_path, monkeypatch, capsys):

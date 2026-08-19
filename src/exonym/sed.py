@@ -159,8 +159,8 @@ def _run_emcee(
     ndim = int(start.size)
     rng = np.random.default_rng(seed=seed)
     walkers = start + rng.normal(size=(n_walkers, ndim)) * 1e-3
-    np.random.seed(seed)
     sampler = emcee.EnsembleSampler(n_walkers, ndim, log_probability)
+    sampler.random_state = np.random.RandomState(seed).get_state()
     state = sampler.run_mcmc(walkers, burn_in, progress=False)
     sampler.reset()
     sampler.run_mcmc(state, production, progress=False)
@@ -185,6 +185,9 @@ def _fit_blackbody(
         + MAG_SYSTEMATIC_FLOOR**2
     )
     parallax = float(stellar["parallax_mas"])
+    parallax_error = float(stellar.get("parallax_mas_err", float("nan")))
+    if not math.isfinite(parallax) or parallax <= 0 or not math.isfinite(parallax_error) or parallax_error <= 0:
+        raise RuntimeError("blackbody SED fitting requires positive candidate-owned parallax_mas and parallax_mas_err")
     distance_pc = 1000.0 / parallax
     teff_prior = float(stellar["teff_k"])
     initial_scale = 1.0 * RSUN_M / (distance_pc * PC_M)
@@ -215,7 +218,6 @@ def _fit_blackbody(
         log_probability, start, n_walkers, burn_in, production, seed
     )
 
-    parallax_error = max(0.01, 0.02 * parallax)
     draw_rng = np.random.default_rng(seed=seed + 1)
     parallax_draws = draw_rng.normal(parallax, parallax_error, len(samples))
     distance_draws = 1000.0 / parallax_draws
@@ -395,14 +397,12 @@ def run_sed_fit(workspace: CandidateWorkspace) -> Path:
     observations, source = _collect_observations(photometry)
     grid_used = False
     if observations is None:
-        observations = _synthetic_photometry(stellar)
-        source = "synthetic-demo"
-    else:
-        grid_model = load_atmosphere_grid_model(
-            workspace, [name for name, _, _ in observations]
-        )
-        if grid_model is not None:
-            grid_used = True
+        raise RuntimeError("SED fitting requires candidate-owned broadband photometry")
+    grid_model = load_atmosphere_grid_model(
+        workspace, [name for name, _, _ in observations]
+    )
+    if grid_model is not None:
+        grid_used = True
 
     fit = (
         _fit_grid(observations, grid_model, stellar)  # type: ignore[arg-type]
@@ -416,6 +416,8 @@ def run_sed_fit(workspace: CandidateWorkspace) -> Path:
         "work_package": "SED_FIT",
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "source": source,
+        "scientific_status": "exploratory-color-fit",
+        "validation_eligible": False,
         "grid_used": grid_used,
         "grid_source": (
             "candidate-data/external/atmosphere_grid.csv" if grid_used else "blackbody-fallback"
@@ -432,6 +434,7 @@ def run_sed_fit(workspace: CandidateWorkspace) -> Path:
             "Pivot-wavelength monochromatic models approximate passband-integrated photometry.",
             "Radius and luminosity are derived only for the blackbody path via the parallax prior.",
             "Grid magnitudes carry an unknown absolute normalization; a free offset absorbs it.",
+            "This exploratory fit is not a response-integrated atmosphere posterior or a validation constraint.",
         ],
     }
     output_path = outputs_dir / "sed_fit_results.json"

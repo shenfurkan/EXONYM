@@ -42,7 +42,11 @@
         "period_min_days",
         "period_max_days",
         "n_periods",
+        "period_grid",
+        "injection_model",
+        "exposure_model",
         "detrend_window_days",
+        "detrend_gap_break_window_fraction",
         "scramble_seeds",
         "period_agreement_fraction",
         "injection_recovery"
@@ -52,7 +56,11 @@
         "period_min_days": { "const": 0.5 },
         "period_max_days": { "const": 20.0 },
         "n_periods": { "const": 200 },
+        "period_grid": { "const": "astropy-autopower-baseline-duration-resolved" },
+        "injection_model": { "const": "finite-exposure-box-overlap" },
+        "exposure_model": { "const": "median-positive-cadence-inferred" },
         "detrend_window_days": { "const": 1.0 },
+        "detrend_gap_break_window_fraction": { "const": 0.5 },
         "scramble_seeds": { "const": [5, 7, 11] },
         "period_agreement_fraction": { "const": 0.01 },
         "injection_recovery": {
@@ -85,6 +93,7 @@
       }
     },
     "reference_signal": { "$ref": "#/$defs/reference_signal" },
+    "alias_controls": { "$ref": "#/$defs/alias_controls" },
     "diagnostics": {
       "type": "object",
       "additionalProperties": false,
@@ -102,7 +111,7 @@
         "controls": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["inverted", "scrambles", "max_snr"],
+          "required": ["inverted", "scrambles", "by_variant", "scramble_method", "max_snr"],
           "properties": {
             "inverted": { "$ref": "#/$defs/bls_result" },
             "scrambles": {
@@ -118,6 +127,16 @@
                 }
               }
             },
+            "by_variant": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["normalized", "running-median"],
+              "properties": {
+                "normalized": { "$ref": "#/$defs/control_branch" },
+                "running-median": { "$ref": "#/$defs/control_branch" }
+              }
+            },
+            "scramble_method": { "const": "independent-sector-circular-shift" },
             "max_snr": { "type": "number", "minimum": 0 }
           }
         }
@@ -264,7 +283,9 @@
         "best_epoch": { "type": "number" },
         "best_depth_ppm": { "type": "number" },
         "best_duration_hours": { "type": "number", "exclusiveMinimum": 0 },
-        "snr": { "type": "number", "minimum": 0 }
+        "snr": { "type": "number", "minimum": 0 },
+        "n_distinct_transit_events": { "type": "integer", "minimum": 0 },
+        "n_period_trials": { "type": "integer", "minimum": 0 }
       }
     },
     "reference_signal": {
@@ -276,6 +297,7 @@
         "best_depth_ppm",
         "best_duration_hours",
         "snr",
+        "n_distinct_transit_events",
         "usable_for_injection_recovery"
       ],
       "properties": {
@@ -284,6 +306,7 @@
         "best_depth_ppm": { "type": "number" },
         "best_duration_hours": { "type": "number", "exclusiveMinimum": 0 },
         "snr": { "type": "number", "minimum": 0 },
+        "n_distinct_transit_events": { "type": "integer", "minimum": 0 },
         "usable_for_injection_recovery": { "type": "boolean" }
       }
     },
@@ -298,6 +321,28 @@
           "minItems": 1,
           "items": { "$ref": "#/$defs/bls_result" }
         }
+      }
+    },
+    "control_branch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inverted", "scrambles", "max_snr"],
+      "properties": {
+        "inverted": { "$ref": "#/$defs/bls_result" },
+        "scrambles": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["seed", "best"],
+            "properties": {
+              "seed": { "type": "integer", "minimum": 0 },
+              "best": { "$ref": "#/$defs/bls_result" }
+            }
+          }
+        },
+        "max_snr": { "type": "number", "minimum": 0 }
       }
     },
     "injection_recovery_entry": {
@@ -340,7 +385,79 @@
         "snr_pass": { "type": "boolean" },
         "epoch_tolerance_hours": { "type": "number", "exclusiveMinimum": 0 },
         "recovered": { "type": "boolean" },
+        "best": { "$ref": "#/$defs/bls_result" },
+        "branches": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["normalized", "running-median"],
+          "properties": {
+            "normalized": { "$ref": "#/$defs/recovery_branch" },
+            "running-median": { "$ref": "#/$defs/recovery_branch" }
+          }
+        }
+      }
+    },
+    "recovery_branch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["period_match", "epoch_match", "snr_pass", "recovered", "best"],
+      "properties": {
+        "period_match": { "type": "boolean" },
+        "epoch_match": { "type": "boolean" },
+        "snr_pass": { "type": "boolean" },
+        "recovered": { "type": "boolean" },
         "best": { "$ref": "#/$defs/bls_result" }
+      }
+    },
+    "alias_controls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "method", "odd_even", "half_phase_control", "double_period_hypothesis", "interpretation"],
+      "properties": {
+        "status": {"enum": ["computed", "not-run-unusable-reference-signal", "unavailable-invalid-input"]},
+        "method": {"const": "fixed-ephemeris-odd-even-half-phase-double-period-v1"},
+        "odd_even": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/odd_even"}]},
+        "half_phase_control": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/depth_measurement"}]},
+        "double_period_hypothesis": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/double_period_hypothesis"}]},
+        "interpretation": {"const": "Diagnostic only: odd-even, half-phase, and doubled-period measurements preserve possible aliases for human review; they do not identify an eclipsing binary or validate a planet."}
+      }
+    },
+    "depth_measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["n_in_transit", "n_out_of_transit", "depth_ppm", "uncertainty_ppm", "depth_significance_sigma", "status"],
+      "properties": {
+        "n_in_transit": {"type": "integer", "minimum": 0},
+        "n_out_of_transit": {"type": "integer", "minimum": 0},
+        "depth_ppm": {"type": ["number", "null"]},
+        "uncertainty_ppm": {"type": ["number", "null"]},
+        "depth_significance_sigma": {"type": ["number", "null"]},
+        "status": {"enum": ["insufficient_coverage", "nonfinite_measurement", "uncertainty_unavailable", "measured"]}
+      }
+    },
+    "odd_even": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parity_definition", "odd", "even", "z", "consistency_threshold_sigma", "consistent_at_threshold", "status"],
+      "properties": {
+        "parity_definition": {"const": "nearest declared ephemeris epoch is even"},
+        "odd": {"$ref": "#/$defs/depth_measurement"},
+        "even": {"$ref": "#/$defs/depth_measurement"},
+        "z": {"type": ["number", "null"]},
+        "consistency_threshold_sigma": {"const": 3.0},
+        "consistent_at_threshold": {"type": ["boolean", "null"]},
+        "status": {"enum": ["unresolved", "measured"]}
+      }
+    },
+    "double_period_hypothesis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["period_days", "primary", "alternating_event", "interpretation"],
+      "properties": {
+        "period_days": {"type": "number", "exclusiveMinimum": 0},
+        "primary": {"$ref": "#/$defs/depth_measurement"},
+        "alternating_event": {"$ref": "#/$defs/depth_measurement"},
+        "interpretation": {"const": "diagnostic only: expresses alternating declared-period events as primary and half-phase events at twice the period; it does not identify an eclipsing binary or validate a planet"}
       }
     }
   }

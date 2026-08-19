@@ -32,11 +32,38 @@ def test_sector_detrending_is_deterministic_and_independent():
     assert abs(np.median(first[200:]) - 1.0) < 0.001
 
 
+def test_sector_detrending_splits_large_intra_sector_time_gaps(monkeypatch):
+    """A sample-index filter must never borrow trend values across a visit gap."""
+    calls = []
+
+    def recording_filter(values, size, mode):
+        calls.append(np.asarray(values).copy())
+        return np.asarray(values)
+
+    monkeypatch.setattr("exonym.discovery.median_filter", recording_filter)
+    time = np.array([0.0, 0.1, 0.2, 10.0, 10.1, 10.2])
+    flux = np.array([1.0, 1.0, 1.0, 2.0, 2.0, 2.0])
+
+    result = detrend_by_sector(time, flux, np.ones(time.size, dtype=int), window_days=1.0)
+
+    assert [call.size for call in calls] == [3, 3]
+    assert np.allclose(result, np.ones_like(result))
+
+
 def test_controls_are_deterministic_and_invert_flux():
     flux = np.array([0.99, 1.0, 1.01])
 
     assert np.allclose(inverted_flux(flux), np.array([1.01, 1.0, 0.99]))
     assert np.array_equal(scrambled_flux(flux, 5), scrambled_flux(flux, 5))
+
+    sector_flux = np.array([0.98, 0.99, 1.0, 1.01, 1.02, 1.03])
+    sectors = np.array([1, 1, 1, 2, 2, 2])
+    sector_scramble = scrambled_flux(sector_flux, 5, sectors=sectors)
+    assert np.array_equal(sector_scramble, scrambled_flux(sector_flux, 5, sectors=sectors))
+    for sector in np.unique(sectors):
+        assert np.array_equal(
+            np.sort(sector_scramble[sectors == sector]), np.sort(sector_flux[sectors == sector])
+        )
 
 
 def test_box_injection_and_period_recovery():
@@ -46,6 +73,24 @@ def test_box_injection_and_period_recovery():
     assert injected.min() == 0.999
     assert recovered_period(4.0, 4.01, tolerance=0.01)
     assert not recovered_period(4.0, 2.0, tolerance=0.01)
+
+
+def test_box_injection_integrates_the_partial_cadence_overlap():
+    """A cadence crossing ingress receives a fractional, not full, depth."""
+    time = np.array([0.075])
+
+    injected = inject_box_transit(
+        time,
+        np.ones_like(time),
+        period_days=2.0,
+        epoch_btjd=0.0,
+        duration_hours=2.4,
+        depth_ppm=1000.0,
+        exposure_days=0.1,
+    )
+
+    # The 0.1-day exposure overlaps a 0.1-day transit for only 0.025 day.
+    assert injected[0] == pytest.approx(1.0 - 1000.0e-6 * 0.25)
 
 
 def test_mask_box_transit_removes_the_detected_event_window():
@@ -97,6 +142,12 @@ def test_robustness_diagnostics_records_all_variants_and_controls():
 
     assert set(diagnostics["variants"]) == {"normalized", "running-median"}
     assert len(diagnostics["controls"]["scrambles"]) == 2
+    assert set(diagnostics["controls"]["by_variant"]) == {"normalized", "running-median"}
+    assert diagnostics["controls"]["scramble_method"] == "independent-sector-circular-shift"
+    assert all(
+        len(branch["scrambles"]) == 2
+        for branch in diagnostics["controls"]["by_variant"].values()
+    )
     assert diagnostics["controls"]["max_snr"] >= diagnostics["controls"]["inverted"]["snr"]
     json.dumps(diagnostics)
 
@@ -118,11 +169,11 @@ def test_injection_recovery_records_the_declared_injection():
 
 
 @pytest.mark.parametrize(
-    "best_epoch, best_snr, expected",
-    [(1.0, 7.0, True), (1.0, 5.0, False), (1.1, 7.0, False)],
+    "best_epoch, best_snr, event_count, expected",
+    [(1.0, 7.0, 3, True), (1.0, 5.0, 3, False), (1.1, 7.0, 3, False), (1.0, 7.0, 1, False)],
 )
-def test_injection_recovery_requires_period_epoch_and_snr(
-    monkeypatch, best_epoch, best_snr, expected
+def test_injection_recovery_requires_period_epoch_score_and_multiple_events(
+    monkeypatch, best_epoch, best_snr, event_count, expected
 ):
     # Arrange
     time = np.linspace(0.0, 12.0, 500)
@@ -135,6 +186,7 @@ def test_injection_recovery_requires_period_epoch_and_snr(
                 best_depth_ppm=1000.0,
                 best_duration_hours=2.0,
                 snr=best_snr,
+                n_distinct_transit_events=event_count,
             ),
             [],
         )
@@ -157,3 +209,41 @@ def test_injection_recovery_requires_period_epoch_and_snr(
     # Assert
     assert result["period_match"] is True
     assert result["recovered"] is expected
+
+
+def test_injection_recovery_requires_both_preprocessing_branches(monkeypatch):
+    # Arrange
+    time = np.linspace(0.0, 12.0, 500)
+    sectors = np.ones(time.size, dtype=int)
+    results = iter(
+        (
+            BLSSearchResult(3.0, 1.0, 1000.0, 2.0, 7.0, 3),
+            BLSSearchResult(3.0, 1.0, 1000.0, 2.0, 5.0, 3),
+        )
+    )
+
+    def fake_duration_grid(*args, **kwargs):
+        return next(results), []
+
+    monkeypatch.setattr("exonym.discovery.search_duration_grid", fake_duration_grid)
+
+    # Act
+    result = injection_recovery_diagnostics(
+        time,
+        np.ones_like(time),
+        [{"period_days": 3.0, "epoch_btjd": 1.0, "duration_hours": 2.0, "depth_ppm": 1000.0}],
+        [2.0],
+        2.0,
+        4.0,
+        80,
+        0.05,
+        minimum_snr=6.0,
+        sectors=sectors,
+        detrend_window_days=1.0,
+    )[0]
+
+    # Assert
+    assert set(result["branches"]) == {"normalized", "running-median"}
+    assert result["branches"]["normalized"]["recovered"] is True
+    assert result["branches"]["running-median"]["recovered"] is False
+    assert result["recovered"] is False

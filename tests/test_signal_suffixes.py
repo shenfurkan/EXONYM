@@ -23,26 +23,36 @@ from exonym.workspace import create_candidate
 
 def test_plotting_signal_suffix(tmp_path):
     workspace = create_candidate(tmp_path, "candidate-test-signal-plot-suffix")
-    
-    # 1. Un-suffixed run
-    plots_default = generate_candidate_plots(workspace)
-    assert len(plots_default) == 2
-    assert plots_default[0].name == "phase_folded_lc.png"
-    assert plots_default[1].name == "centroid_offset.png"
-    for p in plots_default:
-        assert p.is_file()
+    (workspace.path / "config" / "transit_config.json").write_text(
+        '{"transit": {"period_days": 2.5, "epoch_btjd": 0.5, "duration_hours": 2.0}}\n',
+        encoding="utf-8",
+    )
+    signal_config = workspace.path / "config" / "signals" / "transit_config.01.json"
+    signal_config.parent.mkdir(parents=True, exist_ok=True)
+    signal_config.write_text(
+        '{"transit": {"period_days": 3.0, "epoch_btjd": 0.5, "duration_hours": 2.0}}\n',
+        encoding="utf-8",
+    )
+    light_curve = (np.linspace(0.0, 10.0, 200), np.ones(200))
 
-    # 2. Suffixed run (.01)
-    plots_signal = generate_candidate_plots(workspace, signal=".01")
-    assert len(plots_signal) == 2
-    assert plots_signal[0].name == "phase_folded_lc.01.png"
-    assert plots_signal[1].name == "centroid_offset.01.png"
-    for p in plots_signal:
-        assert p.is_file()
+    with patch("exonym.plotting.load_candidate_light_curve", return_value=light_curve):
+        # 1. Un-suffixed run
+        plots_default = generate_candidate_plots(workspace)
+        assert [path.name for path in plots_default] == ["phase_folded_lc.png"]
+        for path in plots_default:
+            assert path.is_file()
+
+        # 2. Suffixed run (.01)
+        plots_signal = generate_candidate_plots(workspace, signal=".01")
+        assert [path.name for path in plots_signal] == ["phase_folded_lc.01.png"]
+        for path in plots_signal:
+            assert path.is_file()
 
     # Verify both sets exist simultaneously without overwriting
     assert (workspace.path / "figures" / "phase_folded_lc.png").is_file()
     assert (workspace.path / "figures" / "phase_folded_lc.01.png").is_file()
+    assert not (workspace.path / "figures" / "centroid_offset.png").exists()
+    assert not (workspace.path / "figures" / "centroid_offset.01.png").exists()
 
 
 def test_ttv_signal_suffix(tmp_path):
@@ -56,7 +66,29 @@ def test_ttv_signal_suffix(tmp_path):
         "sector": np.full(500, 1),
     }
 
-    with patch("exonym.ttv.load_light_curve_table", return_value=synthetic_table):
+    ephemeris = {
+        "period_days": 3.0,
+        "epoch_btjd": 1.0,
+        "duration_days": 2.0 / 24.0,
+        "depth_ppm": 1000.0,
+        "source": "candidate-config",
+        "field_sources": {
+            "period_days": "candidate-config",
+            "epoch_btjd": "candidate-config",
+            "duration_days": "candidate-config",
+            "depth_ppm": "candidate-config",
+        },
+    }
+    stellar = {
+        "mass_solar": 1.0,
+        "mass_solar_err": 0.1,
+        "radius_solar": 1.0,
+        "radius_solar_err": 0.05,
+        "source": "candidate-data",
+    }
+    with patch("exonym.ttv.load_light_curve_table", return_value=synthetic_table), patch(
+        "exonym.ttv.load_transit_ephemeris", return_value=ephemeris
+    ), patch("exonym.ttv.load_stellar_parameters", return_value=stellar):
         # 1. Default un-suffixed run
         out_default = run_ttv_analysis(workspace)
         assert out_default.name == "ttv_analysis_results.json"
@@ -73,7 +105,15 @@ def test_ttv_signal_suffix(tmp_path):
 
         # Verify both coexist
         assert (workspace.path / "outputs" / "ttv_analysis_results.json").is_file()
-        assert (workspace.path / "outputs" / "ttv_analysis_results.02.json").is_file()
+    assert (workspace.path / "outputs" / "ttv_analysis_results.02.json").is_file()
+
+
+def test_ttv_refuses_to_fabricate_photometry(tmp_path):
+    workspace = create_candidate(tmp_path, "candidate-test-ttv-no-photometry")
+
+    with patch("exonym.ttv.load_light_curve_table", return_value=None):
+        with pytest.raises(RuntimeError, match="observed candidate photometry"):
+            run_ttv_analysis(workspace)
 
 
 def test_triceratops_signal_suffix(tmp_path):
@@ -100,14 +140,32 @@ def test_triceratops_signal_suffix(tmp_path):
 def test_transit_fit_signal_suffix(tmp_path):
     workspace = create_candidate(tmp_path, "candidate-test-signal-fit-suffix")
 
-    synthetic_table = {
-        "time": np.linspace(0, 10, 300),
-        "flux": np.ones(300),
-        "flux_err": np.full(300, 0.0002),
-        "sector": np.full(300, 1),
+    ephemeris = {
+        "period_days": 3.0,
+        "epoch_btjd": 1.0,
+        "duration_days": 2.0 / 24.0,
+        "depth_ppm": 1000.0,
+        "source": "candidate-config",
+        "field_sources": {
+            "period_days": "candidate-config",
+            "epoch_btjd": "candidate-config",
+            "duration_days": "candidate-config",
+            "depth_ppm": "candidate-config",
+        },
     }
+    stellar = {
+        "mass_solar": 1.0,
+        "mass_solar_err": 0.1,
+        "radius_solar": 1.0,
+        "radius_solar_err": 0.05,
+        "source": "candidate-data",
+    }
+    from exonym.transit_fit import _synthetic_transit_table
 
-    with patch("exonym.transit_fit.load_light_curve_table", return_value=synthetic_table):
+    synthetic_table = _synthetic_transit_table(ephemeris)
+    with patch("exonym.transit_fit.load_light_curve_table", return_value=synthetic_table), patch(
+        "exonym.transit_fit.load_transit_ephemeris", return_value=ephemeris
+    ), patch("exonym.transit_fit.load_stellar_parameters", return_value=stellar):
         # 1. Default un-suffixed run (low sample count for quick test)
         out_default = run_mcmc_transit_fit(workspace, n_samples=10)
         assert out_default.name == "mcmc_transit_fit.json"

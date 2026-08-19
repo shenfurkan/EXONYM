@@ -1,6 +1,5 @@
 """Tests for headless diagnostic figure generation."""
 
-import hashlib
 from unittest.mock import patch
 
 import numpy as np
@@ -8,6 +7,20 @@ import pytest
 
 from exonym.plotting import generate_candidate_plots, plot_centroid_offsets, plot_phase_folded_lc
 from exonym.workspace import create_candidate
+
+
+def _candidate_with_plot_inputs(tmp_path, candidate_id):
+    workspace = create_candidate(tmp_path, candidate_id)
+    (workspace.path / "config" / "transit_config.json").write_text(
+        '{"transit": {"period_days": 2.5, "epoch_btjd": 0.5, "duration_hours": 2.0}}\n',
+        encoding="utf-8",
+    )
+    return workspace
+
+
+def _candidate_light_curve():
+    time = np.linspace(0.0, 10.0, 200)
+    return time, np.ones_like(time)
 
 
 def test_plot_phase_folded_lc(tmp_path):
@@ -26,25 +39,28 @@ def test_plot_centroid_offsets(tmp_path):
     assert result.stat().st_size > 0
 
 
-def test_generate_candidate_plots(tmp_path):
-    workspace = create_candidate(tmp_path, "candidate-test-plot")
+def test_generate_candidate_plots_requires_candidate_data(tmp_path, monkeypatch):
+    workspace = _candidate_with_plot_inputs(tmp_path, "candidate-test-plot")
+    monkeypatch.setattr("exonym.plotting.load_candidate_light_curve", lambda _workspace: _candidate_light_curve())
+
     plots = generate_candidate_plots(workspace)
-    assert len(plots) == 2
+    assert [path.name for path in plots] == ["phase_folded_lc.png"]
     for path in plots:
         assert path.is_file()
+    assert not (workspace.path / "figures" / "centroid_offset.png").exists()
 
 
-def test_generate_candidate_plots_deterministic(tmp_path):
+def test_generate_candidate_plots_rejects_missing_candidate_inputs(tmp_path):
     workspace = create_candidate(tmp_path, "candidate-test-deterministic")
-    first = generate_candidate_plots(workspace)
-    second = generate_candidate_plots(workspace)
-    for first_path, second_path in zip(first, second):
-        digest_one = hashlib.sha256(first_path.read_bytes()).hexdigest()
-        digest_two = hashlib.sha256(second_path.read_bytes()).hexdigest()
-        assert digest_one == digest_two
+
+    with pytest.raises(ValueError, match="candidate-data ephemeris"):
+        generate_candidate_plots(workspace)
+
+    assert not (workspace.path / "figures" / "phase_folded_lc.png").exists()
+    assert not (workspace.path / "figures" / "centroid_offset.png").exists()
 
 
-def test_generate_candidate_plots_uses_requested_signal_config(tmp_path):
+def test_generate_candidate_plots_uses_requested_signal_config(tmp_path, monkeypatch):
     # Arrange
     workspace = create_candidate(tmp_path, "candidate-test-signal-plot")
     signal_config = workspace.path / "config" / "signals" / "transit_config.03.json"
@@ -55,6 +71,7 @@ def test_generate_candidate_plots_uses_requested_signal_config(tmp_path):
     )
 
     # Act
+    monkeypatch.setattr("exonym.plotting.load_candidate_light_curve", lambda _workspace: _candidate_light_curve())
     with patch("exonym.plotting.plot_phase_folded_lc") as phase_plot:
         generate_candidate_plots(workspace, signal=".03")
 
@@ -74,12 +91,13 @@ def test_plot_mcmc_corner(tmp_path):
     assert result.stat().st_size > 0
 
 
-def test_generate_candidate_plots_with_corner(tmp_path):
-    workspace = create_candidate(tmp_path, "candidate-test-corner-plots")
+def test_generate_candidate_plots_with_corner(tmp_path, monkeypatch):
+    workspace = _candidate_with_plot_inputs(tmp_path, "candidate-test-corner-plots")
+    monkeypatch.setattr("exonym.plotting.load_candidate_light_curve", lambda _workspace: _candidate_light_curve())
 
     # 1. Without corner
     plots = generate_candidate_plots(workspace, include_corner=False)
-    assert len(plots) == 2
+    assert len(plots) == 1
 
     # 2. A corner plot requires a real fit chain.
     with pytest.raises(ValueError, match="corner plot requires an existing MCMC fit chain"):
@@ -91,7 +109,7 @@ def test_generate_candidate_plots_with_corner(tmp_path):
     rng = np.random.default_rng(seed=123)
     np.save(str(chain_file), rng.normal(size=(50, 7)))
     plots_signal = generate_candidate_plots(workspace, signal=".01", include_corner=True)
-    assert len(plots_signal) == 3
+    assert len(plots_signal) == 2
     signal_names = [p.name for p in plots_signal]
     assert "corner_plot.01.png" in signal_names
     assert (workspace.path / "figures" / "corner_plot.01.png").is_file()

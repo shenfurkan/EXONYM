@@ -26,13 +26,13 @@ from __future__ import annotations
 
 import json
 import math
-import re
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
 
 from .inputs import load_light_curve_table, load_transit_ephemeris
+from .workspace import validate_signal_suffix
 from .lightcurve import phase_hours
 from .workspace import CandidateWorkspace
 
@@ -228,11 +228,6 @@ def fixed_ephemeris_screen(
     }
 
 
-def _validate_signal(signal: Optional[str]) -> None:
-    if signal is not None and re.fullmatch(r"\.\d+", signal) is None:
-        raise ValueError("signal must use the .NN format")
-
-
 def _rounded_payload(value: object, digits: int = 6) -> object:
     """Recursively make a JSON-safe, concise payload without nonfinite values."""
     if isinstance(value, dict):
@@ -256,7 +251,7 @@ def run_fixed_ephemeris_screen(
     exploratory commands, this workflow refuses a synthetic ephemeris so that
     no science-looking screen can be produced from demonstration defaults.
     """
-    _validate_signal(signal)
+    validate_signal_suffix(signal)
     ephemeris = load_transit_ephemeris(workspace, signal=signal)
     if signal is not None and ephemeris.get("source") != "candidate-config-signal":
         raise ValueError(

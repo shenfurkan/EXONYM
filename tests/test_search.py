@@ -8,7 +8,13 @@ import numpy as np
 import pytest
 
 from exonym.lightcurve import phase_hours
-from exonym.search import BLSSearchResult, find_transits, find_transits_tls, run_bls_on_candidate
+from exonym.search import (
+    BLSSearchResult,
+    find_transits,
+    find_transits_duration_grid,
+    find_transits_tls,
+    run_bls_on_candidate,
+)
 from exonym.workspace import create_candidate
 
 
@@ -57,6 +63,77 @@ def test_find_transits_invalid():
 
     with pytest.raises(ValueError):
         find_transits(np.linspace(0, 10, 100), np.ones(100), period_min=-1.0)
+
+
+def test_find_transits_uses_weighted_astropy_bls_and_observed_event_count(monkeypatch):
+    """The BLS core must consume per-cadence uncertainties, not a heuristic."""
+    from astropy import timeseries
+
+    captured = {}
+
+    class FakeBoxLeastSquares:
+        def __init__(self, time, flux, dy):
+            captured["time"] = time
+            captured["flux"] = flux
+            captured["dy"] = dy
+
+        def autopower(self, duration, **kwargs):
+            captured["duration"] = duration
+            captured["autopower"] = kwargs
+            return types.SimpleNamespace(
+                power=np.array([12.0]),
+                period=np.array([3.0]),
+                transit_time=np.array([1.0]),
+                depth=np.array([0.003]),
+                depth_err=np.array([0.0005]),
+            )
+
+    monkeypatch.setattr(timeseries, "BoxLeastSquares", FakeBoxLeastSquares)
+    time = np.linspace(0.0, 12.0, 500)
+    flux = np.ones_like(time)
+    errors = np.linspace(0.0005, 0.0015, time.size)
+
+    result = find_transits(
+        time, flux, period_min=2.0, period_max=4.0, duration_hours=2.0, flux_err=errors
+    )
+
+    assert np.array_equal(captured["dy"], errors)
+    assert captured["duration"] == pytest.approx(2.0 / 24.0)
+    assert captured["autopower"]["minimum_n_transit"] == 2
+    assert 0.0 < captured["autopower"]["frequency_factor"] <= 1.0
+    assert result.snr == pytest.approx(6.0)
+    assert result.n_distinct_transit_events >= 2
+    assert result.n_period_trials == 1
+
+
+def test_frequency_period_grid_has_uniform_frequency_spacing():
+    from exonym.search import _frequency_period_grid
+
+    periods = _frequency_period_grid(0.5, 20.0, 11)
+    frequencies = 1.0 / periods
+
+    assert periods[0] == pytest.approx(20.0)
+    assert periods[-1] == pytest.approx(0.5)
+    assert np.allclose(np.diff(frequencies), np.diff(frequencies)[0])
+
+
+def test_find_transits_duration_grid_retains_all_trials_and_uses_best_score(monkeypatch):
+    calls = []
+
+    def fake_find_transits(time, flux, **kwargs):
+        duration = kwargs["duration_hours"]
+        calls.append(duration)
+        return BLSSearchResult(3.0, 1.0, 100.0, duration, duration, 3)
+
+    monkeypatch.setattr("exonym.search.find_transits", fake_find_transits)
+
+    best, trials = find_transits_duration_grid(
+        [0.0, 1.0], [1.0, 1.0], [1.0, 2.0, 4.0], period_min=0.5, period_max=20.0, n_periods=200
+    )
+
+    assert calls == [1.0, 2.0, 4.0]
+    assert best.best_duration_hours == 4.0
+    assert [trial["best_duration_hours"] for trial in trials] == [1.0, 2.0, 4.0]
 
 
 def test_find_transits_tls_uses_native_cadence_uncertainties(monkeypatch):
@@ -113,19 +190,6 @@ def test_run_bls_on_candidate_requires_real_photometry(tmp_path):
     assert not (workspace.path / "outputs" / "bls_search_manifest.json").exists()
 
 
-def test_run_bls_on_candidate_allows_explicit_synthetic_demo(tmp_path):
-    workspace = create_candidate(tmp_path, "candidate-test-bls")
-    out = run_bls_on_candidate(workspace, allow_synthetic=True)
-    assert out.is_file()
-    assert out.name == "bls_search_results.json"
-    payload = json.loads(out.read_text(encoding="utf-8"))
-    assert payload["source"] == "synthetic-demo"
-    assert payload["n_points"] > 0
-    manifest = json.loads((workspace.path / "outputs" / "bls_search_manifest.json").read_text())
-    assert manifest["source"] == "synthetic-demo"
-    assert manifest["inputs"] == []
-
-
 def test_run_bls_output_suffix_preserves_the_default_result(tmp_path, monkeypatch):
     # Arrange
     workspace = create_candidate(tmp_path, "candidate-output-suffix")
@@ -139,7 +203,7 @@ def test_run_bls_output_suffix_preserves_the_default_result(tmp_path, monkeypatc
     )
     monkeypatch.setattr(
         "exonym.search.find_transits",
-        lambda *args, **kwargs: BLSSearchResult(3.0, 1.0, 100.0, 2.0, 6.0),
+        lambda *args, **kwargs: BLSSearchResult(3.0, 1.0, 100.0, 2.0, 6.0, 3),
     )
 
     # Act
@@ -149,6 +213,41 @@ def test_run_bls_output_suffix_preserves_the_default_result(tmp_path, monkeypatc
     assert output.name == "bls_search_results.survey-test.json"
     assert json.loads(default_result.read_text(encoding="utf-8"))["snr"] == 2.0
     assert (outputs / "bls_search_manifest.survey-test.json").is_file()
+
+
+def test_run_bls_duration_grid_is_recorded_and_selects_the_best_trial(tmp_path, monkeypatch):
+    workspace = create_candidate(tmp_path, "candidate-duration-grid")
+    time = np.linspace(0.0, 30.0, 100)
+    flux = np.ones_like(time)
+    monkeypatch.setattr(
+        "exonym.search.load_candidate_light_curve", lambda _, sectors=None: (time, flux)
+    )
+
+    calls = []
+
+    def fake_find_transits(time_values, flux_values, **kwargs):
+        calls.append(kwargs)
+        duration = kwargs["duration_hours"]
+        return BLSSearchResult(3.0, 1.0, 100.0, duration, duration, 3)
+
+    monkeypatch.setattr("exonym.search.find_transits", fake_find_transits)
+
+    output = run_bls_on_candidate(
+        workspace, duration_grid_hours=[1.0, 2.0, 4.0], n_periods=211
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    manifest = json.loads((workspace.path / "outputs" / "bls_search_manifest.json").read_text())
+    assert payload["best_duration_hours"] == 4.0
+    assert [trial["best_duration_hours"] for trial in payload["duration_grid_trials"]] == [1.0, 2.0, 4.0]
+    assert manifest["configuration"]["duration_hours"] is None
+    assert manifest["configuration"]["duration_grid_hours"] == [1.0, 2.0, 4.0]
+    assert manifest["configuration"]["n_periods"] == 211
+    assert (
+        manifest["configuration"]["period_grid"]
+        == "astropy-autopower-baseline-duration-resolved"
+    )
+    assert all(call["n_periods"] == 211 for call in calls)
 
 
 @pytest.mark.parametrize("suffix", ["survey", ".bad_value", ".bad.value"])
@@ -203,6 +302,7 @@ def test_run_bls_signal_uses_prior_duration_and_preserves_each_signal_output(tmp
             best_depth_ppm=100.0,
             best_duration_hours=kwargs["duration_hours"],
             snr=5.0,
+            n_distinct_transit_events=3,
         )
 
     monkeypatch.setattr(
@@ -291,7 +391,7 @@ def test_run_bls_on_candidate_with_real_data(tmp_path):
         "BJDREFI": 2457000,
         "BJDREFF": 0.0,
     }
-    lk.LightCurve(time=time, flux=flux, meta=meta).to_fits(
+    lk.LightCurve(time=time, flux=flux, flux_err=np.full_like(flux, 0.001), meta=meta).to_fits(
         path=raw / "test_lc.fits", overwrite=True
     )
 
@@ -300,10 +400,19 @@ def test_run_bls_on_candidate_with_real_data(tmp_path):
     assert payload["source"] == "candidate-data"
     assert payload["n_points"] == 600
     assert payload["best_period"] > 0
+    assert payload["n_period_trials"] > 0
+    assert payload["statistic"]["name"] == "weighted BLS fitted-depth signal-to-noise"
+    assert payload["statistic"]["uncertainty_source"] == ["reported"]
     manifest = json.loads((workspace.path / "outputs" / "bls_search_manifest.json").read_text())
     assert manifest["source"] == "candidate-data"
     assert manifest["inputs"][0]["path"] == "data/raw/test_lc.fits"
     assert len(manifest["inputs"][0]["sha256"]) == 64
+    assert manifest["configuration"]["uncertainty_source"] == ["reported"]
+    assert manifest["runtime"] == {
+        "implementation": "astropy.timeseries.BoxLeastSquares",
+        "package": "astropy",
+        "version": "6.0.1",
+    }
 
 
 def test_quality_flag_masking_excludes_bad_cadences(tmp_path):

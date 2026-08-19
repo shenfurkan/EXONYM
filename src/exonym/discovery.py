@@ -13,7 +13,7 @@ import numpy as np
 from scipy.ndimage import median_filter
 
 from .lightcurve import phase_hours
-from .search import BLSSearchResult, find_transits
+from .search import BLSSearchResult, find_transits_duration_grid
 
 
 def detrend_by_sector(
@@ -21,6 +21,7 @@ def detrend_by_sector(
     flux: Sequence[float],
     sectors: Sequence[int],
     window_days: float,
+    gap_break_window_fraction: float = 0.5,
 ) -> np.ndarray:
     """Divide each sector by a deterministic running median trend.
 
@@ -41,6 +42,12 @@ def detrend_by_sector(
         raise ValueError("time, flux, and sectors must have matching shapes")
     if not np.isfinite(window_days) or window_days <= 0:
         raise ValueError("window_days must be positive and finite")
+    if (
+        not np.isfinite(gap_break_window_fraction)
+        or gap_break_window_fraction <= 0
+        or gap_break_window_fraction > 1.0
+    ):
+        raise ValueError("gap_break_window_fraction must be in (0, 1]")
 
     result = np.full_like(values, np.nan)
     for sector in np.unique(labels):
@@ -53,13 +60,33 @@ def detrend_by_sector(
         finite = np.isfinite(sorted_time) & np.isfinite(sorted_flux)
         if finite.sum() < 3:
             continue
-        cadence_days = np.median(np.diff(sorted_time[finite]))
+        finite_time = sorted_time[finite]
+        cadence_days = np.median(np.diff(finite_time))
         width = max(3, int(round(window_days / cadence_days))) if cadence_days > 0 else 3
         if width % 2 == 0:
             width += 1
-        trend = median_filter(sorted_flux, size=width, mode="nearest")
-        trend[~np.isfinite(trend) | (trend == 0)] = 1.0
-        detrended = sorted_flux / trend
+        # Filtering in sample index is acceptable only within a contiguous
+        # cadence run. Split large gaps so the edge extension of a median
+        # filter cannot borrow values from a physically disconnected visit.
+        gap_days = max(5.0 * float(cadence_days), gap_break_window_fraction * window_days)
+        run_starts = np.r_[0, np.flatnonzero(np.diff(sorted_time) > gap_days) + 1]
+        run_stops = np.r_[run_starts[1:], sorted_time.size]
+        detrended = np.full_like(sorted_flux, np.nan)
+        for start, stop in zip(run_starts, run_stops):
+            run_flux = sorted_flux[start:stop]
+            valid_flux = np.isfinite(run_flux)
+            if valid_flux.sum() < 3:
+                detrended[start:stop] = run_flux
+                continue
+            trend_input = run_flux.copy()
+            if not np.all(valid_flux):
+                indices = np.arange(run_flux.size)
+                trend_input[~valid_flux] = np.interp(
+                    indices[~valid_flux], indices[valid_flux], run_flux[valid_flux]
+                )
+            trend = median_filter(trend_input, size=width, mode="nearest")
+            trend[~np.isfinite(trend) | (trend == 0)] = 1.0
+            detrended[start:stop] = run_flux / trend
         restored = np.empty_like(detrended)
         restored[order] = detrended
         result[mask] = restored
@@ -73,26 +100,18 @@ def search_duration_grid(
     period_min_days: float,
     period_max_days: float,
     n_periods: int,
-) -> Tuple[BLSSearchResult, List[Dict[str, float]]]:
-    """Search each declared duration and return the highest-SNR result."""
-    durations = [float(value) for value in duration_grid_hours]
-    if not durations or any(not np.isfinite(value) or value <= 0 for value in durations):
-        raise ValueError("duration_grid_hours must contain positive finite values")
-    if len(set(durations)) != len(durations):
-        raise ValueError("duration_grid_hours must not contain duplicates")
-    results: List[Tuple[BLSSearchResult, Dict[str, float]]] = []
-    for duration_hours in durations:
-        result = find_transits(
-            time_btjd,
-            flux,
-            period_min=period_min_days,
-            period_max=period_max_days,
-            n_periods=n_periods,
-            duration_hours=duration_hours,
-        )
-        results.append((result, result.to_dict()))
-    best, _ = max(results, key=lambda item: item[0].snr)
-    return best, [payload for _, payload in results]
+    flux_err: Optional[Sequence[float]] = None,
+) -> Tuple[BLSSearchResult, List[Dict[str, Any]]]:
+    """Compatibility wrapper for the shared BLS duration-grid search."""
+    return find_transits_duration_grid(
+        time_btjd,
+        flux,
+        duration_grid_hours,
+        period_min=period_min_days,
+        period_max=period_max_days,
+        n_periods=n_periods,
+        flux_err=flux_err,
+    )
 
 
 def inverted_flux(flux: Sequence[float]) -> np.ndarray:
@@ -101,9 +120,87 @@ def inverted_flux(flux: Sequence[float]) -> np.ndarray:
     return 2.0 - values
 
 
-def scrambled_flux(flux: Sequence[float], seed: int) -> np.ndarray:
-    """Return a deterministic time-scrambled flux control."""
-    return np.random.default_rng(seed).permutation(np.asarray(flux, dtype=float))
+def scrambled_flux(
+    flux: Sequence[float], seed: int, sectors: Optional[Sequence[int]] = None
+) -> np.ndarray:
+    """Return a deterministic null control that preserves sector noise structure.
+
+    Without sector labels this retains the historical full-series permutation
+    for small standalone tests.  Survey controls supply labels and apply an
+    independent non-zero circular time shift in each sector.  That preserves
+    each sector's cadence ordering and red-noise correlation while breaking
+    coherent phase alignment across sectors.
+    """
+    values = np.asarray(flux, dtype=float)
+    generator = np.random.default_rng(seed)
+    if sectors is None:
+        return generator.permutation(values)
+    labels = np.asarray(sectors, dtype=int)
+    if values.shape != labels.shape:
+        raise ValueError("flux and sectors must have matching shapes")
+    shifted = values.copy()
+    for sector in np.unique(labels):
+        indices = np.flatnonzero(labels == sector)
+        if indices.size < 2:
+            continue
+        offset = int(generator.integers(1, indices.size))
+        shifted[indices] = np.roll(values[indices], offset)
+    return shifted
+
+
+def _finite_exposure_days(
+    time_btjd: Sequence[float], exposure_days: Optional[Sequence[float]] = None
+) -> np.ndarray:
+    """Return one positive finite integration time for every cadence.
+
+    Explicit exposure values are preferred. When a generic array caller does
+    not have product metadata, a robust median positive cadence spacing is a
+    conservative proxy: it keeps an injection from spanning a data gap, unlike
+    using neighboring timestamps as an implicit exposure window would do.
+    """
+    time = np.asarray(time_btjd, dtype=float)
+    if time.ndim != 1 or time.size == 0 or not np.all(np.isfinite(time)):
+        raise ValueError("injection times must be a non-empty finite one-dimensional array")
+    if exposure_days is not None:
+        exposure = np.asarray(exposure_days, dtype=float)
+        if exposure.ndim == 0:
+            exposure = np.full(time.size, float(exposure), dtype=float)
+        if exposure.shape != time.shape:
+            raise ValueError("exposure_days must be a scalar or match the time shape")
+        if not np.all(np.isfinite(exposure) & (exposure > 0)):
+            raise ValueError("exposure_days must contain only positive finite values")
+        return exposure
+
+    ordered = np.sort(time)
+    intervals = np.diff(ordered)
+    intervals = intervals[np.isfinite(intervals) & (intervals > 0)]
+    if intervals.size == 0:
+        raise ValueError("injection times must contain more than one distinct cadence")
+    cadence = float(np.median(intervals))
+    return np.full(time.size, cadence, dtype=float)
+
+
+def _box_exposure_fraction(
+    time_btjd: Sequence[float],
+    period_days: float,
+    epoch_btjd: float,
+    duration_hours: float,
+    exposure_days: Optional[Sequence[float]] = None,
+) -> np.ndarray:
+    """Integrate a periodic box over each finite cadence exposure."""
+    time = np.asarray(time_btjd, dtype=float)
+    exposure = _finite_exposure_days(time, exposure_days)
+    duration_days = float(duration_hours) / 24.0
+    if np.any(exposure >= period_days - duration_days):
+        raise ValueError("cadence exposure must be shorter than the out-of-transit interval")
+    event_numbers = np.rint((time - epoch_btjd) / period_days).astype(int)
+    event_centers = epoch_btjd + event_numbers * period_days
+    starts = time - 0.5 * exposure
+    ends = time + 0.5 * exposure
+    transit_starts = event_centers - 0.5 * duration_days
+    transit_ends = event_centers + 0.5 * duration_days
+    overlap = np.maximum(0.0, np.minimum(ends, transit_ends) - np.maximum(starts, transit_starts))
+    return np.clip(overlap / exposure, 0.0, 1.0)
 
 
 def inject_box_transit(
@@ -113,8 +210,14 @@ def inject_box_transit(
     epoch_btjd: float,
     duration_hours: float,
     depth_ppm: float,
+    exposure_days: Optional[Sequence[float]] = None,
 ) -> np.ndarray:
-    """Inject a multiplicative box transit into normalized candidate flux."""
+    """Inject a finite-exposure integrated box transit into candidate flux.
+
+    The model is deliberately a box, not a limb-darkened transit. Each cadence
+    receives the exact overlap fraction of its finite exposure with the box so
+    ingress/egress attenuation is not represented as an instantaneous sample.
+    """
     if (
         not np.isfinite(period_days)
         or not np.isfinite(epoch_btjd)
@@ -125,10 +228,16 @@ def inject_box_transit(
         or depth_ppm <= 0
     ):
         raise ValueError("injection period, duration, and depth must be positive")
+    if duration_hours / 24.0 >= period_days:
+        raise ValueError("injection duration must be shorter than its period")
     time = np.asarray(time_btjd, dtype=float)
     values = np.asarray(flux, dtype=float).copy()
-    in_transit = np.abs(phase_hours(time, period_days, epoch_btjd)) <= 0.5 * duration_hours
-    values[in_transit] *= 1.0 - depth_ppm * 1e-6
+    if time.shape != values.shape:
+        raise ValueError("time and flux must have matching shapes")
+    fraction = _box_exposure_fraction(
+        time, period_days, epoch_btjd, duration_hours, exposure_days=exposure_days
+    )
+    values *= 1.0 - depth_ppm * 1e-6 * fraction
     return values
 
 
@@ -138,6 +247,7 @@ def mask_box_transit(
     period_days: float,
     epoch_btjd: float,
     duration_hours: float,
+    exposure_days: Optional[Sequence[float]] = None,
 ) -> Tuple[np.ndarray, int]:
     """Mask a detected box event before testing an injected replacement.
 
@@ -153,11 +263,15 @@ def mask_box_transit(
         or duration_hours <= 0
     ):
         raise ValueError("masked period and duration must be positive and finite")
+    if duration_hours / 24.0 >= period_days:
+        raise ValueError("masked duration must be shorter than its period")
     time = np.asarray(time_btjd, dtype=float)
     values = np.asarray(flux, dtype=float)
     if time.shape != values.shape:
         raise ValueError("time and flux must have matching shapes")
-    in_transit = np.abs(phase_hours(time, period_days, epoch_btjd)) <= 0.5 * duration_hours
+    in_transit = _box_exposure_fraction(
+        time, period_days, epoch_btjd, duration_hours, exposure_days=exposure_days
+    ) > 0.0
     masked = values.copy()
     masked[in_transit] = np.nan
     return masked, int(np.count_nonzero(in_transit))
@@ -210,6 +324,8 @@ def robustness_diagnostics(
     n_periods: int,
     detrend_window_days: float,
     scramble_seeds: Sequence[int],
+    flux_err: Optional[Sequence[float]] = None,
+    gap_break_window_fraction: float = 0.5,
 ) -> Dict[str, Any]:
     """Run frozen duration, detrending, and null-control diagnostics.
 
@@ -219,9 +335,23 @@ def robustness_diagnostics(
     time = np.asarray(time_btjd, dtype=float)
     values = np.asarray(flux, dtype=float)
     labels = np.asarray(sectors, dtype=int)
+    errors = None if flux_err is None else np.asarray(flux_err, dtype=float)
+    if errors is not None and errors.shape != values.shape:
+        raise ValueError("flux_err must match the time and flux shapes")
+    def preprocess(branch: str, raw_flux: np.ndarray) -> np.ndarray:
+        if branch == "normalized":
+            return raw_flux
+        return detrend_by_sector(
+            time,
+            raw_flux,
+            labels,
+            detrend_window_days,
+            gap_break_window_fraction=gap_break_window_fraction,
+        )
+
     variants = {
-        "normalized": values,
-        "running-median": detrend_by_sector(time, values, labels, detrend_window_days),
+        "normalized": preprocess("normalized", values),
+        "running-median": preprocess("running-median", values),
     }
     variant_results: Dict[str, Dict[str, Any]] = {}
     for name, variant_flux in variants.items():
@@ -232,34 +362,49 @@ def robustness_diagnostics(
             period_min_days,
             period_max_days,
             n_periods,
+            flux_err=errors,
         )
         variant_results[name] = {"best": best.to_dict(), "trials": trials}
 
-    inverted, _ = search_duration_grid(
-        time,
-        inverted_flux(values),
-        duration_grid_hours,
-        period_min_days,
-        period_max_days,
-        n_periods,
-    )
-    scrambled_results = []
-    for seed in scramble_seeds:
-        result, _ = search_duration_grid(
+    branch_controls: Dict[str, Dict[str, Any]] = {}
+    inverted_values = inverted_flux(values)
+    for name in variants:
+        inverted, _ = search_duration_grid(
             time,
-            scrambled_flux(values, int(seed)),
+            preprocess(name, inverted_values),
             duration_grid_hours,
             period_min_days,
             period_max_days,
             n_periods,
+            flux_err=errors,
         )
-        scrambled_results.append({"seed": int(seed), "best": result.to_dict()})
-    null_snr = [inverted.snr] + [entry["best"]["snr"] for entry in scrambled_results]
+        scrambled_results = []
+        for seed in scramble_seeds:
+            result, _ = search_duration_grid(
+                time,
+                preprocess(name, scrambled_flux(values, int(seed), sectors=labels)),
+                duration_grid_hours,
+                period_min_days,
+                period_max_days,
+                n_periods,
+                flux_err=errors,
+            )
+            scrambled_results.append({"seed": int(seed), "best": result.to_dict()})
+        branch_snr = [inverted.snr] + [entry["best"]["snr"] for entry in scrambled_results]
+        branch_controls[name] = {
+            "inverted": inverted.to_dict(),
+            "scrambles": scrambled_results,
+            "max_snr": float(max(branch_snr)),
+        }
+    normalized_controls = branch_controls["normalized"]
+    null_snr = [entry["max_snr"] for entry in branch_controls.values()]
     return {
         "variants": variant_results,
         "controls": {
-            "inverted": inverted.to_dict(),
-            "scrambles": scrambled_results,
+            "inverted": normalized_controls["inverted"],
+            "scrambles": normalized_controls["scrambles"],
+            "by_variant": branch_controls,
+            "scramble_method": "independent-sector-circular-shift",
             "max_snr": float(max(null_snr)),
         },
     }
@@ -276,18 +421,32 @@ def injection_recovery_diagnostics(
     tolerance: float,
     minimum_snr: Optional[float] = None,
     epoch_tolerance_duration_fraction: float = 1.0,
+    sectors: Optional[Sequence[int]] = None,
+    detrend_window_days: Optional[float] = None,
+    flux_err: Optional[Sequence[float]] = None,
+    exposure_days: Optional[Sequence[float]] = None,
+    gap_break_window_fraction: float = 0.5,
 ) -> List[Dict[str, Any]]:
     """Measure recovery of declared synthetic transits in real candidate flux.
 
     A recovered trial must match its injected period and epoch. When
     ``minimum_snr`` is supplied, it must also clear that pre-registered BLS
-    threshold. This is an internal search-sensitivity diagnostic, not a
-    completeness estimate or scientific disposition.
+    threshold and contain at least two distinct transit events. This is an
+    internal search-sensitivity diagnostic, not a
+    completeness estimate or scientific disposition. When both ``sectors``
+    and ``detrend_window_days`` are supplied, every injection is made before
+    preprocessing and must recover from both the normalized and per-sector
+    running-median branches. This prevents a recovery from silently bypassing
+    the survey's alternate detrending path.
     """
     time = np.asarray(time_btjd, dtype=float)
     values = np.asarray(flux, dtype=float)
+    errors = None if flux_err is None else np.asarray(flux_err, dtype=float)
     if time.size == 0:
         raise ValueError("injection recovery requires at least one cadence")
+    if errors is not None and errors.shape != values.shape:
+        raise ValueError("flux_err must match the time and flux shapes")
+    exposures = _finite_exposure_days(time, exposure_days)
     if not np.isfinite(tolerance) or tolerance <= 0:
         raise ValueError("period recovery tolerance must be positive and finite")
     if (
@@ -299,6 +458,15 @@ def injection_recovery_diagnostics(
         not np.isfinite(minimum_snr) or minimum_snr <= 0
     ):
         raise ValueError("minimum_snr must be positive and finite when supplied")
+    if (sectors is None) != (detrend_window_days is None):
+        raise ValueError("sectors and detrend_window_days must be supplied together")
+    labels: Optional[np.ndarray] = None
+    if sectors is not None:
+        labels = np.asarray(sectors, dtype=int)
+        if labels.shape != time.shape:
+            raise ValueError("sectors must match the time and flux shapes")
+        if not np.isfinite(detrend_window_days) or float(detrend_window_days) <= 0:
+            raise ValueError("detrend_window_days must be positive and finite")
     epoch = float(np.nanmin(time))
     results: List[Dict[str, Any]] = []
     for injection in injections:
@@ -313,27 +481,60 @@ def injection_recovery_diagnostics(
             injected_epoch,
             injected_duration,
             injected_depth,
+            exposure_days=exposures,
         )
-        best, _ = search_duration_grid(
-            time, injected, duration_grid_hours, period_min_days, period_max_days, n_periods
-        )
-        period_match = recovered_period(injected_period, best.best_period, tolerance)
-        epoch_tolerance_hours = injected_duration * epoch_tolerance_duration_fraction
-        epoch_match = recovered_epoch(
-            injected_period, injected_epoch, best.best_epoch, epoch_tolerance_hours
-        )
-        snr_pass = minimum_snr is None or best.snr >= minimum_snr
-        declared_injection = dict(injection)
-        declared_injection["epoch_btjd"] = injected_epoch
-        results.append(
-            {
-                "injection": declared_injection,
+        epoch_tolerance_hours = float(injected_duration * epoch_tolerance_duration_fraction)
+        branch_fluxes = {"normalized": injected}
+        if labels is not None:
+            branch_fluxes["running-median"] = detrend_by_sector(
+                time,
+                injected,
+                labels,
+                float(detrend_window_days),
+                gap_break_window_fraction=gap_break_window_fraction,
+            )
+        branch_results: Dict[str, Dict[str, Any]] = {}
+        for branch_name, branch_flux in branch_fluxes.items():
+            best, _ = search_duration_grid(
+                time,
+                branch_flux,
+                duration_grid_hours,
+                period_min_days,
+                period_max_days,
+                n_periods,
+                flux_err=errors,
+            )
+            period_match = bool(recovered_period(injected_period, best.best_period, tolerance))
+            epoch_match = bool(
+                recovered_epoch(
+                    injected_period, injected_epoch, best.best_epoch, epoch_tolerance_hours
+                )
+            )
+            snr_pass = bool(
+                (minimum_snr is None or best.snr >= minimum_snr)
+                and best.n_distinct_transit_events >= 2
+            )
+            branch_results[branch_name] = {
                 "period_match": period_match,
                 "epoch_match": epoch_match,
                 "snr_pass": snr_pass,
-                "epoch_tolerance_hours": epoch_tolerance_hours,
-                "recovered": period_match and epoch_match and snr_pass,
+                "recovered": bool(period_match and epoch_match and snr_pass),
                 "best": best.to_dict(),
             }
-        )
+        normalized = branch_results["normalized"]
+        branch_recovered = list(branch_results.values())
+        declared_injection = dict(injection)
+        declared_injection["epoch_btjd"] = injected_epoch
+        result: Dict[str, Any] = {
+            "injection": declared_injection,
+            "period_match": bool(all(entry["period_match"] for entry in branch_recovered)),
+            "epoch_match": bool(all(entry["epoch_match"] for entry in branch_recovered)),
+            "snr_pass": bool(all(entry["snr_pass"] for entry in branch_recovered)),
+            "epoch_tolerance_hours": epoch_tolerance_hours,
+            "recovered": bool(all(entry["recovered"] for entry in branch_recovered)),
+            "best": normalized["best"],
+        }
+        if labels is not None:
+            result["branches"] = branch_results
+        results.append(result)
     return results

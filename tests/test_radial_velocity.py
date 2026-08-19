@@ -111,6 +111,11 @@ def test_rv_keplerian_fit_recovers_synthetic_amplitude_and_records_provenance(tm
     assert report["model_comparison"]["delta_bic_constant_minus_keplerian"] > 0
     assert report["input_artifacts"][0]["path"] == "data/external/radial_velocity_observations.json"
     assert report["input_artifacts"][0]["sha256"]
+    assert report["diagnostics"]["kepler_equation_solver"] == {
+        "method": "Newton-Raphson with residual convergence check",
+        "tolerance_rad": 1e-12,
+        "max_iterations": 64,
+    }
 
     manifests = list((workspace.path / "runs" / "rv-keplerian").glob("*/engine-run.json"))
     assert len(manifests) == 1
@@ -122,6 +127,19 @@ def test_rv_keplerian_fit_recovers_synthetic_amplitude_and_records_provenance(tm
     audit = IsolationReport()
     validate_schemas(tmp_path, audit)
     assert audit.violations == []
+
+
+def test_kepler_solver_reaches_declared_residual_at_high_eccentricity():
+    from exonym.radial_velocity import _solve_kepler_equation
+
+    mean_anomaly = np.linspace(-8.0, 8.0, 101)
+    eccentricity = 0.95
+    eccentric_anomaly = _solve_kepler_equation(mean_anomaly, eccentricity)
+    residual = eccentric_anomaly - eccentricity * np.sin(eccentric_anomaly) - np.mod(
+        mean_anomaly, 2.0 * np.pi
+    )
+
+    assert np.max(np.abs(residual)) <= 1e-12
 
 
 def test_schema_audit_rejects_rv_record_outside_its_candidate_workspace(tmp_path):

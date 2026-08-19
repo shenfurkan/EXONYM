@@ -41,7 +41,7 @@ from .workspace import CandidateWorkspace
 PIXEL_SCALE_ARCSEC = 21.0       # TESS spatial plate scale (arcseconds per detector pixel)
 PRF_FWHM_PIXELS = 0.75          # Nominal isotropic Gaussian PRF Full-Width at Half-Maximum
 QUALITY_HARD_MASK = 24319       # TESS bitmask rejecting severe momentum dumps, desat, and cosmic rays
-MIN_DEPTH_CORE_PIXELS = 3       # Minimum core pixel threshold for reliable difference-image fitting
+MIN_DIFFERENCE_CORE_PIXELS = 3  # Minimum core-pixel count for difference-image screening
 
 
 def _finite_float(value: Any) -> Optional[float]:
@@ -83,6 +83,36 @@ def gaussian_prf_kernel(
     return kernel / total if total > 0 else kernel
 
 
+def fit_difference_image_prf(
+    difference_image: np.ndarray,
+    pixel_mask: np.ndarray,
+    x_positions: Sequence[float],
+    y_positions: Sequence[float],
+    fwhm_pixels: float = PRF_FWHM_PIXELS,
+) -> Tuple[Optional[np.ndarray], Optional[float], int]:
+    """NNLS-fit Gaussian PRF amplitudes to an absolute difference image.
+
+    Returns (amplitudes, residual, n_pixels_used) or (None, None, 0) when the
+    system is degenerate or has too few usable pixels.
+    """
+    from scipy.optimize import nnls
+
+    valid_mask = np.asarray(pixel_mask, dtype=bool) & np.isfinite(difference_image)
+    if int(valid_mask.sum()) < 5 or len(x_positions) == 0:
+        return None, None, 0
+    yy, xx = np.indices(difference_image.shape, dtype=float)
+    rows = []
+    for x0, y0 in zip(x_positions, y_positions):
+        rows.append(gaussian_prf_kernel(xx[valid_mask], yy[valid_mask], float(x0), float(y0), fwhm_pixels))
+    design = np.asarray(rows).T
+    differences = difference_image[valid_mask]
+    try:
+        amplitudes, residual = nnls(design, differences, maxiter=5000)
+    except Exception:
+        return None, None, 0
+    return amplitudes, float(residual), int(valid_mask.sum())
+
+
 def fit_depth_map_prf(
     depth_map: np.ndarray,
     pixel_mask: np.ndarray,
@@ -90,42 +120,91 @@ def fit_depth_map_prf(
     y_positions: Sequence[float],
     fwhm_pixels: float = PRF_FWHM_PIXELS,
 ) -> Tuple[Optional[np.ndarray], Optional[float], int]:
-    """NNLS-fit Gaussian PRF amplitudes for each candidate source.
+    """Compatibility wrapper for :func:`fit_difference_image_prf`.
 
-    Returns (amplitudes, residual, n_pixels_used) or (None, None, 0) when the
-    system is degenerate or has too few usable pixels.
+    ``depth_map`` is retained only as a legacy parameter name. Callers must
+    pass an absolute out-of-transit minus in-transit difference image, not a
+    fractional-depth map.
     """
-    from scipy.optimize import nnls
+    return fit_difference_image_prf(
+        depth_map, pixel_mask, x_positions, y_positions, fwhm_pixels
+    )
 
-    valid_mask = np.asarray(pixel_mask, dtype=bool)
-    if int(valid_mask.sum()) < 5 or len(x_positions) == 0:
-        return None, None, 0
-    yy, xx = np.indices(depth_map.shape, dtype=float)
-    rows = []
-    for x0, y0 in zip(x_positions, y_positions):
-        rows.append(gaussian_prf_kernel(xx[valid_mask], yy[valid_mask], float(x0), float(y0), fwhm_pixels))
-    design = np.asarray(rows).T
-    depths = depth_map[valid_mask]
-    try:
-        amplitudes, residual = nnls(design, depths, maxiter=5000)
-    except Exception:
-        return None, None, 0
-    return amplitudes, float(residual), int(valid_mask.sum())
+
+def build_difference_image(
+    in_image: np.ndarray, out_image: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Return an absolute out-of-transit minus in-transit difference image.
+
+    A transit source has the point-spread morphology in this image. A
+    fractional map would divide that morphology by the local stellar scene and
+    is therefore not suitable for PRF source fitting.
+    """
+    shape = in_image.shape
+    valid = np.isfinite(in_image) & np.isfinite(out_image)
+    difference_image = np.full(shape, np.nan, dtype=float)
+    difference_image[valid] = out_image[valid] - in_image[valid]
+    return difference_image, valid
 
 
 def build_depth_map(
     in_image: np.ndarray, out_image: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Return (depth_map, valid_mask) from median in/out transit images."""
-    shape = in_image.shape
-    valid = (
-        np.isfinite(in_image)
-        & np.isfinite(out_image)
-        & (out_image > 0)
-    )
-    depth_map = np.full(shape, np.nan, dtype=float)
-    depth_map[valid] = (out_image[valid] - in_image[valid]) / out_image[valid]
-    return depth_map, valid
+    """Compatibility wrapper returning an absolute difference image.
+
+    The former fractional-depth implementation was physically unsuitable for
+    PRF decomposition and has intentionally been removed.
+    """
+    return build_difference_image(in_image, out_image)
+
+
+def localize_difference_image(
+    difference_image: np.ndarray,
+    pixel_mask: np.ndarray,
+    target_x: float,
+    target_y: float,
+    pixel_scale_arcsec: float = PIXEL_SCALE_ARCSEC,
+    cos_dec: float = 1.0,
+    core_fraction: float = 0.2,
+) -> Dict[str, float]:
+    """Centroid the positive difference-image core and offset it from target.
+
+    Only pixels above ``core_fraction`` of the maximum positive difference participate so
+    the centroid is not pulled toward noise-dominated periphery. Returns
+    RA/Dec offsets in arcseconds (RA offset uses the provided cos(dec)
+    projection factor) plus the total separation.
+    """
+    valid_mask = np.asarray(pixel_mask, dtype=bool) & np.isfinite(difference_image)
+    differences = difference_image[valid_mask]
+    if differences.size < 3 or float(np.max(differences)) <= 0:
+        return {
+            "ra_offset_arcsec": float("nan"),
+            "dec_offset_arcsec": float("nan"),
+            "offset_arcsec": float("nan"),
+            "n_difference_pixels": 0,
+        }
+    threshold = core_fraction * float(np.max(differences))
+    core_mask = valid_mask & (difference_image >= threshold)
+    yy, xx = np.indices(difference_image.shape, dtype=float)
+    core_differences = difference_image[core_mask]
+    if core_differences.size < MIN_DIFFERENCE_CORE_PIXELS:
+        return {
+            "ra_offset_arcsec": float("nan"),
+            "dec_offset_arcsec": float("nan"),
+            "offset_arcsec": float("nan"),
+            "n_difference_pixels": int(core_differences.size),
+        }
+    weights = core_differences / float(np.sum(core_differences))
+    centroid_x = float(np.sum(xx[core_mask] * weights))
+    centroid_y = float(np.sum(yy[core_mask] * weights))
+    ra_offset = (centroid_x - float(target_x)) * pixel_scale_arcsec * max(cos_dec, 0.01)
+    dec_offset = (centroid_y - float(target_y)) * pixel_scale_arcsec
+    return {
+        "ra_offset_arcsec": round(ra_offset, 4),
+        "dec_offset_arcsec": round(dec_offset, 4),
+        "offset_arcsec": round(math.hypot(ra_offset, dec_offset), 4),
+        "n_difference_pixels": int(np.count_nonzero(core_mask)),
+    }
 
 
 def localize_depth_deficit(
@@ -137,44 +216,12 @@ def localize_depth_deficit(
     cos_dec: float = 1.0,
     core_fraction: float = 0.2,
 ) -> Dict[str, float]:
-    """Centroid the transit depth deficit core and offset it from the target.
-
-    Only pixels above ``core_fraction`` of the maximum depth participate so
-    the centroid is not pulled toward noise-dominated periphery. Returns
-    RA/Dec offsets in arcseconds (RA offset uses the provided cos(dec)
-    projection factor) plus the total separation.
-    """
-    valid_mask = np.asarray(pixel_mask, dtype=bool) & np.isfinite(depth_map)
-    depths = depth_map[valid_mask]
-    if depths.size < 3 or float(np.max(depths)) <= 0:
-        return {
-            "ra_offset_arcsec": float("nan"),
-            "dec_offset_arcsec": float("nan"),
-            "offset_arcsec": float("nan"),
-            "n_depth_pixels": 0,
-        }
-    threshold = core_fraction * float(np.max(depths))
-    core_mask = valid_mask & (depth_map >= threshold)
-    yy, xx = np.indices(depth_map.shape, dtype=float)
-    core_depths = depth_map[core_mask]
-    if core_depths.size < MIN_DEPTH_CORE_PIXELS:
-        return {
-            "ra_offset_arcsec": float("nan"),
-            "dec_offset_arcsec": float("nan"),
-            "offset_arcsec": float("nan"),
-            "n_depth_pixels": int(core_depths.size),
-        }
-    weights = core_depths / float(np.sum(core_depths))
-    centroid_x = float(np.sum(xx[core_mask] * weights))
-    centroid_y = float(np.sum(yy[core_mask] * weights))
-    ra_offset = (centroid_x - float(target_x)) * pixel_scale_arcsec * max(cos_dec, 0.01)
-    dec_offset = (centroid_y - float(target_y)) * pixel_scale_arcsec
-    return {
-        "ra_offset_arcsec": round(ra_offset, 4),
-        "dec_offset_arcsec": round(dec_offset, 4),
-        "offset_arcsec": round(math.hypot(ra_offset, dec_offset), 4),
-        "n_depth_pixels": int(np.count_nonzero(core_mask)),
-    }
+    """Compatibility wrapper for absolute difference-image centroiding."""
+    result = localize_difference_image(
+        depth_map, pixel_mask, target_x, target_y, pixel_scale_arcsec, cos_dec, core_fraction
+    )
+    result["n_depth_pixels"] = result.pop("n_difference_pixels")
+    return result
 
 
 def _header_position(header: Dict[str, Any]) -> Optional[Tuple[float, float]]:
@@ -189,14 +236,14 @@ def _header_position(header: Dict[str, Any]) -> Optional[Tuple[float, float]]:
     return ra, dec
 
 
-def extract_tpf_depth_map(
+def extract_tpf_difference_image(
     cube: Dict[str, Any],
     ephemeris: Dict[str, Any],
     quality_mask: int = QUALITY_HARD_MASK,
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[float], Optional[float], int, int]:
-    """Build an in-transit depth map from one TPF cube.
+    """Build an absolute in/out-transit difference image from one TPF cube.
 
-    Returns (depth_map, pipeline_aperture, target_x, target_y, n_in, n_out) or
+    Returns (difference_image, pipeline_aperture, target_x, target_y, n_in, n_out) or
     (None, None, None, None, 0, 0) when coverage is insufficient.
     """
     try:
@@ -243,7 +290,7 @@ def extract_tpf_depth_map(
 
     in_image = np.nanmedian(flux[in_mask], axis=0)
     out_image = np.nanmedian(flux[out_mask], axis=0)
-    depth_map, _ = build_depth_map(in_image, out_image)
+    difference_image, _ = build_difference_image(in_image, out_image)
 
     position = _header_position(header)
     if position is None:
@@ -255,13 +302,22 @@ def extract_tpf_depth_map(
         target_x = float(np.asarray(target_x))
         target_y = float(np.asarray(target_y))
     return (
-        depth_map,
+        difference_image,
         pipeline,
         target_x,
         target_y,
         int(in_mask.sum()),
         int(out_mask.sum()),
     )
+
+
+def extract_tpf_depth_map(
+    cube: Dict[str, Any],
+    ephemeris: Dict[str, Any],
+    quality_mask: int = QUALITY_HARD_MASK,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[float], Optional[float], int, int]:
+    """Compatibility wrapper returning the corrected absolute difference image."""
+    return extract_tpf_difference_image(cube, ephemeris, quality_mask)
 
 
 def _load_gaia_neighbors(workspace: CandidateWorkspace) -> List[Dict[str, Any]]:
@@ -349,7 +405,7 @@ def _load_archival_gaia_neighbors(
 
 
 def _select_sources(
-    depth_map: np.ndarray,
+    difference_image: np.ndarray,
     pipeline: np.ndarray,
     target_x: float,
     target_y: float,
@@ -407,46 +463,8 @@ def _select_sources(
     return [target_entry] + non_target, cos_dec, PIXEL_SCALE_ARCSEC
 
 
-def _synthetic_tpf_results() -> List[Dict[str, Any]]:
-    """Deterministic demonstration depth map with a known source offset."""
-    rng = np.random.default_rng(seed=11)
-    shape = (11, 11)
-    target_x, target_y = 5.0, 5.0
-    deficit_x, deficit_y = target_x + 0.3, target_y - 0.2
-    sigma = 0.85
-    yy, xx = np.indices(shape, dtype=float)
-    out_image = 2000.0 + 20.0 * np.exp(
-        -((xx - target_x) ** 2 + (yy - target_y) ** 2) / (2.0 * sigma**2)
-    )
-    out_image = out_image + 30.0 * np.exp(
-        -((xx - 3.0) ** 2 + (yy - 6.5) ** 2) / (2.0 * sigma**2)
-    )
-    deficit = 14.0 * np.exp(
-        -((xx - deficit_x) ** 2 + (yy - deficit_y) ** 2) / (2.0 * sigma**2)
-    )
-    rng_gauss = rng.normal(0.0, 1.5, size=shape)
-    in_image = out_image - deficit + rng_gauss
-    out_image = out_image + rng_gauss
-    depth_map, valid = build_depth_map(in_image, out_image)
-    aperture = np.zeros(shape, dtype=int)
-    aperture[2:-2, 2:-2] = 2
-    return [
-        {
-            "sector": 1,
-            "depth_map": depth_map,
-            "valid": valid,
-            "aperture": aperture.astype(bool),
-            "target_x": target_x,
-            "target_y": target_y,
-            "cos_dec": 1.0,
-            "n_in": 60,
-            "n_out": 300,
-        }
-    ]
-
-
-def _fit_one_map(
-    depth_map: np.ndarray,
+def _fit_one_difference_image(
+    difference_image: np.ndarray,
     pipeline: np.ndarray,
     target_x: float,
     target_y: float,
@@ -456,15 +474,15 @@ def _fit_one_map(
     n_out: int,
     sector: int,
 ) -> Dict[str, Any]:
-    pixel_mask = pipeline & np.isfinite(depth_map) & (depth_map != 0)
-    amplitudes, residual, n_pixels = fit_depth_map_prf(
-        depth_map,
+    pixel_mask = pipeline & np.isfinite(difference_image)
+    amplitudes, residual, n_pixels = fit_difference_image_prf(
+        difference_image,
         pixel_mask,
         [src["x_pix"] for src in sources],
         [src["y_pix"] for src in sources],
     )
-    centroid = localize_depth_deficit(
-        depth_map, pipeline, target_x, target_y, cos_dec=cos_dec
+    centroid = localize_difference_image(
+        difference_image, pipeline, target_x, target_y, cos_dec=cos_dec
     )
     if amplitudes is None:
         return {
@@ -475,13 +493,7 @@ def _fit_one_map(
     per_source = {}
     for index, src in enumerate(sources):
         amplitude = float(amplitudes[index]) if amplitudes[index] > 0 else 0.0
-        amplitude_ppm = amplitude * 1e6
         flux_ratio = _finite_float(src.get("flux_ratio"))
-        g_band_limit_ppm = None
-        fit_to_g_band_limit_ratio = None
-        if flux_ratio is not None and flux_ratio > 0.0:
-            g_band_limit_ppm = flux_ratio * 1e6
-            fit_to_g_band_limit_ratio = amplitude_ppm / g_band_limit_ppm
         per_source[str(src["source_id"])] = {
             "g_mag": src["g_mag"],
             "separation_arcsec": src["separation_arcsec"],
@@ -489,37 +501,26 @@ def _fit_one_map(
             "g_band_flux_ratio_vs_target": round(flux_ratio, 8)
             if flux_ratio is not None
             else None,
-            "g_band_full_eclipse_limit_ppm": round(g_band_limit_ppm, 2)
-            if g_band_limit_ppm is not None
-            else None,
-            "fit_to_g_band_limit_ratio": round(fit_to_g_band_limit_ratio, 3)
-            if fit_to_g_band_limit_ratio is not None
-            else None,
-            "depth_amplitude_ppm": round(amplitude_ppm, 2),
+            "difference_flux_amplitude": round(amplitude, 6),
         }
-    target_amplitude = per_source[str(sources[0]["source_id"])]["depth_amplitude_ppm"]
+    target_amplitude = per_source[str(sources[0]["source_id"])]["difference_flux_amplitude"]
     other_amplitudes = [
-        per_source[str(src["source_id"])]["depth_amplitude_ppm"]
+        per_source[str(src["source_id"])]["difference_flux_amplitude"]
         for src in sources[1:]
         if str(src["source_id"]) in per_source
     ]
     max_other = max(other_amplitudes) if other_amplitudes else None
-    fit_dominant_id = max(per_source, key=lambda key: per_source[key]["depth_amplitude_ppm"])
+    fit_dominant_id = max(per_source, key=lambda key: per_source[key]["difference_flux_amplitude"])
     fit_dominant = per_source[fit_dominant_id]
     fit_dominant_is_target = bool(fit_dominant["is_target"])
-    depth_core_resolved = int(centroid["n_depth_pixels"]) >= MIN_DEPTH_CORE_PIXELS
-    g_band_bound_exceeded = bool(
-        not fit_dominant_is_target
-        and fit_dominant.get("fit_to_g_band_limit_ratio") is not None
-        and float(fit_dominant["fit_to_g_band_limit_ratio"]) > 1.0
+    difference_core_resolved = (
+        int(centroid["n_difference_pixels"]) >= MIN_DIFFERENCE_CORE_PIXELS
     )
-    if not depth_core_resolved:
-        source_assignment_status = "unresolved_insufficient_depth_core"
-    elif g_band_bound_exceeded:
-        source_assignment_status = "unresolved_g_band_flux_bound_exceeded"
+    if not difference_core_resolved:
+        source_assignment_status = "unresolved_insufficient_difference_core"
     else:
-        source_assignment_status = "screening_only"
-    source_assignment_interpretable = source_assignment_status == "screening_only"
+        source_assignment_status = "screening_only_uncalibrated_prf"
+    source_assignment_interpretable = False
     ratio = target_amplitude / max_other if max_other is not None and max_other > 0.0 else None
     return {
         "sector": int(sector),
@@ -530,24 +531,19 @@ def _fit_one_map(
         "n_modeled_sources": int(len(sources)),
         "n_modeled_neighbors": int(len(other_amplitudes)),
         "nnls_residual": float(residual) if residual is not None else None,
-        "target_depth_amplitude_ppm": round(target_amplitude, 2),
-        "max_other_depth_amplitude_ppm": round(max_other, 2) if max_other is not None else None,
-        "target_to_max_other_ratio": round(ratio, 3) if ratio is not None else None,
+        "difference_flux_units": "TPF FLUX native units",
+        "target_difference_flux_amplitude": target_amplitude,
+        "max_other_difference_flux_amplitude": max_other,
+        "target_to_max_other_difference_ratio": round(ratio, 3) if ratio is not None else None,
         "source_assignment_status": source_assignment_status,
         "source_assignment_interpretable": source_assignment_interpretable,
         "fit_dominant_source_id": str(fit_dominant_id),
         "fit_dominant_is_target": fit_dominant_is_target,
-        "dominant_source_id": str(fit_dominant_id)
-        if source_assignment_interpretable
-        else None,
-        "dominant_is_target": fit_dominant_is_target
-        if source_assignment_interpretable
-        else None,
-        "ra_offset_arcsec": centroid["ra_offset_arcsec"],
-        "dec_offset_arcsec": centroid["dec_offset_arcsec"],
-        "offset_arcsec": centroid["offset_arcsec"],
-        "n_depth_pixels": centroid["n_depth_pixels"],
-        "per_source_amplitudes_ppm": per_source,
+        "difference_centroid_ra_offset_arcsec": centroid["ra_offset_arcsec"],
+        "difference_centroid_dec_offset_arcsec": centroid["dec_offset_arcsec"],
+        "difference_centroid_offset_arcsec": centroid["offset_arcsec"],
+        "n_difference_pixels": centroid["n_difference_pixels"],
+        "per_source_difference_flux_amplitudes": per_source,
     }
 
 
@@ -558,6 +554,12 @@ def run_prf_localization(
     outputs_dir = workspace.path / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
     ephemeris = load_transit_ephemeris(workspace)
+    required_ephemeris_fields = ("period_days", "epoch_btjd", "duration_days")
+    field_sources = ephemeris.get("field_sources", {})
+    candidate_ephemeris = all(
+        field_sources.get(field) not in (None, "synthetic-demo")
+        for field in required_ephemeris_fields
+    )
     neighbors = _load_gaia_neighbors(workspace)
     source_catalog: Dict[str, Any] = {
         "availability": "available" if neighbors else "unavailable",
@@ -568,50 +570,24 @@ def run_prf_localization(
         neighbors, source_catalog = _load_archival_gaia_neighbors(workspace)
 
     cubes = load_tpf_cubes(workspace)
-    if cubes:
-        source = "candidate-data"
-        synthetic = False
+    if not cubes:
+        source = "not-run-no-candidate-tpf"
+    elif not candidate_ephemeris:
+        source = "not-run-no-candidate-ephemeris"
     else:
-        source = "synthetic-demo"
-        synthetic = True
+        source = "candidate-data"
 
     sector_results: List[Dict[str, Any]] = []
-    if synthetic:
-        for entry in _synthetic_tpf_results():
-            sources = [
-                {
-                    "source_id": "catalog-target",
-                    "x_pix": entry["target_x"],
-                    "y_pix": entry["target_y"],
-                    "g_mag": 0.0,
-                    "flux_ratio": 1.0,
-                    "separation_arcsec": 0.0,
-                    "is_target": True,
-                }
-            ]
-            sector_results.append(
-                _fit_one_map(
-                    entry["depth_map"],
-                    entry["aperture"],
-                    entry["target_x"],
-                    entry["target_y"],
-                    sources,
-                    entry["cos_dec"],
-                    entry["n_in"],
-                    entry["n_out"],
-                    entry["sector"],
-                )
-            )
-    else:
+    if source == "candidate-data":
         try:
             from astropy.wcs import WCS
         except ImportError:  # pragma: no cover - optional dependency
             WCS = None  # type: ignore[assignment]
         for cube in cubes:
-            depth_map, pipeline, target_x, target_y, n_in, n_out = extract_tpf_depth_map(
+            difference_image, pipeline, target_x, target_y, n_in, n_out = extract_tpf_difference_image(
                 cube, ephemeris
             )
-            if depth_map is None:
+            if difference_image is None:
                 continue
             header = cube["header"]
             position = _header_position(header)
@@ -639,7 +615,7 @@ def run_prf_localization(
                 ]
             else:
                 sources, cos_dec, _ = _select_sources(
-                    depth_map,
+                    difference_image,
                     pipeline,
                     float(target_x),
                     float(target_y),
@@ -649,8 +625,8 @@ def run_prf_localization(
                     cos_dec,
                 )
             sector_results.append(
-                _fit_one_map(
-                    depth_map,
+                _fit_one_difference_image(
+                    difference_image,
                     pipeline,
                     float(target_x),
                     float(target_y),
@@ -663,53 +639,54 @@ def run_prf_localization(
             )
 
     completed = [row for row in sector_results if not row.get("skipped", False)]
-    compared = [
-        row
-        for row in completed
-        if row.get("n_modeled_neighbors", 0) > 0
-        and row.get("target_to_max_other_ratio") is not None
-        and row.get("source_assignment_interpretable", False)
+    sectors_with_neighbors = [
+        row for row in completed if row.get("n_modeled_neighbors", 0) > 0
     ]
-    unresolved_depth_core = sum(
+    unresolved_difference_core = sum(
         1
         for row in completed
-        if row.get("source_assignment_status") == "unresolved_insufficient_depth_core"
+        if row.get("source_assignment_status") == "unresolved_insufficient_difference_core"
     )
-    unresolved_g_band_bound = sum(
-        1
+    offsets = [
+        row["difference_centroid_offset_arcsec"]
         for row in completed
-        if row.get("source_assignment_status") == "unresolved_g_band_flux_bound_exceeded"
-    )
-    target_dominant_count = sum(
-        1 for row in compared if row.get("dominant_is_target", False)
-    )
-    offsets = [row["offset_arcsec"] for row in completed if np.isfinite(row["offset_arcsec"])]
+        if np.isfinite(row["difference_centroid_offset_arcsec"])
+    ]
     median_offset = float(np.median(offsets)) if offsets else None
     median_ratio = (
-        float(np.median([row["target_to_max_other_ratio"] for row in compared]))
-        if compared
+        float(
+            np.median(
+                [row["target_to_max_other_difference_ratio"] for row in sectors_with_neighbors]
+            )
+        )
+        if sectors_with_neighbors
         else None
     )
-    if not completed:
+    if source != "candidate-data":
+        status = source
+    elif not completed:
         status = "no_complete_depth_maps"
-    elif unresolved_depth_core:
-        status = "inconclusive_insufficient_depth_core"
-    elif unresolved_g_band_bound:
-        status = "inconclusive_g_band_flux_bound_exceeded"
-    elif not compared:
-        status = "inconclusive_no_competing_sources_modeled"
-    elif target_dominant_count >= 0.5 * len(compared) and (median_ratio or 0.0) > 1.0:
-        status = "target_dominant_among_modeled_sources"
+    elif unresolved_difference_core:
+        status = "inconclusive_insufficient_difference_core"
     else:
-        status = "inconclusive_or_other"
+        status = "inconclusive_uncalibrated_prf"
     payload = {
         "schema_version": "1.0",
         "work_package": "PRF_SOURCE_LOCALIZATION",
         "generated_utc": datetime.now(timezone.utc).isoformat(),
+        "candidate_id": workspace.candidate_id,
         "source": source,
+        "calibration_status": "uncalibrated",
+        "validation_eligible": False,
+        "ephemeris_provenance": {
+            "source": ephemeris.get("source"),
+            "field_sources": {
+                field: field_sources.get(field) for field in required_ephemeris_fields
+            },
+        },
         "method": (
-            "Gaussian-PRF non-negative least-squares fit of in-transit depth "
-            "maps plus depth-deficit centroid offsets"
+            "Gaussian-PRF non-negative least-squares screening of absolute "
+            "out-of-transit minus in-transit difference images"
         ),
         "prf_model": "isotropic Gaussian, FWHM=0.75 TESS pixels",
         "search_radius_arcsec": float(search_radius_arcsec),
@@ -718,20 +695,19 @@ def run_prf_localization(
         "summary": {
             "n_sectors": len(sector_results),
             "n_completed": len(completed),
-            "sectors_with_competing_sources_modeled": len(compared),
-            "sectors_with_unresolved_depth_core": int(unresolved_depth_core),
-            "sectors_with_g_band_flux_bound_exceeded": int(unresolved_g_band_bound),
-            "sectors_target_dominant": int(target_dominant_count),
-            "median_target_to_other_ratio": median_ratio,
-            "median_deficit_offset_arcsec": median_offset,
+            "sectors_with_competing_sources_modeled": len(sectors_with_neighbors),
+            "sectors_with_unresolved_difference_core": int(unresolved_difference_core),
+            "sectors_with_uncalibrated_prf": int(len(completed)),
+            "median_target_to_other_difference_ratio": median_ratio,
+            "median_difference_image_offset_arcsec": median_offset,
             "conclusion": status,
         },
         "caveats": [
             "Gaussian PRF approximation; formal TESS PRF library templates are not used.",
+            "Absolute difference-flux amplitudes are in native TPF units, not transit depths or ppm.",
+            "No covariance, pixel-response, or injected-source calibration supports an automated source assignment.",
+            "Gaia G-band flux ratios are retained only as catalog context, not eclipse-depth constraints.",
             "PRF wings beyond the modeled core cannot exclude a deeply eclipsed distant neighbor.",
-            "Target dominance is never reported when no competing source is modeled.",
-            "A source assignment is unresolved when fewer than three depth-core pixels are available.",
-            "Gaia G-band flux ratios are screening bounds, not exact TESS-band eclipse limits.",
         ],
     }
     output_path = outputs_dir / "prf_localization_results.json"

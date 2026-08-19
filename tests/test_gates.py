@@ -66,6 +66,14 @@ def _templated_repo(tmp_path):
     )
     (tmp_path / "templates/protocols").mkdir(parents=True, exist_ok=True)
     (tmp_path / "templates/tracking").mkdir(parents=True, exist_ok=True)
+    package_dir = tmp_path / "src" / "exonym"
+    package_dir.mkdir(parents=True, exist_ok=True)
+    (package_dir / "__init__.py").write_text('__version__ = "test"\n', encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[build-system]\nrequires = [\"setuptools\"]\nbuild-backend = \"setuptools.build_meta\"\n"
+        "[project]\nname = \"exonym\"\nversion = \"0.0.0\"\n",
+        encoding="utf-8",
+    )
     return tmp_path
 
 
@@ -201,16 +209,18 @@ def test_acquisition_gate_requires_provenance_sidecars(tmp_path):
             {
                 "source_uri": "https://archive.stsci.edu/example",
                 "download_timestamp_utc": "2026-08-04T00:00:00Z",
-                "sha256": "a" * 64,
+                "sha256": hashlib.sha256(b"fits").hexdigest(),
                 "fetched_by": "test",
             }
         ),
         encoding="utf-8",
     )
     assert not gate_errors(candidate)
+    (raw / "lc.fits").write_bytes(b"tampered")
+    assert any("SHA-256 does not match" in error for error in gate_errors(candidate))
 
 
-def test_analysis_gate_requires_fpp_claim(tmp_path):
+def test_analysis_gate_blocks_fpp_claims_until_observed_photometry_vetting(tmp_path):
     candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha")
     claims = candidate.path / "claims"
     claims.mkdir(parents=True, exist_ok=True)
@@ -234,7 +244,7 @@ def test_analysis_gate_requires_fpp_claim(tmp_path):
             {
                 "source_uri": "https://archive.stsci.edu/example",
                 "download_timestamp_utc": "2026-08-04T00:00:00Z",
-                "sha256": "a" * 64,
+                "sha256": hashlib.sha256(b"fits").hexdigest(),
                 "fetched_by": "test",
             }
         ),
@@ -259,7 +269,13 @@ def test_analysis_gate_requires_fpp_claim(tmp_path):
     advance(candidate)
     candidate = _reload(tmp_path)
     assert candidate.metadata["workflow"]["phase"] == "analysis"
-    assert not gate_errors(candidate)
+    errors = gate_errors(candidate)
+    assert errors
+    assert "FPP claims are disabled" in errors[0]
+    with pytest.raises(GateError, match="FPP claims are disabled"):
+        advance(candidate)
+    candidate = _reload(tmp_path)
+    assert candidate.metadata["workflow"]["phase"] == "analysis"
 
 
 @pytest.mark.parametrize("forgery", ("hash", "candidate", "source", "fpp", "path"))
@@ -347,37 +363,18 @@ def _checked_doc(path, items=4):
 
 def _to_review_phase(tmp_path):
     candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha")
-    _checked_doc(candidate.path / "docs" / "01_intake_manifest.md")
-    advance(candidate)
-    _checked_doc(candidate.path / "docs" / "02_feasibility_report.md")
-    _write_novelty_audit(candidate)
-    advance(candidate)
-    raw = candidate.path / "data" / "raw"
-    raw.mkdir(parents=True, exist_ok=True)
-    (raw / "lc.fits").write_bytes(b"fits")
-    (raw / "lc.provenance.json").write_text(
-        json.dumps(
-            {
-                "source_uri": "https://archive.stsci.edu/example",
-                "download_timestamp_utc": "2026-08-04T00:00:00Z",
-                "sha256": "a" * 64,
-                "fetched_by": "test",
-            }
-        ),
-        encoding="utf-8",
+    # Exercise review behavior against a historical workspace that reached the
+    # phase before the FPP claim gate was intentionally disabled.
+    metadata = dict(candidate.metadata)
+    workflow = dict(metadata["workflow"])
+    workflow["phase"] = "review"
+    metadata["workflow"] = workflow
+    (candidate.path / "candidate.json").write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    advance(candidate)
-    _checked_doc(candidate.path / "docs" / "03_spoc_dv_vetting.md")
-    advance(candidate)
-    _checked_doc(candidate.path / "docs" / "04_tfop_sg_followup.md")
-    advance(candidate)
-    claims = candidate.path / "claims"
-    claims.mkdir(parents=True, exist_ok=True)
-    _write_verified_fpp_claim(candidate)
-    advance(candidate)
-    reloaded = _reload(tmp_path)
-    assert reloaded.metadata["workflow"]["phase"] == "review"
-    return reloaded
+    candidate = _reload(tmp_path)
+    _write_novelty_audit(candidate)
+    return _reload(tmp_path)
 
 
 def test_feasibility_gate_rejects_nonconforming_or_ineligible_novelty_audit(tmp_path):
@@ -420,9 +417,8 @@ def test_advance_review_phase_locks_lifecycle(tmp_path):
     assert locked.metadata["lifecycle"]["reason"] == "Review gate passed; lifecycle locked"
     assert locked.metadata["lifecycle"]["state_since"]
 
-    gate_record = json.loads(
-        (candidate.path / "gates" / "gate-006-review.json").read_text(encoding="utf-8")
-    )
+    gate_path = next((candidate.path / "gates").glob("gate-*-review.json"))
+    gate_record = json.loads(gate_path.read_text(encoding="utf-8"))
     assert gate_record["gate"] == "review"
     assert gate_record["result"] == "PASS"
 
@@ -450,25 +446,65 @@ def test_freeze_builds_manifest_and_locks(tmp_path):
     candidate = [c for c in discover_candidates(tmp_path)][0]
     lock = tmp_path / "requirements-lock.txt"
     lock.write_text("numpy==1.26.4\nscipy==1.13.1\n", encoding="utf-8")
+    observed_input = candidate.path / "data" / "raw" / "synthetic-input.fits"
+    observed_input.write_bytes(b"synthetic-observed-photometry")
+    (candidate.path / "scratch" / "temporary.txt").write_text("ephemeral\n", encoding="utf-8")
 
     release_dir = freeze(candidate, version="v1.0.0")
     assert release_dir.is_dir()
     manifest = json.loads((release_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["version"] == "v1.0.0"
     assert manifest["candidate_id"] == "candidate-alpha"
-    assert {entry["path"] for entry in manifest["files"]} == {
+    frozen_paths = {entry["path"] for entry in manifest["files"]}
+    assert {
+        "README.md",
         "requirements.lock.txt",
         "environment.lock.yml",
         "Dockerfile",
         "Apptainer.def",
-    }
+        "source/pyproject.toml",
+        "source/src/exonym/__init__.py",
+        "workspace/candidate/candidate-alpha/candidate.json",
+        "workspace/candidate/candidate-alpha/data/raw/synthetic-input.fits",
+    } <= frozen_paths
     assert all(entry["sha256"] for entry in manifest["files"])
+    assert manifest["replay_status"] == "self-contained-source-and-candidate-evidence-snapshot"
+    assert manifest["source_snapshot"]["path"] == "source"
+    assert manifest["workspace_snapshot"]["candidate_path"] == "workspace/candidate/candidate-alpha"
+    assert "releases" in manifest["workspace_snapshot"]["excluded_paths"]
+    assert not any("scratch/temporary.txt" in path for path in frozen_paths)
+    environment = (release_dir / "environment.lock.yml").read_text(encoding="utf-8")
+    assert '      - "numpy==1.26.4"' in environment
+    assert '      - "-e ./source"' in environment
+    assert ",\n" not in environment
+    assert "COPY source /work/source" in (release_dir / "Dockerfile").read_text(encoding="utf-8")
+    assert "workspace /work/workspace" in (release_dir / "Apptainer.def").read_text(encoding="utf-8")
 
     with pytest.raises(FileExistsError):
         freeze(candidate, version="v1.0.0")
 
 
-@pytest.mark.parametrize("version", ["../escape", "nested/path", "CON", "release."])
+def test_freeze_does_not_create_a_release_directory_before_lock_preflight(tmp_path):
+    candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha")
+
+    with pytest.raises(FileNotFoundError, match="requirements-lock"):
+        freeze(candidate, version="v1.0.0")
+
+    assert not (candidate.path / "releases" / "v1.0.0").exists()
+
+
+def test_freeze_removes_its_staging_directory_when_source_snapshot_preflight_fails(tmp_path):
+    candidate = create_candidate(tmp_path, "candidate-alpha")
+    (tmp_path / "requirements-lock.txt").write_text("numpy==1.26.4\n", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match="pyproject.toml and src"):
+        freeze(candidate, version="v1.0.0")
+
+    assert not (candidate.path / "releases" / "v1.0.0").exists()
+    assert not list((candidate.path / "releases").glob(".v1.0.0.staging-*"))
+
+
+@pytest.mark.parametrize("version", ["../escape", "nested/path", "CON", "com1", "lpt9", "release."])
 def test_freeze_rejects_unsafe_release_versions(tmp_path, version):
     candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha")
     (tmp_path / "requirements-lock.txt").write_text("numpy==1.26.4\n", encoding="utf-8")

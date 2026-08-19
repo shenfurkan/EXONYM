@@ -9,12 +9,13 @@ exists and are always labelled ``synthetic-demo``.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .workspace import CandidateWorkspace
+from .workspace import CandidateWorkspace, validate_signal_suffix
 
 # Generic demonstration ephemeris used only when no candidate ephemeris source
 # exists. These are placeholder values, never target data.
@@ -67,12 +68,19 @@ def load_transit_ephemeris(
     ``outputs/bls_search_results.json``. Falls back to a generic demonstration
     ephemeris labelled ``synthetic-demo`` when nothing readable exists.
     """
+    signal = validate_signal_suffix(signal)
     result: Dict[str, Any] = {
         "period_days": DEMO_PERIOD_DAYS,
         "epoch_btjd": DEMO_EPOCH_BTJD,
         "duration_days": DEMO_DURATION_DAYS,
         "depth_ppm": DEMO_DEPTH_PPM,
         "source": "synthetic-demo",
+        "field_sources": {
+            "period_days": "synthetic-demo",
+            "epoch_btjd": "synthetic-demo",
+            "duration_days": "synthetic-demo",
+            "depth_ppm": "synthetic-demo",
+        },
     }
 
     if signal is not None:
@@ -94,18 +102,23 @@ def load_transit_ephemeris(
             found = False
             if period_value is not None and period_value > 0:
                 result["period_days"] = period_value
+                result["field_sources"]["period_days"] = "candidate-config-signal"
                 found = True
             if epoch_value is not None:
                 result["epoch_btjd"] = epoch_value
+                result["field_sources"]["epoch_btjd"] = "candidate-config-signal"
                 found = True
             if duration_hours_value is not None and duration_hours_value > 0:
                 result["duration_days"] = duration_hours_value / 24.0
+                result["field_sources"]["duration_days"] = "candidate-config-signal"
                 found = True
             if duration_days_value is not None and duration_days_value > 0:
                 result["duration_days"] = duration_days_value
+                result["field_sources"]["duration_days"] = "candidate-config-signal"
                 found = True
             if depth_value is not None and depth_value >= 0:
                 result["depth_ppm"] = depth_value
+                result["field_sources"]["depth_ppm"] = "candidate-config-signal"
                 found = True
             if found:
                 result["source"] = "candidate-config-signal"
@@ -128,24 +141,30 @@ def load_transit_ephemeris(
         depth_value = _first_number(transit, ("depth_ppm", "depth"))
         if period_value is not None and period_value > 0:
             result["period_days"] = period_value
+            result["field_sources"]["period_days"] = "candidate-config"
             result["source"] = "candidate-config"
         if epoch_value is not None:
             result["epoch_btjd"] = epoch_value
+            result["field_sources"]["epoch_btjd"] = "candidate-config"
             result["source"] = "candidate-config"
         if duration_hours_value is not None and duration_hours_value > 0:
             result["duration_days"] = duration_hours_value / 24.0
+            result["field_sources"]["duration_days"] = "candidate-config"
             result["source"] = "candidate-config"
         if duration_days_value is not None and duration_days_value > 0:
             result["duration_days"] = duration_days_value
+            result["field_sources"]["duration_days"] = "candidate-config"
             result["source"] = "candidate-config"
         if depth_value is not None and depth_value >= 0:
             result["depth_ppm"] = depth_value
+            result["field_sources"]["depth_ppm"] = "candidate-config"
             result["source"] = "candidate-config"
         if result["source"] == "candidate-config":
             break
 
     if result["source"] != "candidate-config":
-        bls_path = workspace.path / "outputs" / "bls_search_results.json"
+        suffix = signal if signal is not None else ""
+        bls_path = workspace.path / "outputs" / ("bls_search_results" + suffix + ".json")
         payload = _read_json(bls_path)
         if payload is not None and payload.get("source") != "synthetic-demo":
             period_value = _first_number(payload, ("best_period",))
@@ -154,12 +173,16 @@ def load_transit_ephemeris(
             depth_value = _first_number(payload, ("best_depth_ppm",))
             if period_value is not None and period_value > 0:
                 result["period_days"] = period_value
+                result["field_sources"]["period_days"] = "bls-search"
             if epoch_value is not None:
                 result["epoch_btjd"] = epoch_value
+                result["field_sources"]["epoch_btjd"] = "bls-search"
             if duration_hours_value is not None and duration_hours_value > 0:
                 result["duration_days"] = duration_hours_value / 24.0
+                result["field_sources"]["duration_days"] = "bls-search"
             if depth_value is not None and depth_value >= 0:
                 result["depth_ppm"] = depth_value
+                result["field_sources"]["depth_ppm"] = "bls-search"
             if period_value is not None or epoch_value is not None:
                 result["source"] = "bls-search"
 
@@ -182,7 +205,10 @@ def load_stellar_parameters(workspace: CandidateWorkspace) -> Dict[str, Any]:
     stellar physics should reject ``source != "candidate-data"``.
 
     ``ra_deg``, ``dec_deg``, and ``parallax_mas`` are optional positional
-    fields; their presence or absence does not affect the source label.
+    fields; their presence or absence does not affect the source label.  The
+    optional ``mass_solar_err`` and ``radius_solar_err`` fields retain
+    candidate-supplied symmetric one-sigma uncertainties for inference modules
+    that must propagate stellar-density uncertainty.
     """
     _PHYSICS_FIELDS = ("teff_k", "logg_cgs", "feh", "mass_solar", "radius_solar")
     result: Dict[str, Any] = {
@@ -205,11 +231,20 @@ def load_stellar_parameters(workspace: CandidateWorkspace) -> Dict[str, Any]:
         "logg_cgs": _first_number(payload, ("logg_cgs", "logg", "log_g")),
         "feh": _first_number(payload, ("feh", "metallicity")),
         "mass_solar": _first_number(payload, ("mass_solar", "mass_msun", "mass")),
+        "mass_solar_err": _first_number(
+            payload, ("mass_solar_err", "mass_msun_err", "mass_err", "mass_error")
+        ),
         "radius_solar": _first_number(
             payload, ("radius_solar", "radius_rsun", "radius")
         ),
+        "radius_solar_err": _first_number(
+            payload, ("radius_solar_err", "radius_rsun_err", "radius_err", "radius_error")
+        ),
         "parallax_mas": _first_number(
             payload, ("parallax_mas", "parallax", "plx")
+        ),
+        "parallax_mas_err": _first_number(
+            payload, ("parallax_mas_err", "parallax_err", "parallax_error", "plx_error")
         ),
     }
     for name, value in values.items():
@@ -286,6 +321,15 @@ def _median_bin(
     )
 
 
+def _sector_from_canonical_filename(path: Path) -> Optional[int]:
+    """Return a TESS sector from a canonical product filename, if present."""
+    match = re.search(r"(?:^|[_-])s(?P<sector>\d{1,4})(?=[_.-])", path.name, re.IGNORECASE)
+    if match is None:
+        return None
+    sector_value = int(match.group("sector"))
+    return sector_value if sector_value > 0 else None
+
+
 def load_light_curve_table(
     workspace: CandidateWorkspace,
     max_points: Optional[int] = 4000,
@@ -299,7 +343,10 @@ def load_light_curve_table(
     When ``sectors`` is supplied, only products whose resolved TESS sector is
     in that sequence are returned. Multiple products in one selected sector
     are deduplicated by sorted filename, with the first product retained.
-    Returns None when no readable light curve exists after filtering.
+    ``max_points`` is a per-product cap; accepted sectors are not globally
+    re-binned after concatenation because that would make effective cadence
+    depend on the number of observed sectors. Returns None when no readable
+    light curve exists after filtering.
     """
     roots = (
         workspace.path / "data" / "processed",
@@ -338,19 +385,28 @@ def load_light_curve_table(
             _lc = lk.read(path)
             # Apply the TESS quality bitmask so that momentum-dump, scattered-
             # light, and other flagged cadences are excluded before any
-            # analysis.  The mask is a no-op for synthetic test data that
-            # carries no quality column.
+            # analysis. A malformed quality column makes the product
+            # scientifically unusable; it must never be treated as clean.
             if hasattr(_lc, "quality"):
                 try:
-                    _lc = _lc[_lc.quality.value == 0]
-                except Exception:
-                    pass  # quality attribute present but not filterable; proceed
+                    quality = np.asarray(getattr(_lc.quality, "value", _lc.quality))
+                    cadence_count = np.asarray(_lc.time.value).size
+                    if quality.ndim != 1 or quality.size != cadence_count:
+                        raise ValueError("quality cadence count does not match the light curve")
+                    _lc = _lc[quality == 0]
+                except (AttributeError, TypeError, ValueError, IndexError) as exc:
+                    _warnings.warn(
+                        "skipped {0}: unusable quality column: {1!r}".format(path.name, exc),
+                        stacklevel=2,
+                    )
+                    continue
             light_curve = _lc.remove_nans().normalize()
             time = np.asarray(light_curve.time.value, dtype=float)
             flux = np.asarray(light_curve.flux.value, dtype=float)
             if time.size < 50 or time.size != flux.size:
                 continue
             flux_err = None
+            flux_err_source = "reported"
             try:
                 flux_err = np.asarray(light_curve.flux_err.value, dtype=float)
                 if flux_err.shape != flux.shape:
@@ -363,14 +419,38 @@ def load_light_curve_table(
                     stacklevel=2,
                 )
                 flux_err = None
+            if flux_err is not None and not np.all(np.isfinite(flux_err) & (flux_err > 0)):
+                _warnings.warn(
+                    "flux_err contains non-finite or non-positive values for {0} â€” using MAD estimate".format(
+                        path.name
+                    ),
+                    stacklevel=2,
+                )
+                flux_err = None
+                flux_err_source = "mad-estimate-invalid-reported"
             if flux_err is None:
                 flux_err = np.full_like(flux, _mad_flux_error(flux))
+                if flux_err_source == "reported":
+                    flux_err_source = "mad-estimate"
             sector_value = None
             try:
                 sector_value = int(light_curve.meta.get("SECTOR", 0))
             except (TypeError, ValueError):
                 sector_value = None
             if not sector_value or sector_value <= 0:
+                sector_value = _sector_from_canonical_filename(path)
+            if not sector_value or sector_value <= 0:
+                if requested_sectors is not None:
+                    _warnings.warn(
+                        "skipped {0}: TESS sector cannot be verified from metadata or canonical filename".format(
+                            path.name
+                        ),
+                        stacklevel=2,
+                    )
+                    continue
+                # Ordinary candidate-local analysis can retain an unscoped
+                # product as a separate normalization group. It must never be
+                # mistaken for a requested physical sector in a survey.
                 sector_value = len(tables) + 1
             if requested_sectors is not None and sector_value not in requested_sectors:
                 continue
@@ -393,6 +473,7 @@ def load_light_curve_table(
                         "time": binned[0],
                         "flux": binned[1],
                         "flux_err": binned[2],
+                        "flux_err_source": flux_err_source,
                         "sector": binned[3],
                         "path": path,
                     }
@@ -410,14 +491,11 @@ def load_light_curve_table(
     flux = np.concatenate([table["flux"] for table in tables])
     flux_err = np.concatenate([table["flux_err"] for table in tables])
     sector_values = np.concatenate([table["sector"] for table in tables])
-    if max_points is not None and time.size > max_points:
-        time, flux, flux_err, sector_values = _median_bin(
-            time, flux, flux_err, sector_values, n_bins=max_points
-        )
     return {
         "time": time,
         "flux": flux,
         "flux_err": flux_err,
+        "flux_err_sources": sorted({table["flux_err_source"] for table in tables}),
         "sector": sector_values.astype(int),
         "input_files": [table["path"] for table in tables],
     }

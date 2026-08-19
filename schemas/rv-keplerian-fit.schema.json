@@ -83,14 +83,24 @@
     "diagnostics": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["observation_count", "instrument_count", "degrees_of_freedom", "optimizer", "optimizer_status", "optimizer_message"],
+      "required": ["observation_count", "instrument_count", "degrees_of_freedom", "optimizer", "optimizer_status", "optimizer_message", "kepler_equation_solver"],
       "properties": {
         "observation_count": { "type": "integer", "minimum": 1 },
         "instrument_count": { "type": "integer", "minimum": 1 },
         "degrees_of_freedom": { "type": "integer", "minimum": 1 },
         "optimizer": { "type": "string", "minLength": 1 },
         "optimizer_status": { "type": "integer" },
-        "optimizer_message": { "type": "string", "minLength": 1 }
+        "optimizer_message": { "type": "string", "minLength": 1 },
+        "kepler_equation_solver": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["method", "tolerance_rad", "max_iterations"],
+          "properties": {
+            "method": { "const": "Newton-Raphson with residual convergence check" },
+            "tolerance_rad": { "const": 1e-12 },
+            "max_iterations": { "const": 64 }
+          }
+        }
       }
     },
     "caveat": { "type": "string", "minLength": 1 }
