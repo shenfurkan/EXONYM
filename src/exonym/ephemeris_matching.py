@@ -24,6 +24,8 @@ from .workspace import CandidateWorkspace, validate_signal_suffix
 
 
 SUPPORTED_PROVIDER = "nasa-exoplanet-archive"
+TOI_PROVIDER = "nasa-exoplanet-archive-toi"
+SUPPORTED_PROVIDERS = (SUPPORTED_PROVIDER, TOI_PROVIDER)
 RECORDED_EVIDENCE_PROVIDER = "candidate-recorded-evidence"
 RECORDED_EVIDENCE_FILENAME = "known_signal_ephemerides.json"
 RECORDED_EVIDENCE_SOURCE_KINDS = (
@@ -33,11 +35,41 @@ RECORDED_EVIDENCE_SOURCE_KINDS = (
     "literature",
 )
 _RECORD_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-METHOD = "known-signal-ephemeris-period-epoch-duration-harmonic-v2"
+METHOD = "known-signal-ephemeris-period-epoch-duration-harmonic-v3"
 PERIOD_RELATIVE_TOLERANCE = 0.001
 EPOCH_TOLERANCE_DURATION_MULTIPLIER = 1.0
 DURATION_RELATIVE_TOLERANCE = 0.5
 HARMONIC_FACTORS = (0.5, 1.0, 2.0, 3.0)
+
+# Every automatic source must state its field names, duration unit, and whether
+# the retained epoch is safe to compare with a candidate BJD_TDB ephemeris.
+# No conversion is inferred from a generic "BJD" label.
+_PROVIDER_FIELD_CONTRACTS = {
+    SUPPORTED_PROVIDER: {
+        "period": "pl_orbper",
+        "epoch": "pl_tranmid",
+        "duration": "pl_trandur",
+        "name": ("pl_name", "pl_letter"),
+        "epoch_time_scale": "PER_RECORD_DECLARED_TIME_SCALE",
+        "duration_unit": "hours",
+    },
+    TOI_PROVIDER: {
+        "period": "pl_orbper",
+        "epoch": "pl_tranmid",
+        "duration": "pl_trandurh",
+        "name": ("toi",),
+        "epoch_time_scale": "BJD_UNSPECIFIED",
+        "duration_unit": "hours",
+    },
+    RECORDED_EVIDENCE_PROVIDER: {
+        "period": "pl_orbper",
+        "epoch": "pl_tranmid",
+        "duration": "pl_trandur",
+        "name": ("pl_name",),
+        "epoch_time_scale": "BJD_TDB",
+        "duration_unit": "hours",
+    },
+}
 
 
 def _sha256(path: Path) -> str:
@@ -272,7 +304,7 @@ def _candidate_ephemeris(
 
 def _latest_fresh_snapshots(workspace: CandidateWorkspace) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
     """Return the latest fresh supported snapshots and retained exclusion reasons."""
-    latest: Optional[Tuple[datetime, Path, Dict[str, Any]]] = None
+    latest: Dict[str, Tuple[datetime, Path, Dict[str, Any]]] = {}
     excluded: List[Dict[str, str]] = []
     for manifest_path in sorted((workspace.path / "runs" / "catalog").glob("*/*/query-manifest.json")):
         try:
@@ -280,7 +312,8 @@ def _latest_fresh_snapshots(workspace: CandidateWorkspace) -> Tuple[List[Dict[st
         except (OSError, UnicodeError, ValueError) as exc:
             excluded.append({"path": _relative(workspace, manifest_path), "reason": "invalid-query-manifest: {0}".format(exc)})
             continue
-        if manifest.get("provider") != SUPPORTED_PROVIDER:
+        provider = manifest.get("provider")
+        if not isinstance(provider, str) or provider not in SUPPORTED_PROVIDERS:
             continue
         retrieved_at = _parse_utc(manifest.get("retrieved_at"))
         expires_at = _parse_utc(manifest.get("expires_at"))
@@ -304,29 +337,36 @@ def _latest_fresh_snapshots(workspace: CandidateWorkspace) -> Tuple[List[Dict[st
             continue
         if (
             snapshot.get("candidate_id") != workspace.candidate_id
-            or snapshot.get("provider") != SUPPORTED_PROVIDER
+            or snapshot.get("provider") != provider
             or snapshot.get("retrieval_id") != manifest.get("retrieval_id")
             or snapshot.get("status") != "available"
             or not isinstance(snapshot.get("records"), list)
         ):
             excluded.append({"path": _relative(workspace, snapshot_path), "reason": "snapshot-provenance-mismatch"})
             continue
-        if latest is None or retrieved_at > latest[0]:
-            latest = (retrieved_at, manifest_path, snapshot)
-    if latest is None:
+        if provider not in latest or retrieved_at > latest[provider][0]:
+            latest[provider] = (retrieved_at, manifest_path, snapshot)
+    if not latest:
         return [], excluded
-    _, manifest_path, snapshot = latest
-    snapshot_path = manifest_path.with_name("snapshot.json")
-    return [
-        {
-            "provider": SUPPORTED_PROVIDER,
-            "retrieval_id": snapshot["retrieval_id"],
-            "query_manifest": {"path": _relative(workspace, manifest_path), "sha256": _sha256(manifest_path)},
-            "snapshot": {"path": _relative(workspace, snapshot_path), "sha256": _sha256(snapshot_path)},
-            "native_time_scale": "BJD_TDB",
-            "records": snapshot["records"],
-        }
-    ], excluded
+    snapshots: List[Dict[str, Any]] = []
+    for provider in SUPPORTED_PROVIDERS:
+        selected = latest.get(provider)
+        if selected is None:
+            continue
+        _, manifest_path, snapshot = selected
+        snapshot_path = manifest_path.with_name("snapshot.json")
+        contract = _PROVIDER_FIELD_CONTRACTS[provider]
+        snapshots.append(
+            {
+                "provider": provider,
+                "retrieval_id": snapshot["retrieval_id"],
+                "query_manifest": {"path": _relative(workspace, manifest_path), "sha256": _sha256(manifest_path)},
+                "snapshot": {"path": _relative(workspace, snapshot_path), "sha256": _sha256(snapshot_path)},
+                "native_time_scale": contract["epoch_time_scale"],
+                "records": snapshot["records"],
+            }
+        )
+    return snapshots, excluded
 
 
 def _fresh_recorded_evidence(workspace: CandidateWorkspace) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
@@ -404,6 +444,15 @@ def _field(record: Mapping[str, Any], name: str) -> Optional[float]:
     return _finite(lowered.get(name.lower()))
 
 
+def _epoch_time_scale(provider: str, source: Mapping[str, Any], contract: Mapping[str, Any]) -> str:
+    """Return BJD_TDB only when the provider row itself declares that scale."""
+    if provider != SUPPORTED_PROVIDER:
+        return str(contract["epoch_time_scale"])
+    lowered = {str(key).lower(): value for key, value in source.items()}
+    declared = str(lowered.get("pl_tsystemref", "")).strip().upper().replace(" ", "_")
+    return "BJD_TDB" if declared == "BJD_TDB" else "BJD_UNSPECIFIED"
+
+
 def _phase_delta_days(first_epoch: float, second_epoch: float, period_days: float) -> float:
     return abs(((first_epoch - second_epoch + 0.5 * period_days) % period_days) - 0.5 * period_days)
 
@@ -411,11 +460,17 @@ def _phase_delta_days(first_epoch: float, second_epoch: float, period_days: floa
 def _compare_record(
     candidate: Mapping[str, Any], source: Mapping[str, Any], record_index: int, snapshot: Mapping[str, Any]
 ) -> Optional[Dict[str, Any]]:
-    period = _field(source, "pl_orbper")
+    provider = str(snapshot["provider"])
+    contract = _PROVIDER_FIELD_CONTRACTS.get(provider)
+    if contract is None:
+        return None
+    period = _field(source, str(contract["period"]))
     if period is None or period <= 0:
         return None
-    epoch_bjd = _field(source, "pl_tranmid")
-    duration_hours = _field(source, "pl_trandur")
+    raw_epoch_bjd = _field(source, str(contract["epoch"]))
+    epoch_time_scale = _epoch_time_scale(provider, source, contract)
+    epoch_bjd = raw_epoch_bjd if epoch_time_scale == "BJD_TDB" else None
+    duration_hours = _field(source, str(contract["duration"]))
     candidate_period = float(candidate["period_days"])
     candidate_epoch = float(candidate["epoch_btjd"])
     candidate_duration = float(candidate["duration_hours"])
@@ -430,7 +485,7 @@ def _compare_record(
         if epoch_btjd is not None
         else None
     )
-    epoch_match = epoch_delta is not None and epoch_delta <= epoch_tolerance
+    epoch_match = epoch_delta <= epoch_tolerance if epoch_delta is not None else None
     duration_ratio = duration_hours / candidate_duration if duration_hours is not None and candidate_duration > 0 else None
     duration_compatible = (
         abs(duration_ratio - 1.0) <= DURATION_RELATIVE_TOLERANCE
@@ -438,14 +493,17 @@ def _compare_record(
         else None
     )
     return {
-        "provider": str(snapshot["provider"]),
+        "provider": provider,
         "retrieval_id": snapshot["retrieval_id"],
         "snapshot_path": snapshot["snapshot"]["path"],
         "snapshot_sha256": snapshot["snapshot"]["sha256"],
         "source_record_index": record_index,
-        "source_name": str(source.get("pl_name", source.get("pl_letter", ""))) or None,
+        "source_name": next(
+            (str(source.get(field, "")) for field in contract["name"] if str(source.get(field, ""))), None
+        ),
         "known_period_days": period,
         "known_epoch_bjd_tdb": epoch_bjd,
+        "known_epoch_time_scale": epoch_time_scale,
         "known_duration_hours": duration_hours,
         "period_ratio_known_over_candidate": ratio,
         "nearest_harmonic_factor": harmonic,
@@ -453,10 +511,10 @@ def _compare_record(
         "period_harmonic_match": period_harmonic_match,
         "epoch_phase_delta_days": epoch_delta,
         "epoch_tolerance_days": epoch_tolerance if epoch_bjd is not None else None,
-        "epoch_match": epoch_match if epoch_bjd is not None else None,
+        "epoch_match": epoch_match,
         "duration_ratio_known_over_candidate": duration_ratio,
         "duration_compatible": duration_compatible,
-        "review_required": bool(period_harmonic_match and (epoch_match or epoch_match is None)),
+        "review_required": bool(period_harmonic_match and (epoch_match is True or epoch_match is None)),
     }
 
 
@@ -507,7 +565,7 @@ def match_known_signal_ephemerides(
         "status": status,
         "candidate_ephemeris": candidate,
         "configuration": {
-            "supported_providers": [SUPPORTED_PROVIDER, RECORDED_EVIDENCE_PROVIDER],
+            "supported_providers": [SUPPORTED_PROVIDER, TOI_PROVIDER, RECORDED_EVIDENCE_PROVIDER],
             "period_relative_tolerance": PERIOD_RELATIVE_TOLERANCE,
             "epoch_tolerance_duration_multiplier": EPOCH_TOLERANCE_DURATION_MULTIPLIER,
             "duration_relative_tolerance": DURATION_RELATIVE_TOLERANCE,
@@ -517,8 +575,8 @@ def match_known_signal_ephemerides(
         "excluded_retrievals": excluded,
         "comparisons": comparisons,
         "limitations": (
-            "This compares fresh retained NASA Exoplanet Archive pscomppars rows and fresh candidate-recorded BJD_TDB evidence with raw-artifact hashes. "
-            "No match does not establish novelty; unrecorded eclipsing-binary, variable-star, ExoFOP, and literature ephemeris checks remain required."
+            "This compares fresh retained NASA Exoplanet Archive pscomppars rows, TOI rows with period/duration-only epoch handling, and fresh candidate-recorded BJD_TDB evidence with raw-artifact hashes. "
+            "No match does not establish novelty; automatic eclipsing-binary, variable-star, ExoFOP, and literature ephemeris retrievals remain unavailable."
         ),
     }
     output.write_text(json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")

@@ -308,8 +308,8 @@ def test_known_signal_match_is_hash_bound_and_review_required(tmp_path):
     candidate = _candidate(tmp_path)
     _write_candidate_ephemeris(candidate)
     body = (
-        b"pl_orbper,pl_tranmid,pl_trandur,pl_name\n"
-        b"3.0,2457001.0,2.0,Known Planet b\n"
+        b"pl_orbper,pl_tranmid,pl_trandur,pl_tsystemref,pl_name\n"
+        b"3.0,2457001.0,2.0,BJD_TDB,Known Planet b\n"
     )
     fetch_catalog(candidate, ["nasa-exoplanet-archive"], _transport(200, body))
 
@@ -318,9 +318,33 @@ def test_known_signal_match_is_hash_bound_and_review_required(tmp_path):
 
     assert record["status"] == "review-required-known-signal-match"
     assert record["comparisons"][0]["period_harmonic_match"] is True
+    assert record["comparisons"][0]["known_epoch_time_scale"] == "BJD_TDB"
     assert record["comparisons"][0]["epoch_match"] is True
     assert record["comparisons"][0]["review_required"] is True
     assert record["source_snapshots"][0]["snapshot"]["sha256"]
+    assert _audit(tmp_path).ok
+
+
+def test_known_signal_toi_retrieval_limits_epoch_matching_without_bjd_tdb_contract(tmp_path):
+    candidate = _candidate(tmp_path)
+    _write_candidate_ephemeris(candidate)
+    body = b"toi,tic_id,pl_orbper,pl_tranmid,pl_trandurh\n100.01,123456789,3.0,2457001.0,2.0\n"
+    fetch_catalog(candidate, ["nasa-exoplanet-archive-toi"], _transport(200, body))
+
+    output = match_known_signal_ephemerides(candidate)
+    record = json.loads(output.read_text(encoding="utf-8"))
+
+    assert record["status"] == "review-required-period-harmonic"
+    assert record["configuration"]["supported_providers"] == [
+        "nasa-exoplanet-archive", "nasa-exoplanet-archive-toi", "candidate-recorded-evidence"
+    ]
+    assert record["source_snapshots"][0]["provider"] == "nasa-exoplanet-archive-toi"
+    comparison = record["comparisons"][0]
+    assert comparison["known_epoch_bjd_tdb"] is None
+    assert comparison["known_epoch_time_scale"] == "BJD_UNSPECIFIED"
+    assert comparison["epoch_match"] is None
+    assert comparison["duration_compatible"] is True
+    assert comparison["review_required"] is True
     assert _audit(tmp_path).ok
 
 

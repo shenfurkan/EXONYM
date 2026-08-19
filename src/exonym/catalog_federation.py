@@ -132,6 +132,17 @@ PROVIDERS: Dict[str, ProviderSpec] = {
         "NASA Exoplanet Archive source-native units are retained.",
         False,
     ),
+    "nasa-exoplanet-archive-toi": ProviderSpec(
+        "nasa-exoplanet-archive-toi",
+        "https://exoplanetarchive.ipac.caltech.edu/",
+        "NASA Exoplanet Archive TOI table current service",
+        "NASA Exoplanet Archive, Caltech/IPAC.",
+        "nea-toi-by-tic-v1",
+        "csv",
+        "BJD declared by the source table; no BJD_TDB conversion is inferred",
+        "NASA Exoplanet Archive TOI period and duration remain source-native. Epochs are retained but require an explicit time-standard contract before epoch matching.",
+        False,
+    ),
     "irsa": ProviderSpec(
         "irsa",
         "https://irsa.ipac.caltech.edu/",
@@ -328,7 +339,21 @@ def _request_for(spec: ProviderSpec, candidate: CandidateWorkspace) -> CatalogRe
         )
     if spec.name == "nasa-exoplanet-archive":
         tic = identifier.split()[1]
-        query = "SELECT * FROM pscomppars WHERE tic_id = {0}".format(tic)
+        query = (
+            "SELECT pl_name,pl_orbper,pl_tranmid,pl_trandur,pl_tsystemref "
+            "FROM pscomppars WHERE tic_id = {0}"
+        ).format(tic)
+        params = {"query": query, "format": "csv"}
+        return CatalogRequest(
+            "GET", "https://exoplanetarchive.ipac.caltech.edu/TAP/sync?" + urlencode(params),
+            {"Accept": "text/csv"}, None, {"tic": tic},
+        )
+    if spec.name == "nasa-exoplanet-archive-toi":
+        tic = identifier.split()[1]
+        query = (
+            "SELECT toi,tic_id,pl_orbper,pl_tranmid,pl_trandurh "
+            "FROM toi WHERE tic_id = {0}"
+        ).format(tic)
         params = {"query": query, "format": "csv"}
         return CatalogRequest(
             "GET", "https://exoplanetarchive.ipac.caltech.edu/TAP/sync?" + urlencode(params),

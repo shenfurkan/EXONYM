@@ -1106,6 +1106,49 @@ def test_generated_stellar_activity_artifact_is_schema_valid(tmp_path, monkeypat
     assert _audit(repo).ok
 
 
+def test_generated_phase_curve_artifact_is_schema_valid(tmp_path, monkeypatch):
+    from exonym import phasecurve
+
+    repo = _make_repo(tmp_path)
+    candidate = load_candidate(repo, "candidate-alpha")
+    outputs = candidate.path / "outputs"
+    ephemeris = {
+        "period_days": 3.0,
+        "epoch_btjd": 100.0,
+        "duration_days": 0.1,
+        "source": "candidate-data",
+        "field_sources": {},
+    }
+    (outputs / "mcmc_transit_fit.json").write_text(
+        json.dumps(
+            {
+                "source": "candidate-data",
+                "model": "batman quadratic limb darkening, stellar-density locked, eccentric orbit",
+                "ephemeris": {"period_days": 3.0, "epoch_btjd": 100.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    chain = np.tile(
+        np.array([0.1, 0.0, 0.2, 1.0, -8.0, 0.3, 0.3, 0.2**0.5, 0.0]),
+        (32, 1),
+    )
+    np.save(str(outputs / "mcmc_transit_fit_chain.npy"), chain)
+    table = phasecurve._synthetic_phase_curve_table()
+    table.pop("_duration_days")
+    table.pop("_epoch_btjd")
+    table.pop("_period_days")
+    monkeypatch.setattr(phasecurve, "load_light_curve_table", lambda _workspace: table)
+    monkeypatch.setattr(phasecurve, "load_transit_ephemeris", lambda _workspace: ephemeris)
+
+    output = phasecurve.run_phase_curve_search(candidate)
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "1.1"
+    assert payload["secondary_eclipse_control"]["mode"] == "eccentric-posterior-marginalized-box-control"
+    assert _audit(repo).ok
+
+
 def test_exofop_prior_manifest_outside_candidate_is_rejected(tmp_path):
     # Arrange
     repo = _make_repo(tmp_path)

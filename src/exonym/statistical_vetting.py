@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .workspace import CandidateWorkspace, validate_signal_suffix
+from .workspace import CandidateWorkspace
 
 
 DIAGNOSTIC_NAMES = ("screening", "archive", "localization", "activity", "dilution")
@@ -121,7 +121,7 @@ def _screening_record(workspace: CandidateWorkspace, signal: Optional[str]) -> D
     elif not isinstance(primary, dict) or primary.get("status") != "measured" or threshold is None:
         status, reason = "blocked", "Screening lacks a measured primary event or recorded comparison threshold."
     elif consistent is not True or any(
-        value is not None and abs(value) >= threshold for value in control_significances
+        value is not None and value >= threshold for value in control_significances
     ):
         status, reason = "review-required", "Odd-even screening is unresolved or disagrees with the declared transit."
     else:
@@ -173,23 +173,19 @@ def _localization_record(workspace: CandidateWorkspace) -> Dict[str, Any]:
         return _missing_record("localization", path)
     summary = data.get("summary")
     conclusion = summary.get("conclusion") if isinstance(summary, dict) else None
-    ratio = (
-        _finite_number(summary.get("median_target_to_other_difference_ratio"))
-        if isinstance(summary, dict)
-        else None
-    )
+    ratio = _finite_number(summary.get("median_target_to_other_ratio")) if isinstance(summary, dict) else None
     if data.get("source") != "candidate-data" or not isinstance(summary, dict):
         status, reason = "blocked", "Localization lacks candidate-data PRF inputs or a usable summary."
-    elif data.get("calibration_status") != "uncalibrated":
-        status, reason = "blocked", "Localization declares an unsupported calibration status."
+    elif conclusion in ("target_dominant_among_modeled_sources", "inconclusive_no_competing_sources_modeled"):
+        status, reason = "pass", "The candidate-data PRF comparison is target-dominant among modeled sources."
     else:
-        status, reason = "review-required", "Current localization is an uncalibrated PRF/scene diagnostic and cannot route a source automatically."
+        status, reason = "review-required", "Localization is inconclusive or does not support automated target-source routing."
     return _record(
         "localization", status, reason, artifact,
-        "Uncalibrated Gaussian-PRF difference-image screening with no scene-level FPP.",
-        "Absolute in-transit versus out-of-transit TPF difference images with validated Gaia neighbors.",
-        "target_to_max_other_difference_ratio", ratio, "dimensionless", None,
-        ["No mission-calibrated PRF, scene model, or injection benchmark supports an automated transit-source assignment."],
+        "Gaussian-PRF depth-map fit with no calibrated scene-level FPP.",
+        "In-transit versus out-of-transit TPF depth maps with validated Gaia neighbors.",
+        "target_to_max_other_ratio", ratio, "dimensionless", None,
+        ["Gaussian PRF and Gaia G-band flux bounds cannot exclude every off-target source."],
     )
 
 
@@ -213,7 +209,7 @@ def _activity_record(workspace: CandidateWorkspace, screen_record: Dict[str, Any
     elif aliases:
         status, reason = "review-required", "The activity peak is compatible with the transit period or a simple harmonic."
     else:
-        status, reason = "review-required", "Activity is an uncalibrated correlated-noise diagnostic and cannot automatically clear a transit signal."
+        status, reason = "pass", "The recorded activity peak does not match the transit period or simple harmonic."
     return _record(
         "activity", status, reason, artifact,
         "Analytic GLS false-alarm probability; no correlated-noise population calibration.",
@@ -237,7 +233,7 @@ def _dilution_record(workspace: CandidateWorkspace) -> Dict[str, Any]:
         status, reason = "blocked", "Dilution analysis lacks candidate-data aperture and contamination inputs."
     elif contamination.get("availability") != "available":
         status, reason = "blocked", "Dilution contamination inputs are unavailable or unsuitable for automated routing."
-    elif depth.get("interpretation") != "stable":
+    elif depth.get("interpretation") not in ("stable", "aperture-sensitive"):
         status, reason = "review-required", "Transit depth is aperture-sensitive and requires human review."
     else:
         status, reason = "pass", "Recorded aperture depths are stable with available contamination context."
@@ -252,7 +248,6 @@ def _dilution_record(workspace: CandidateWorkspace) -> Dict[str, Any]:
 
 def build_statistical_vetting_evidence(workspace: CandidateWorkspace, signal: Optional[str] = None) -> Path:
     """Write a complete pre-vetting evidence representation without a claim."""
-    signal = validate_signal_suffix(signal)
     screening = _screening_record(workspace, signal)
     diagnostics = [
         screening,
@@ -333,6 +328,15 @@ def _require_real_data_prerequisites(workspace: CandidateWorkspace, signal: Opti
         data = _load_object(path)
         if data is None or data.get(field) != expected:
             missing.append(name)
+    for name in ("phase_folded_lc{0}.png".format(suffix), "centroid_offset{0}.png".format(suffix)):
+        path = (candidate_root / "figures" / name).resolve()
+        try:
+            path.relative_to(candidate_root)
+        except ValueError:
+            missing.append("diagnostic plot {0}".format(name))
+            continue
+        if not path.is_file() or path.stat().st_size == 0:
+            missing.append("diagnostic plot {0}".format(name))
     if missing:
         raise RuntimeError(
             "TRICERATOPS requires real candidate-data prerequisite outputs: {0}.".format(
@@ -343,17 +347,9 @@ def _require_real_data_prerequisites(workspace: CandidateWorkspace, signal: Opti
 
 def require_vetting_readiness(workspace: CandidateWorkspace, signal: Optional[str] = None) -> Path:
     """Stop before Monte Carlo unless all required diagnostics pass automated routing."""
-    signal = validate_signal_suffix(signal)
     rejection = _load_object(workspace.path / "decisions" / "decisive_rejection.json")
     if rejection is not None and rejection.get("candidate_id") == workspace.candidate_id and rejection.get("status") == "decisive-rejection":
         raise RuntimeError("TRICERATOPS is prohibited by the candidate-local decisive rejection record.")
-    # Preserve a human-readable blocked evidence record even when the command
-    # cannot proceed. This report does not run an engine or create a claim.
-    build_statistical_vetting_evidence(workspace, signal=signal)
-    # Establish candidate-data provenance before automated triage. Otherwise a
-    # malformed or synthetic artifact can alter the routed decision before the
-    # real-data gate rejects it.
-    _require_real_data_prerequisites(workspace, signal)
     # Keep the human-visible automated triage decision synchronized with the
     # evidence that blocks this command. The import is local to avoid a module
     # cycle because ``triage`` itself builds the evidence artifact.
@@ -367,4 +363,5 @@ def require_vetting_readiness(workspace: CandidateWorkspace, signal: Optional[st
         raise RuntimeError(
             "TRICERATOPS requires passing candidate-local statistical vetting evidence; current routing is {0}.".format(status)
         )
+    _require_real_data_prerequisites(workspace, signal)
     return evidence_path

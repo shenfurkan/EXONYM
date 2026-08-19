@@ -11,7 +11,7 @@
     "artifacts": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/artifact"}}
   },
   "$defs": {
-    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"}, "provider": {"enum": ["mast", "gaia", "simbad", "vizier", "nasa-exoplanet-archive", "irsa", "ztf", "exofop", "lamost-dr11", "smoka", "mast-hubble-jwst"]},
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"}, "provider": {"enum": ["mast", "gaia", "simbad", "vizier", "nasa-exoplanet-archive", "nasa-exoplanet-archive-toi", "irsa", "ztf", "exofop", "lamost-dr11", "smoka", "mast-hubble-jwst"]},
     "artifact": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "role"], "properties": {"path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "role": {"type": "string", "minLength": 1}}}
   }
 }
