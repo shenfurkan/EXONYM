@@ -102,6 +102,18 @@ def test_release_snapshot_is_checked_for_inventory_and_hash_integrity(tmp_path):
     assert any(violation.rule == "release-snapshot-hash-mismatch" for violation in report.violations)
 
 
+def test_release_snapshot_rejects_tampered_detached_manifest_digest(tmp_path):
+    repo = _make_repo(tmp_path)
+    _prepare_freeze_source(repo)
+    candidate = load_candidate(repo, "candidate-alpha")
+    release = freeze(candidate, version="v1.0.0")
+
+    (release / "manifest.sha256").write_text("0" * 64 + "  manifest.json\n", encoding="ascii")
+    report = _audit(repo)
+
+    assert any(violation.rule == "release-manifest-digest-mismatch" for violation in report.violations)
+
+
 def test_release_staging_directory_is_flagged(tmp_path):
     repo = _make_repo(tmp_path)
     staging = repo / "candidate" / "candidate-alpha" / "releases" / ".v1.0.0.staging-leftover"

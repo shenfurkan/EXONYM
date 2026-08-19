@@ -1,9 +1,10 @@
 import hashlib
 import json
+import shutil
 
 import pytest
 
-from exonym.freeze import freeze
+from exonym.freeze import ReleaseVerificationError, freeze, verify_release
 from exonym.gatekeeper import GateError, advance, gate_errors, next_phase, set_lifecycle_state
 from exonym.tagging import add_tags, filter_candidates, has_tag
 from exonym.tracking import candidate_telemetry, overall_progress, parse_checklist
@@ -443,6 +444,7 @@ def test_tagging_add_and_filter(tmp_path):
 
 def test_freeze_builds_manifest_and_locks(tmp_path):
     create_candidate(_templated_repo(tmp_path), "candidate-alpha")
+    shutil.copytree("src", tmp_path / "src", dirs_exist_ok=True)
     candidate = [c for c in discover_candidates(tmp_path)][0]
     lock = tmp_path / "requirements-lock.txt"
     lock.write_text("numpy==1.26.4\nscipy==1.13.1\n", encoding="utf-8")
@@ -468,7 +470,8 @@ def test_freeze_builds_manifest_and_locks(tmp_path):
         "workspace/candidate/candidate-alpha/data/raw/synthetic-input.fits",
     } <= frozen_paths
     assert all(entry["sha256"] for entry in manifest["files"])
-    assert manifest["replay_status"] == "self-contained-source-and-candidate-evidence-snapshot"
+    assert manifest["schema"] == "exonym-freeze-3"
+    assert manifest["replay_status"] == "integrity-checked-source-import-and-workspace-load"
     assert manifest["source_snapshot"]["path"] == "source"
     assert manifest["workspace_snapshot"]["candidate_path"] == "workspace/candidate/candidate-alpha"
     assert "releases" in manifest["workspace_snapshot"]["excluded_paths"]
@@ -479,15 +482,47 @@ def test_freeze_builds_manifest_and_locks(tmp_path):
     assert ",\n" not in environment
     assert "COPY source /work/source" in (release_dir / "Dockerfile").read_text(encoding="utf-8")
     assert "workspace /work/workspace" in (release_dir / "Apptainer.def").read_text(encoding="utf-8")
+    assert "--no-build-isolation" in (release_dir / "Dockerfile").read_text(encoding="utf-8")
+    assert (release_dir / "manifest.sha256").read_text(encoding="ascii").endswith("  manifest.json\n")
+    assert manifest["requirements_lock"]["format"] == "fully-pinned-requirements"
+    assert manifest["requirements_lock"]["package_count"] == 2
+
+    replay = verify_release(candidate, version="v1.0.0")
+    assert replay["candidate_id"] == "candidate-alpha"
+    assert replay["checked_file_count"] == len(frozen_paths)
+    assert replay["replay"]["candidate_id"] == "candidate-alpha"
 
     with pytest.raises(FileExistsError):
         freeze(candidate, version="v1.0.0")
+
+
+def test_verify_release_rejects_a_tampered_detached_manifest_digest(tmp_path):
+    create_candidate(_templated_repo(tmp_path), "candidate-alpha")
+    shutil.copytree("src", tmp_path / "src", dirs_exist_ok=True)
+    candidate = load_candidate(tmp_path, "candidate-alpha")
+    (tmp_path / "requirements-lock.txt").write_text("numpy==1.26.4\n", encoding="utf-8")
+
+    release_dir = freeze(candidate, version="v1.0.0")
+    (release_dir / "manifest.sha256").write_text("0" * 64 + "  manifest.json\n", encoding="ascii")
+
+    with pytest.raises(ReleaseVerificationError, match="detached SHA-256"):
+        verify_release(candidate, version="v1.0.0")
 
 
 def test_freeze_does_not_create_a_release_directory_before_lock_preflight(tmp_path):
     candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha")
 
     with pytest.raises(FileNotFoundError, match="requirements-lock"):
+        freeze(candidate, version="v1.0.0")
+
+    assert not (candidate.path / "releases" / "v1.0.0").exists()
+
+
+def test_freeze_rejects_a_non_exact_requirements_lock(tmp_path):
+    candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha")
+    (tmp_path / "requirements-lock.txt").write_text("numpy>=1.26\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="exact distribution==version"):
         freeze(candidate, version="v1.0.0")
 
     assert not (candidate.path / "releases" / "v1.0.0").exists()

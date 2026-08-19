@@ -84,8 +84,10 @@ def test_cli_full_lifecycle(tmp_path, capsys):
 
     assert main(root + ["tag", "candidate-alpha", "sg1-cleared"]) == 0
     assert main(root + ["freeze", "candidate-alpha", "--version", "v1.0.0"]) == 0
+    assert main(root + ["verify-release", "candidate-alpha", "--version", "v1.0.0"]) == 0
     assert main(root + ["verify"]) == 0
     output = capsys.readouterr().out
+    assert '"checked_file_count"' in output
     assert "ISOLATION: PASS" in output
 
 

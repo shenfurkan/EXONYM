@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
@@ -283,14 +284,20 @@ def _validate_release_bundle(report: IsolationReport, release_dir: Path, candida
     if not isinstance(manifest, dict):
         report.add(manifest_path, "release-manifest-invalid", "release manifest must be a JSON object")
         return
-    if manifest.get("schema") != "exonym-freeze-2":
-        report.add(manifest_path, "release-manifest-invalid", "release manifest schema must be exonym-freeze-2")
+    manifest_schema = manifest.get("schema")
+    if manifest_schema not in ("exonym-freeze-2", "exonym-freeze-3"):
+        report.add(manifest_path, "release-manifest-invalid", "release manifest schema must be exonym-freeze-2 or exonym-freeze-3")
     if manifest.get("version") != release_dir.name:
         report.add(manifest_path, "release-manifest-invalid", "release manifest version does not match its directory")
     if manifest.get("candidate_id") != candidate_id:
         report.add(manifest_path, "release-manifest-invalid", "release manifest candidate_id does not match its workspace")
-    if manifest.get("replay_status") != "self-contained-source-and-candidate-evidence-snapshot":
-        report.add(manifest_path, "release-manifest-invalid", "release does not declare a self-contained replay snapshot")
+    expected_replay_status = (
+        "integrity-checked-source-import-and-workspace-load"
+        if manifest_schema == "exonym-freeze-3"
+        else "self-contained-source-and-candidate-evidence-snapshot"
+    )
+    if manifest.get("replay_status") != expected_replay_status:
+        report.add(manifest_path, "release-manifest-invalid", "release does not declare its required replay boundary")
 
     source_snapshot = manifest.get("source_snapshot")
     workspace_snapshot = manifest.get("workspace_snapshot")
@@ -312,6 +319,41 @@ def _validate_release_bundle(report: IsolationReport, release_dir: Path, candida
         report.add(manifest_path, "release-snapshot-missing", "release snapshot has no requirements lock")
     elif manifest.get("requirements_lock_sha256") != _file_sha256(lock_path):
         report.add(manifest_path, "release-snapshot-hash-mismatch", "requirements lock hash does not match the release manifest")
+
+    digest_path = release_dir / "manifest.sha256"
+    if manifest_schema == "exonym-freeze-3":
+        if not digest_path.is_file() or digest_path.is_symlink():
+            report.add(manifest_path, "release-manifest-digest-missing", "release has no detached manifest.sha256 digest")
+        else:
+            try:
+                digest_fields = digest_path.read_text(encoding="ascii").split()
+            except (OSError, UnicodeError) as exc:
+                report.add(digest_path, "release-manifest-digest-invalid", "detached manifest digest is unreadable: {0}".format(exc))
+            else:
+                if (
+                    len(digest_fields) != 2
+                    or digest_fields[1] != "manifest.json"
+                    or re.fullmatch(r"[0-9a-f]{64}", digest_fields[0]) is None
+                ):
+                    report.add(digest_path, "release-manifest-digest-invalid", "detached manifest digest must contain '<sha256>  manifest.json'")
+                elif digest_fields[0] != _file_sha256(manifest_path):
+                    report.add(digest_path, "release-manifest-digest-mismatch", "detached manifest digest does not match manifest.json")
+        lock_metadata = manifest.get("requirements_lock")
+        if (
+            not lock_path.is_file()
+            or not isinstance(lock_metadata, dict)
+            or lock_metadata.get("format") != "fully-pinned-requirements"
+            or not isinstance(lock_metadata.get("package_count"), int)
+            or lock_metadata.get("package_count") <= 0
+            or lock_metadata.get("sha256") != _file_sha256(lock_path)
+        ):
+            report.add(manifest_path, "release-manifest-invalid", "release does not record a valid fully pinned lock inventory")
+        source_project = release_dir / "source" / "pyproject.toml"
+        if (
+            not source_project.is_file()
+            or manifest.get("source_pyproject_toml_sha256") != _file_sha256(source_project)
+        ):
+            report.add(manifest_path, "release-snapshot-hash-mismatch", "frozen source package definition hash does not match the release manifest")
 
     files = manifest.get("files")
     if not isinstance(files, list):
@@ -340,7 +382,7 @@ def _validate_release_bundle(report: IsolationReport, release_dir: Path, candida
     actual_paths = {
         path.relative_to(release_dir).as_posix()
         for path in release_dir.rglob("*")
-        if path.is_file() and path.name != "manifest.json"
+        if path.is_file() and path.name not in ("manifest.json", "manifest.sha256")
     }
     if expected_paths != actual_paths:
         report.add(manifest_path, "release-inventory-mismatch", "release manifest inventory does not match bundle contents")

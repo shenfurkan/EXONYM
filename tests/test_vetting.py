@@ -802,6 +802,39 @@ def test_prf_localization_requires_a_competing_source_for_target_dominance(tmp_p
     assert report["sector_results"] == []
 
 
+def test_tpf_loader_skips_unverified_sector_and_uses_canonical_sector_name(tmp_path):
+    from astropy.io import fits
+
+    from exonym.inputs import load_tpf_cubes
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "tpf-sector-test")
+    raw = workspace.path / "data" / "raw"
+    cadence_count = 60
+    pixels = fits.BinTableHDU.from_columns(
+        [
+            fits.Column(name="TIME", format="D", array=np.arange(cadence_count, dtype=float)),
+            fits.Column(name="QUALITY", format="J", array=np.zeros(cadence_count, dtype=np.int32)),
+            fits.Column(
+                name="FLUX",
+                format="4E",
+                dim="(2,2)",
+                array=np.ones((cadence_count, 2, 2), dtype=np.float32),
+            ),
+        ]
+    )
+    aperture = fits.ImageHDU(data=np.ones((2, 2), dtype=np.int16))
+    for filename in ("unverified_tp.fits", "s0030_tp.fits"):
+        fits.HDUList([fits.PrimaryHDU(), pixels, aperture]).writeto(raw / filename)
+
+    with pytest.warns(UserWarning, match="sector cannot be verified"):
+        cubes = load_tpf_cubes(workspace)
+
+    assert len(cubes) == 1
+    assert cubes[0]["path"].name == "s0030_tp.fits"
+    assert cubes[0]["sector"] == 30
+
+
 def test_prf_nnls_assigns_difference_flux_to_target():
     from exonym.localization import fit_difference_image_prf, gaussian_prf_kernel
 

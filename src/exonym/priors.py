@@ -138,7 +138,7 @@ def fetch_exofop_priors(workspace: CandidateWorkspace) -> List[Path]:
     if not tic_id:
         raise ValueError("candidate lacks a TIC identifier")
 
-    request = urllib.request.Request(EXOFOP_TOI_CSV_URL, headers={"User-Agent": "exonym/1.1.0"})
+    request = urllib.request.Request(EXOFOP_TOI_CSV_URL, headers={"User-Agent": "exonym/1.2.0"})
     with urllib.request.urlopen(request, timeout=30) as response:
         if response.status != 200:
             raise RuntimeError("ExoFOP returned status {0}".format(response.status))

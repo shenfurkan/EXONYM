@@ -47,7 +47,7 @@ def _mast_product_uri(row: object) -> str:
 def ingest_products(
     workspace: CandidateWorkspace,
     products: Sequence[Product],
-    fetched_by: str = "exonym-ingest/1.1.0",
+    fetched_by: str = "exonym-ingest/1.2.0",
 ) -> List[Path]:
     """Copy products into ``data/raw/`` and write provenance sidecars.
 

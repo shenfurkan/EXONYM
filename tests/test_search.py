@@ -390,9 +390,10 @@ def test_run_bls_on_candidate_with_real_data(tmp_path):
         "TIMEUNIT": "BJD",
         "BJDREFI": 2457000,
         "BJDREFF": 0.0,
+        "SECTOR": 30,
     }
     lk.LightCurve(time=time, flux=flux, flux_err=np.full_like(flux, 0.001), meta=meta).to_fits(
-        path=raw / "test_lc.fits", overwrite=True
+        path=raw / "s0030_lc.fits", overwrite=True
     )
 
     out = run_bls_on_candidate(workspace)
@@ -405,7 +406,7 @@ def test_run_bls_on_candidate_with_real_data(tmp_path):
     assert payload["statistic"]["uncertainty_source"] == ["reported"]
     manifest = json.loads((workspace.path / "outputs" / "bls_search_manifest.json").read_text())
     assert manifest["source"] == "candidate-data"
-    assert manifest["inputs"][0]["path"] == "data/raw/test_lc.fits"
+    assert manifest["inputs"][0]["path"] == "data/raw/s0030_lc.fits"
     assert len(manifest["inputs"][0]["sha256"]) == 64
     assert manifest["configuration"]["uncertainty_source"] == ["reported"]
     assert manifest["runtime"] == {

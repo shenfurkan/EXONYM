@@ -501,6 +501,8 @@ def load_tpf_cubes(workspace: CandidateWorkspace) -> List[Dict[str, Any]]:
 
     Each entry has ``path``, ``sector``, ``time``, ``quality``, ``flux``
     (n_time x n_y x n_x), ``aperture`` and ``header`` (primary header dict).
+    TPFs without a positive sector in their primary header or canonical file
+    name are skipped rather than assigned an inferred sector number.
     """
     roots = (
         workspace.path / "data" / "processed",
@@ -529,6 +531,8 @@ def load_tpf_cubes(workspace: CandidateWorkspace) -> List[Dict[str, Any]]:
     except ImportError:  # pragma: no cover - optional dependency
         return []
 
+    import warnings as _warnings
+
     cubes: List[Dict[str, Any]] = []
     for path in fits_files:
         try:
@@ -551,7 +555,15 @@ def load_tpf_cubes(workspace: CandidateWorkspace) -> List[Dict[str, Any]]:
                         if sector_value:
                             break
                 if not sector_value or sector_value <= 0:
-                    sector_value = len(cubes) + 1
+                    sector_value = _sector_from_canonical_filename(path)
+                if not sector_value or sector_value <= 0:
+                    _warnings.warn(
+                        "skipped {0}: TESS sector cannot be verified from metadata or canonical filename".format(
+                            path.name
+                        ),
+                        stacklevel=2,
+                    )
+                    continue
                 if flux.shape[0] == time.size and time.size >= 50:
                     cubes.append(
                         {

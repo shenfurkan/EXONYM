@@ -184,7 +184,7 @@ class ArchivalVettingService:
                 req = urllib.request.Request(
                     url,
                     headers={
-                        "User-Agent": "exonym-archive/1.1.0 (astronomy-research-framework)",
+                        "User-Agent": "exonym-archive/1.2.0 (astronomy-research-framework)",
                         "Accept": "application/json",
                     },
                 )

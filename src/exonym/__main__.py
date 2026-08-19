@@ -8,6 +8,7 @@ Commands:
   advance  Validate the current gate and promote the workflow phase
   tag      Attach metadata tags to a candidate record
   freeze   Build a reproducibility bundle under releases/<version>/
+  verify-release Verify a frozen bundle and replay its offline load boundary
   search   Run a BLS transit search on candidate light curve data
   screen   Run fixed-ephemeris photometric consistency checks
   plot     Generate diagnostic vetting figures for a candidate
@@ -35,7 +36,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from . import __version__
-from .freeze import freeze
+from .freeze import freeze, verify_release
 from .gatekeeper import GateError, advance
 from .isolation import format_report, run_audit
 from .tagging import add_tags, filter_candidates
@@ -250,6 +251,12 @@ def _build_parser() -> argparse.ArgumentParser:
     freeze_parser = commands.add_parser("freeze", help="Build a reproducibility bundle.")
     freeze_parser.add_argument("candidate_id")
     freeze_parser.add_argument("--version", help="Release version directory name.")
+
+    verify_release_parser = commands.add_parser(
+        "verify-release", help="Verify bundle integrity and replay its offline source/workspace load."
+    )
+    verify_release_parser.add_argument("candidate_id")
+    verify_release_parser.add_argument("--version", required=True, help="Release version directory name.")
 
     ingest_parser = commands.add_parser(
         "ingest", help="Download SPOC products and record provenance."
@@ -722,6 +729,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "freeze":
             release_dir = freeze(candidate, version=args.version)
             print(release_dir.relative_to(repository_root).as_posix())
+            return 0
+
+        if args.command == "verify-release":
+            _print_json(verify_release(candidate, version=args.version))
             return 0
 
         if args.command == "ingest":

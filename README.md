@@ -39,7 +39,7 @@ Independent discovery starts with a TIC target that has no assigned TOI or cTOI.
 | Evidence traceability | Inputs, derived artifacts, decisions, phase-gate records, and lifecycle events are stored in the candidate workspace. |
 | Schema-bound records | Candidate metadata, provenance sidecars, and scientific claims are checked against JSON Schema 2020-12 definitions. |
 | Sequential review | A seven-phase workflow prevents a candidate from skipping intake, feasibility, acquisition, vetting, follow-up, analysis, or final review. |
-| Reproducibility metadata | Release bundles capture environment definitions, dependency locks, a manifest, and source-control metadata. They are not automatic full data archives. |
+| Reproducibility release | Release bundles carry a full candidate evidence snapshot, frozen source, an exact-version dependency closure, a content manifest, and a detached manifest digest. Their offline replay check does not re-run scientific engines or remote services. |
 
 ### Why the name EXONYM?
 
@@ -307,7 +307,7 @@ The following descriptions document the implemented procedures, not an abstract 
 
 `exonym search --engine bls` uses Astropy's weighted Box Least Squares implementation. It fits a box-shaped periodic transit model using normalized per-cadence flux uncertainties when they are usable; otherwise it records a robust-scatter fallback in the result and manifest. The reported `snr` is the fitted transit depth divided by its formal BLS depth uncertainty.
 
-Candidate photometry is accepted only when its TESS sector is present in product metadata or a canonical filename. The loader skips unscoped products instead of inventing a sector label, so sector-specific baselines and survey scopes cannot silently use guessed metadata.
+Candidate light-curve and TPF photometry are accepted only when their TESS sector is present in product metadata or a canonical filename. Loaders skip unscoped products instead of inventing a sector label, so sector-specific baselines, survey scopes, and pixel-localization summaries cannot silently use guessed metadata.
 
 The search grid is set from the observed time baseline and trial duration, so the `n_periods` setting requests at least that density but cannot make the grid coarser than the baseline-duration resolution criterion. A retained peak must contain at least two observed transit-event windows. The blind command uses a fixed three-hour duration unless a survey supplies its declared duration grid; `best_duration_hours` therefore describes the selected box-model duration, not a recovered physical transit duration.
 
@@ -426,9 +426,9 @@ Use the framework to organize and test evidence. Do not treat it as an automatic
 
 ## Reproducibility, testing, and release records
 
-`exonym freeze <candidate-id> --version <version>` creates a release directory below `candidate/<candidate-id>/releases/`. The bundle captures dependency and container definitions, a manifest, source-control metadata, and a metadata hash. It requires `requirements-lock.txt` at the repository root.
+`exonym freeze <candidate-id> --version <version>` creates a release directory below `candidate/<candidate-id>/releases/`. It copies the candidate workspace (including raw inputs, derived outputs, claims, and candidate-local documents) except recursive prior releases and `scratch/`; it also copies the package source, schemas, templates, exact-version dependency lock, and Docker/Apptainer definitions. `requirements-lock.txt` is a CPython 3.9/Windows resolved dependency closure and must be regenerated in a dedicated environment whenever `pyproject.toml` changes.
 
-Freezing does not copy the full candidate workspace, raw FITS data, derived outputs, or claims into the release directory. Before calling a release reproducible, check that the source inputs, candidate records, and external-data retrieval conditions are still available and documented.
+`manifest.json` inventories every payload file by size and SHA-256. Its separate `manifest.sha256` file binds the manifest itself without a circular self-hash. Run `exonym verify-release <candidate-id> --version <version>` to validate both layers, validate the lock metadata, and launch a fresh Python 3.9 process that imports the frozen source and loads the frozen candidate workspace. This is an offline replay smoke test, not a rerun of scientific engines, network retrievals, or external services; before calling a release scientifically reproducible, record and retain those external inputs and execution conditions as well.
 
 Run focused tests while making an ordinary change, and run the full suite before a work-package integration:
 
