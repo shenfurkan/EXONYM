@@ -458,6 +458,8 @@ def _scan_candidate_reparse_points(report: IsolationReport, candidate_root: Path
         directory = Path(current)
         next_directories: List[str] = []
         for name in sorted(directory_names):
+            if name in EXCLUDED_DIRECTORY_NAMES:
+                continue
             path = directory / name
             if is_reparse_point(path):
                 report.add(path, "symlink-or-reparse-point", "not permitted in candidate workspaces")
