@@ -4,7 +4,7 @@
   "title": "Candidate-local Stellar Activity Diagnostic",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "work_package", "generated_utc", "source", "transit_mask_status", "method", "period_search_range_days", "rotation_period_days", "rotation_period_std_days", "modulation_amplitude_ppm", "n_segments", "segments", "caveat"],
+  "required": ["schema_version", "work_package", "generated_utc", "source", "method", "period_search_range_days", "rotation_period_days", "rotation_period_std_days", "modulation_amplitude_ppm", "n_segments", "segments", "caveat"],
   "properties": {
     "schema_version": {"const": "1.0"},
     "work_package": {"const": "STELLAR_ACTIVITY"},
@@ -27,7 +27,7 @@
   },
   "anyOf": [
     {"required": ["best_false_alarm_probability"]},
-    {"required": ["best_analytic_white_noise_false_alarm_probability", "scientific_status", "harmonic_persistence", "validation_eligible"]}
+    {"required": ["best_analytic_white_noise_false_alarm_probability", "scientific_status", "harmonic_persistence", "validation_eligible", "transit_mask_status"]}
   ],
   "$defs": {
     "segment": {
