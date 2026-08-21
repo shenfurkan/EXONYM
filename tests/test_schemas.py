@@ -1200,7 +1200,7 @@ def test_generated_stellar_activity_artifact_is_schema_valid(tmp_path, monkeypat
             "duration_days": "candidate-data",
         },
     }
-    monkeypatch.setattr(activity, "load_light_curve_table", lambda _workspace: table)
+    monkeypatch.setattr(activity, "load_light_curve_table", lambda *_args, **_kwargs: table)
     monkeypatch.setattr(activity, "load_transit_ephemeris", lambda _workspace: ephemeris)
 
     output = activity.run_stellar_activity(candidate)
@@ -1243,7 +1243,7 @@ def test_generated_phase_curve_artifact_is_schema_valid(tmp_path, monkeypatch):
     table.pop("_duration_days")
     table.pop("_epoch_btjd")
     table.pop("_period_days")
-    monkeypatch.setattr(phasecurve, "load_light_curve_table", lambda _workspace: table)
+    monkeypatch.setattr(phasecurve, "load_light_curve_table", lambda *_args, **_kwargs: table)
     monkeypatch.setattr(phasecurve, "load_transit_ephemeris", lambda _workspace: ephemeris)
 
     output = phasecurve.run_phase_curve_search(candidate)

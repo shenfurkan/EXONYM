@@ -8,6 +8,7 @@ binding placeholder identifiers. This module contains no target constants.
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -267,6 +268,29 @@ def validate_metadata(metadata: Dict[str, Any], candidate_id: str) -> None:
         raise ValueError("invalid publication state")
 
 
+def _parse_finite_float(value: str) -> float:
+    """Parse one metadata number without allowing an infinite value."""
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite JSON number")
+    return parsed
+
+
+def _reject_nonfinite_json_constant(value: str) -> object:
+    """Reject non-standard JSON constants in candidate metadata."""
+    raise ValueError("non-finite JSON constant: {0}".format(value))
+
+
+def _reject_duplicate_json_keys(pairs: Sequence[Tuple[str, object]]) -> Dict[str, object]:
+    """Reject duplicate metadata keys rather than applying last-key-wins semantics."""
+    result: Dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key: {0}".format(key))
+        result[key] = value
+    return result
+
+
 def create_candidate(
     repository_root: Path,
     candidate_id: str,
@@ -308,13 +332,26 @@ def load_candidate(repository_root: Path, candidate_id: str) -> CandidateWorkspa
     normalized_id = validate_candidate_id(candidate_id)
     path = _candidate_path(repository_root, normalized_id)
     metadata_path = path / METADATA_FILENAME
+    from .isolation import is_reparse_point
+
+    if (path.exists() and is_reparse_point(path)) or (
+        metadata_path.exists() and is_reparse_point(metadata_path)
+    ):
+        raise ValueError("candidate workspace contains a symlink or reparse point")
     if not metadata_path.is_file():
         raise FileNotFoundError("candidate metadata not found: {0}".format(metadata_path))
 
     try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError("invalid candidate metadata: {0}".format(metadata_path)) from exc
+        metadata = json.loads(
+            metadata_path.read_text(encoding="utf-8"),
+            parse_float=_parse_finite_float,
+            parse_constant=_reject_nonfinite_json_constant,
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            "invalid candidate metadata: {0}: {1}".format(metadata_path, exc)
+        ) from exc
     validate_metadata(metadata, normalized_id)
     return CandidateWorkspace(repository_root, normalized_id, path, metadata)
 

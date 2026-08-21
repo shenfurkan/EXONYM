@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -77,6 +78,14 @@ def _reject_json_constant(value: str) -> object:
     raise ValueError("non-finite JSON constant: {0}".format(value))
 
 
+def _parse_finite_json_float(value: str) -> float:
+    """Parse one JSON number while rejecting an overflowing non-finite value."""
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite JSON number")
+    return parsed
+
+
 def _unique_json_object(pairs: Sequence[Tuple[str, object]]) -> Dict[str, object]:
     """Parse a JSON object only when every field name is unique."""
     result: Dict[str, object] = {}
@@ -95,6 +104,69 @@ def _load_provenance_schema(workspace: CandidateWorkspace) -> object:
         raise RuntimeError("provenance schema is unavailable: {0}".format(exc)) from exc
 
 
+def _raw_product_provenance_error(
+    workspace: CandidateWorkspace, product: Path, schema: object
+) -> Optional[str]:
+    """Return one reason a raw FITS product lacks usable acquisition provenance."""
+    workspace_root = workspace.path.resolve()
+    raw_root = workspace_root / "data" / "raw"
+    product_path = Path(product)
+    if not product_path.is_absolute():
+        product_path = workspace_root / product_path
+    if _has_workspace_reparse_point(workspace_root, product_path):
+        return "product path crosses a symlink or reparse point"
+    try:
+        resolved_product = product_path.resolve()
+        resolved_product.relative_to(workspace_root)
+        resolved_product.relative_to(raw_root)
+    except (OSError, ValueError):
+        return "product is outside data/raw"
+    if (
+        not resolved_product.is_file()
+        or resolved_product.suffix.lower() not in (".fits", ".fz")
+    ):
+        return "product is not a raw FITS/FZ file"
+    sidecar = product_path.with_name(product_path.stem + ".provenance.json")
+    if _has_workspace_reparse_point(workspace_root, sidecar):
+        return "sidecar path crosses a symlink or reparse point"
+    if not sidecar.is_file():
+        return "missing sidecar"
+    try:
+        sidecar.resolve().relative_to(workspace_root)
+    except (OSError, ValueError):
+        return "sidecar is outside the candidate workspace"
+    try:
+        import jsonschema
+
+        record = json.loads(
+            sidecar.read_text(encoding="utf-8"),
+            parse_float=_parse_finite_json_float,
+            parse_constant=_reject_json_constant,
+            object_pairs_hook=_unique_json_object,
+        )
+        jsonschema.validate(record, schema, format_checker=jsonschema.FormatChecker())
+    except ImportError:
+        return "provenance schema validation is unavailable: jsonschema is not installed"
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError, jsonschema.ValidationError) as exc:
+        return "invalid sidecar ({0})".format(str(exc).splitlines()[0])
+    except jsonschema.SchemaError as exc:
+        return "provenance schema is invalid: {0}".format(exc.message)
+    if not isinstance(record, dict) or record.get("sha256") != _sha256_file(resolved_product):
+        return "sidecar SHA-256 does not match product bytes"
+    return None
+
+
+def has_valid_raw_product_provenance(
+    workspace: CandidateWorkspace, product: Path
+) -> bool:
+    """Return whether one raw FITS product has schema-valid, hash-matched provenance."""
+    try:
+        schema = _load_provenance_schema(workspace)
+    except RuntimeError:
+        return False
+    return _raw_product_provenance_error(workspace, product, schema) is None
+
+
 def _gate_provenance_ready(workspace: CandidateWorkspace) -> Tuple[bool, str]:
     """Require schema-valid, hash-matched sidecars for every raw FITS product."""
     raw_root = workspace.path / "data" / "raw"
@@ -103,33 +175,14 @@ def _gate_provenance_ready(workspace: CandidateWorkspace) -> Tuple[bool, str]:
     if not fits_files:
         return False, "data/raw contains no FITS products; acquisition gate not met"
     try:
-        import jsonschema
-    except ImportError:
-        return False, "provenance schema validation is unavailable: jsonschema is not installed"
-    try:
         schema = _load_provenance_schema(workspace)
     except RuntimeError as exc:
         return False, str(exc)
     errors: List[str] = []
     for product in fits_files:
-        sidecar = product.with_name(product.stem + ".provenance.json")
-        if not sidecar.is_file():
-            errors.append("{0}: missing sidecar".format(product.name))
-            continue
-        try:
-            record = json.loads(
-                sidecar.read_text(encoding="utf-8"),
-                parse_constant=_reject_json_constant,
-                object_pairs_hook=_unique_json_object,
-            )
-            jsonschema.validate(record, schema, format_checker=jsonschema.FormatChecker())
-        except (OSError, UnicodeError, ValueError, json.JSONDecodeError, jsonschema.ValidationError) as exc:
-            errors.append("{0}: invalid sidecar ({1})".format(product.name, str(exc).splitlines()[0]))
-            continue
-        except jsonschema.SchemaError as exc:
-            return False, "provenance schema is invalid: {0}".format(exc.message)
-        if not isinstance(record, dict) or record.get("sha256") != _sha256_file(product):
-            errors.append("{0}: sidecar SHA-256 does not match product bytes".format(product.name))
+        error = _raw_product_provenance_error(workspace, product, schema)
+        if error is not None:
+            errors.append("{0}: {1}".format(product.name, error))
     if errors:
         return False, "raw provenance failures: {0}".format("; ".join(errors[:5]))
     return True, "{0} raw products with schema-valid hash-matched sidecars".format(len(fits_files))
@@ -163,6 +216,30 @@ def _parse_utc_timestamp(value: object) -> Optional[datetime]:
     if parsed.tzinfo is None:
         return None
     return parsed.astimezone(timezone.utc)
+
+
+def _has_workspace_reparse_point(workspace_root: Path, relative_path: Path) -> bool:
+    """Reject a candidate path that crosses a symlink, junction, or traversal."""
+    from .isolation import is_reparse_point
+
+    if is_reparse_point(workspace_root):
+        return True
+    path = Path(relative_path)
+    if path.is_absolute():
+        try:
+            relative_path = path.relative_to(workspace_root)
+        except ValueError:
+            return True
+    else:
+        relative_path = path
+    if any(part == ".." for part in relative_path.parts):
+        return True
+    current = workspace_root
+    for part in relative_path.parts:
+        current = current / part
+        if is_reparse_point(current):
+            return True
+    return False
 
 
 def _gate_novelty_evidence(
@@ -203,6 +280,8 @@ def _gate_novelty_evidence(
             or relative_path.parts[:3] != ("data", "external", "novelty")
         ):
             return False, "eligible novelty audit evidence path is outside the novelty evidence area"
+        if _has_workspace_reparse_point(workspace_root, relative_path):
+            return False, "eligible novelty audit evidence path crosses a symlink or reparse point"
         resolved_path = (workspace_root / relative_path).resolve()
         try:
             resolved_path.relative_to(workspace_root)
@@ -242,6 +321,7 @@ def _gate_novelty_audit(workspace: CandidateWorkspace) -> Tuple[bool, str]:
     try:
         audit = json.loads(
             audit_path.read_text(encoding="utf-8"),
+            parse_float=_parse_finite_json_float,
             parse_constant=_reject_json_constant,
             object_pairs_hook=_unique_json_object,
         )

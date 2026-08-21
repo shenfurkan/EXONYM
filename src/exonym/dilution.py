@@ -165,35 +165,6 @@ def _finite_float(value: Any) -> Optional[float]:
     return numeric if math.isfinite(numeric) else None
 
 
-def _load_gaia_neighbor_rows(workspace: CandidateWorkspace) -> List[Dict[str, Any]]:
-    """Read optional Gaia neighbor rows from the external data directory."""
-    path = workspace.path / "data" / "external" / "gaia_neighbors.csv"
-    if not path.is_file():
-        return []
-    try:
-        import pandas as pd
-    except ImportError:  # pragma: no cover - optional dependency
-        return []
-    try:
-        frame = pd.read_csv(path)
-    except Exception:
-        return []
-    rows: List[Dict[str, Any]] = []
-    for _, row in frame.iterrows():
-        try:
-            rows.append(
-                {
-                    "g_mag": float(row.get("phot_g_mean_mag", np.nan)),
-                    "separation_arcsec": float(row.get("separation_arcsec", 0.0)),
-                    "flux_ratio": row.get("flux_ratio_vs_target"),
-                    "is_target": str(row.get("is_target_match", "")).lower() == "true",
-                }
-            )
-        except (TypeError, ValueError):
-            continue
-    return rows
-
-
 def _load_archival_gaia_neighbor_rows(
     workspace: CandidateWorkspace,
 ) -> Tuple[List[Dict[str, Any]], Optional[float], Dict[str, Any]]:
@@ -288,7 +259,7 @@ def run_dilution_sensitivity(workspace: CandidateWorkspace) -> Path:
     outputs_dir = workspace.path / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
 
-    cubes = load_tpf_cubes(workspace)
+    cubes = load_tpf_cubes(workspace, require_raw_provenance=True)
     if not cubes:
         raise RuntimeError("dilution sensitivity requires observed candidate target-pixel data")
     ephemeris = load_transit_ephemeris(workspace)
@@ -299,16 +270,9 @@ def run_dilution_sensitivity(workspace: CandidateWorkspace) -> Path:
     ):
         raise RuntimeError("dilution sensitivity requires a complete candidate-derived transit ephemeris")
     source = "candidate-data"
-    neighbor_rows = _load_gaia_neighbor_rows(workspace)
-    target_g_mag: Optional[float] = None
-    contamination_metadata: Dict[str, Any] = {
-        "availability": "available" if neighbor_rows else "unavailable",
-        "source": "data/external/gaia_neighbors.csv",
-    }
-    if not neighbor_rows:
-        neighbor_rows, target_g_mag, contamination_metadata = _load_archival_gaia_neighbor_rows(
-            workspace
-        )
+    neighbor_rows, target_g_mag, contamination_metadata = _load_archival_gaia_neighbor_rows(
+        workspace
+    )
 
     aperture_rows: List[Dict[str, Any]] = []
     for cube in cubes:

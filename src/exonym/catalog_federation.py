@@ -22,6 +22,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
+from .archive import load_validated_archival_report
 from .workspace import CandidateWorkspace
 
 CATALOG_STATUSES = (
@@ -293,13 +294,16 @@ def _gaia_source_id(candidate: CandidateWorkspace) -> str:
 
 def _candidate_coordinates(candidate: CandidateWorkspace) -> Mapping[str, str]:
     """Read finite candidate-local coordinates without inventing an astrometric prior."""
-    report_path = candidate.path / "outputs" / "archival_vetting_report.json"
+    report = load_validated_archival_report(candidate)
+    if report is None:
+        raise ValueError(
+            "catalog retrieval requires an owned, validated successful archival report"
+        )
     try:
-        report = json.loads(report_path.read_text(encoding="utf-8"))
-        coordinates = report.get("target_coordinates") if isinstance(report, dict) else None
+        coordinates = report.get("target_coordinates")
         ra_value = float(coordinates["ra_deg"])
         dec_value = float(coordinates["dec_deg"])
-    except (KeyError, OSError, TypeError, UnicodeError, ValueError):
+    except (KeyError, TypeError, ValueError):
         raise ValueError(
             "{0} retrieval requires finite coordinates in outputs/archival_vetting_report.json"
             .format("catalog")

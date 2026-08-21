@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .inputs import BTJD_TIME_SYSTEM, is_manifest_bound_bls_result
+from .inputs import BTJD_TIME_SYSTEM, _read_json, is_manifest_bound_bls_result
 from .workspace import CandidateWorkspace, validate_signal_suffix
 
 
@@ -33,11 +33,7 @@ def _sha256(path: Path) -> str:
 
 
 def _load_object(path: Path) -> Optional[Dict[str, Any]]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError):
-        return None
-    return payload if isinstance(payload, dict) else None
+    return _read_json(path)
 
 
 def _finite_number(value: object) -> Optional[float]:
@@ -99,6 +95,34 @@ def _missing_record(name: str, path: Path) -> Dict[str, Any]:
     )
 
 
+def _screening_matches_detected_bls(
+    workspace: CandidateWorkspace, ephemeris: object, signal: Optional[str]
+) -> bool:
+    """Require screening to use the exact current hash-bound BLS ephemeris."""
+    if not isinstance(ephemeris, dict):
+        return False
+    suffix = ".{0}".format(signal.lstrip(".")) if signal else ""
+    result_path = workspace.path / "outputs" / "bls_search_results{0}.json".format(suffix)
+    result = _load_object(result_path)
+    if result is None or not is_manifest_bound_bls_result(workspace, result_path, result, signal):
+        return False
+    pairs = (
+        (ephemeris.get("period_days"), result.get("best_period")),
+        (ephemeris.get("epoch_btjd"), result.get("best_epoch")),
+        (ephemeris.get("duration_hours"), result.get("best_duration_hours")),
+    )
+    for used, measured in pairs:
+        used_value = _finite_number(used)
+        measured_value = _finite_number(measured)
+        if (
+            used_value is None
+            or measured_value is None
+            or not math.isclose(used_value, measured_value, rel_tol=1e-12, abs_tol=1e-12)
+        ):
+            return False
+    return True
+
+
 def _screening_record(workspace: CandidateWorkspace, signal: Optional[str]) -> Dict[str, Any]:
     suffix = ".{0}".format(signal.lstrip(".")) if signal else ""
     path = workspace.path / "outputs" / "fixed_ephemeris_screen{0}.json".format(suffix)
@@ -151,6 +175,8 @@ def _screening_record(workspace: CandidateWorkspace, signal: Optional[str]) -> D
         status, reason = "blocked", "Screening is not a candidate-data artifact owned by this workspace."
     elif not isinstance(ephemeris, dict) or ephemeris.get("epoch_time_system") != BTJD_TIME_SYSTEM:
         status, reason = "blocked", "Screening does not declare a BTJD_TDB ephemeris."
+    elif not _screening_matches_detected_bls(workspace, ephemeris, signal):
+        status, reason = "blocked", "Screening ephemeris is not the current hash-bound BLS result."
     elif not complete_controls:
         status, reason = "blocked", "Screening lacks complete measured primary, odd-even, half-phase, or doubled-period controls."
     elif (

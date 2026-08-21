@@ -92,3 +92,18 @@ def test_create_candidate_validates_toi_and_tic_format(tmp_path):
         create_candidate(tmp_path, "candidate-alpha", toi="not-a-number")
     with pytest.raises(ValueError, match="tic"):
         create_candidate(tmp_path, "candidate-alpha", tic="0abc")
+
+
+@pytest.mark.parametrize(
+    "payload, message",
+    (
+        ('{"candidate_id":"candidate-alpha","candidate_id":"other"}', "duplicate JSON key"),
+        ('{"schema_version":1e999}', "non-finite JSON number"),
+    ),
+)
+def test_load_candidate_rejects_ambiguous_or_nonfinite_metadata(tmp_path, payload, message):
+    candidate = create_candidate(tmp_path, "candidate-alpha")
+    candidate.path.joinpath("candidate.json").write_text(payload, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        load_candidate(tmp_path, "candidate-alpha")

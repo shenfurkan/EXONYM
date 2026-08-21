@@ -9,7 +9,13 @@ import pytest
 from exonym.autonomous import auto_vet_candidate
 from exonym.gatekeeper import _gate_novelty_audit
 from exonym.survey import create_survey, load_survey
-from exonym.survey_harvest import TceFilters, evaluate_live_novelty, harvest_tces
+from exonym.survey_harvest import (
+    TceFilters,
+    evaluate_live_novelty,
+    harvest_tces,
+    novelty_provider_urls,
+    novelty_response_has_registration,
+)
 from exonym.workspace import create_candidate, load_candidate
 
 
@@ -43,7 +49,9 @@ def test_harvest_streams_rows_and_provisions_only_eligible_candidate(tmp_path):
         assert url.startswith("https://")
         if "target.php" in url:
             return _eligible_exofop_response()
-        return b"toi,tid,pl_name,tic_id\n"
+        if "from+toi" in url:
+            return b"toi,tid\n"
+        return b"pl_name,tic_id\n"
 
     # Act
     outcomes = harvest_tces(survey, str(source), _filters(), 5, transport=transport)
@@ -109,6 +117,45 @@ def test_live_novelty_rejects_malformed_success_bodies(nasa_response, exofop_res
     assert result.status == "unavailable"
 
 
+@pytest.mark.parametrize(
+    "payload",
+    (
+        b"toi,tid,tid\n",
+        b"toi,tid,extra\n",
+        b"toi,tid\n1,2,unexpected\n",
+    ),
+)
+def test_nasa_novelty_response_rejects_ambiguous_or_unrequested_columns(payload):
+    source_uri = dict(novelty_provider_urls("123456789"))["nasa-toi"]
+
+    with pytest.raises(ValueError, match="NASA Archive response"):
+        novelty_response_has_registration("nasa-toi", source_uri, payload, "123456789")
+
+
+def test_exofop_nonempty_registration_and_ambiguous_tic_keys_fail_closed():
+    source_uri = dict(novelty_provider_urls("123456789"))["exofop"]
+    registered = json.dumps(
+        {
+            "basic_info": {"tic_id": "123456789"},
+            "tois": [{}],
+            "ctois": [],
+            "planet_parameters": [],
+        }
+    ).encode("utf-8")
+    ambiguous = json.dumps(
+        {
+            "basic_info": {"tic_id": "123456789", "tic-id": "123456789"},
+            "tois": [],
+            "ctois": [],
+            "planet_parameters": [],
+        }
+    ).encode("utf-8")
+
+    assert novelty_response_has_registration("exofop", source_uri, registered, "123456789")
+    with pytest.raises(ValueError, match="ambiguous basic_info"):
+        novelty_response_has_registration("exofop", source_uri, ambiguous, "123456789")
+
+
 def test_harvest_rolls_back_a_new_candidate_when_audit_write_fails(tmp_path, monkeypatch):
     survey = create_survey(tmp_path, "harvest-test", "tess", [17])
     source = tmp_path / "tces.csv"
@@ -119,7 +166,9 @@ def test_harvest_rolls_back_a_new_candidate_when_audit_write_fails(tmp_path, mon
     )
 
     def transport(url, _timeout):
-        return _eligible_exofop_response() if "target.php" in url else b"toi,tid,pl_name,tic_id\n"
+        if "target.php" in url:
+            return _eligible_exofop_response()
+        return b"toi,tid\n" if "from+toi" in url else b"pl_name,tic_id\n"
 
     monkeypatch.setattr(
         "exonym.survey_harvest.write_novelty_audit",

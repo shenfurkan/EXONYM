@@ -221,31 +221,23 @@ def _csv_has_records(payload: bytes, expected_columns: Sequence[str]) -> bool:
     try:
         rows = csv.DictReader(io.StringIO(payload.decode("utf-8-sig")), strict=True)
         field_names = rows.fieldnames
-        if field_names is None:
+        if field_names is None or not all(isinstance(name, str) for name in field_names):
             raise ValueError("NASA Archive response has no CSV header")
-        available = {name.strip().lower() for name in field_names if isinstance(name, str)}
+        normalized_headers = [name.strip().lower() for name in field_names]
+        if not all(normalized_headers) or len(normalized_headers) != len(set(normalized_headers)):
+            raise ValueError("NASA Archive response has ambiguous CSV headers")
+        available = set(normalized_headers)
         required = {name.strip().lower() for name in expected_columns}
-        if not required.issubset(available):
+        if available != required:
             raise ValueError("NASA Archive response does not match the requested column contract")
-        return any(
-            any(value is not None and str(value).strip() for value in row.values())
-            for row in rows
-        )
+        for row in rows:
+            if None in row:
+                raise ValueError("NASA Archive response has a row with unexpected columns")
+            if any(value is not None and str(value).strip() for value in row.values()):
+                return True
+        return False
     except (UnicodeDecodeError, csv.Error) as exc:
         raise ValueError("NASA Archive response is not readable UTF-8 CSV") from exc
-
-
-def _exofop_has_registration(value: object, key: str = "") -> bool:
-    """Recognize populated TOI/cTOI/planet registration fields conservatively."""
-    normalized_key = re.sub(r"[^a-z0-9]", "", key.lower())
-    registration_key = any(token in normalized_key for token in ("toi", "ctoi", "planet"))
-    if isinstance(value, Mapping):
-        return any(_exofop_has_registration(child, str(name)) for name, child in value.items())
-    if isinstance(value, list):
-        return any(_exofop_has_registration(child, key) for child in value)
-    if registration_key and value not in (None, "", 0, False, [], {}):
-        return True
-    return False
 
 
 def _exofop_response_matches_tic(payload: Mapping[str, object], tic: str) -> bool:
@@ -253,7 +245,12 @@ def _exofop_response_matches_tic(payload: Mapping[str, object], tic: str) -> boo
     basic_info = payload.get("basic_info")
     if not isinstance(basic_info, Mapping):
         return False
-    normalized = {re.sub(r"[^a-z0-9]", "", str(key).lower()): value for key, value in basic_info.items()}
+    normalized: Dict[str, object] = {}
+    for key, value in basic_info.items():
+        normalized_key = re.sub(r"[^a-z0-9]", "", str(key).lower())
+        if normalized_key in normalized:
+            raise ValueError("ExoFOP response has ambiguous basic_info keys")
+        normalized[normalized_key] = value
     value = normalized.get("ticid")
     if value is None:
         return False
@@ -284,10 +281,17 @@ def _strict_json_object(payload: bytes) -> Mapping[str, object]:
     def reject_constant(value: str) -> object:
         raise ValueError("non-finite JSON constant: {0}".format(value))
 
+    def parse_finite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError("non-finite JSON number")
+        return parsed
+
     data = json.loads(
         payload.decode("utf-8"),
         object_pairs_hook=unique_object,
         parse_constant=reject_constant,
+        parse_float=parse_finite_float,
     )
     if not isinstance(data, Mapping):
         raise ValueError("ExoFOP response is not a JSON object")
@@ -305,7 +309,7 @@ def novelty_response_has_registration(
         return _csv_has_records(payload, _NASA_RESPONSE_COLUMNS[provider])
     exofop_data = _strict_json_object(payload)
     _validate_exofop_response(exofop_data, str(tic))
-    return _exofop_has_registration(exofop_data)
+    return any(bool(exofop_data[field]) for field in _EXOFOP_REGISTRATION_FIELDS)
 
 
 def evaluate_live_novelty(

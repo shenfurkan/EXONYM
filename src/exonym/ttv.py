@@ -419,7 +419,7 @@ def run_ttv_analysis(workspace: CandidateWorkspace, signal: Optional[str] = None
     outputs_dir.mkdir(parents=True, exist_ok=True)
     figures_dir.mkdir(parents=True, exist_ok=True)
 
-    table = load_light_curve_table(workspace)
+    table = load_light_curve_table(workspace, require_raw_provenance=True)
     if table is None:
         raise RuntimeError("TTV analysis requires observed candidate photometry")
     source = "candidate-data"

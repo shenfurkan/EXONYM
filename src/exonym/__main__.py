@@ -70,7 +70,29 @@ def _build_parser() -> argparse.ArgumentParser:
         default=_default_repository_root(),
         help="Repository root containing the candidate directory.",
     )
-    commands = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument(
+        "--banner",
+        action="store_true",
+        default=False,
+        help="Show the startup animation banner and exit.",
+    )
+    parser.add_argument(
+        "--no-animation",
+        action="store_true",
+        default=False,
+        dest="no_animation",
+        help="Skip the startup animation (also honoured by -q / --quiet).",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        default=False,
+        help="Suppress optional output including the startup animation.",
+    )
+    # required=False so that invoking 'exonym' with no subcommand reaches main()
+    # and can show the banner + help instead of an argparse error.
+    commands = parser.add_subparsers(dest="command", metavar="<command>", required=False)
 
     init_parser = commands.add_parser("init", help="Provision a candidate workspace.")
     init_parser.add_argument("candidate_id", help="Lowercase workspace identifier.")
@@ -550,9 +572,20 @@ def _harvest_filters(args: argparse.Namespace):
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    import sys as _sys
+
     parser = _build_parser()
     args = parser.parse_args(argv)
     repository_root = args.root.resolve()
+
+    # --banner or no subcommand: show animation then clean categorized overview.
+    _skip_anim = getattr(args, "no_animation", False) or getattr(args, "quiet", False)
+    if getattr(args, "banner", False) or args.command is None:
+        from .banner import print_cli_overview, run_banner
+
+        run_banner(skip=_skip_anim or not _sys.stdout.isatty())
+        print_cli_overview()
+        return 0
 
     try:
         if args.command == "verify":
@@ -896,7 +929,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             from .detrending import detrend_candidate
             from .inputs import load_light_curve_table
 
-            table = load_light_curve_table(candidate, max_points=None)
+            table = load_light_curve_table(
+                candidate, max_points=None, require_raw_provenance=True
+            )
             if table is None:
                 raise ValueError("detrending requires readable candidate-local light-curve data")
             artifact = detrend_candidate(

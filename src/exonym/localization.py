@@ -320,41 +320,6 @@ def extract_tpf_depth_map(
     return extract_tpf_difference_image(cube, ephemeris, quality_mask)
 
 
-def _load_gaia_neighbors(workspace: CandidateWorkspace) -> List[Dict[str, Any]]:
-    """Read the optional generic Gaia neighbor CSV from external data."""
-    path = workspace.path / "data" / "external" / "gaia_neighbors.csv"
-    if not path.is_file():
-        return []
-    try:
-        import pandas as pd
-    except ImportError:  # pragma: no cover - optional dependency
-        return []
-    try:
-        frame = pd.read_csv(path)
-    except Exception:
-        return []
-    required = ("ra", "dec")
-    if not all(column in frame.columns for column in required):
-        return []
-    rows: List[Dict[str, Any]] = []
-    for _, row in frame.iterrows():
-        try:
-            rows.append(
-                {
-                    "source_id": str(row.get("source_id", "")),
-                    "ra": float(row["ra"]),
-                    "dec": float(row["dec"]),
-                    "g_mag": float(row.get("phot_g_mean_mag", 20.0)),
-                    "separation_arcsec": float(row.get("separation_arcsec", 0.0)),
-                    "flux_ratio": float(row.get("flux_ratio_vs_target", 0.0)),
-                    "is_target": str(row.get("is_target_match", "")).lower() == "true",
-                }
-            )
-        except (TypeError, ValueError):
-            continue
-    return rows
-
-
 def _load_archival_gaia_neighbors(
     workspace: CandidateWorkspace,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
@@ -560,16 +525,9 @@ def run_prf_localization(
         field_sources.get(field) not in (None, "synthetic-demo")
         for field in required_ephemeris_fields
     )
-    neighbors = _load_gaia_neighbors(workspace)
-    source_catalog: Dict[str, Any] = {
-        "availability": "available" if neighbors else "unavailable",
-        "source": "data/external/gaia_neighbors.csv",
-        "n_catalog_neighbors": sum(1 for row in neighbors if not row.get("is_target")),
-    }
-    if not neighbors:
-        neighbors, source_catalog = _load_archival_gaia_neighbors(workspace)
+    neighbors, source_catalog = _load_archival_gaia_neighbors(workspace)
 
-    cubes = load_tpf_cubes(workspace)
+    cubes = load_tpf_cubes(workspace, require_raw_provenance=True)
     if not cubes:
         source = "not-run-no-candidate-tpf"
     elif not candidate_ephemeris:
@@ -662,10 +620,12 @@ def run_prf_localization(
         if sectors_with_neighbors
         else None
     )
-    if source != "candidate-data":
-        status = source
+    if source == "not-run-no-candidate-tpf":
+        status = "inconclusive_no_candidate_tpf"
+    elif source == "not-run-no-candidate-ephemeris":
+        status = "inconclusive_no_candidate_ephemeris"
     elif not completed:
-        status = "no_complete_depth_maps"
+        status = "inconclusive_no_complete_depth_maps"
     elif unresolved_difference_core:
         status = "inconclusive_insufficient_difference_core"
     else:

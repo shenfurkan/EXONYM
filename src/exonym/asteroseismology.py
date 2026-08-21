@@ -552,7 +552,7 @@ def run_asteroseismology(
     outputs_dir = workspace.path / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
 
-    table = load_light_curve_table(workspace)
+    table = load_light_curve_table(workspace, require_raw_provenance=True)
     if table is None:
         raise RuntimeError("asteroseismology requires observed candidate photometry")
     source = "candidate-data"

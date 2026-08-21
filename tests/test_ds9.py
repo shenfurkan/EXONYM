@@ -6,7 +6,7 @@ from exonym.ds9 import export_ds9_regions
 
 
 def _workspace(tmp_path):
-    return type("Workspace", (), {"path": tmp_path})()
+    return type("Workspace", (), {"path": tmp_path, "candidate_id": "ds9-test"})()
 
 
 def _write_archival_report(workspace, sources):
@@ -15,9 +15,11 @@ def _write_archival_report(workspace, sources):
     outputs.joinpath("archival_vetting_report.json").write_text(
         json.dumps(
             {
+                "candidate_id": workspace.candidate_id,
                 "target_coordinates": {"ra_deg": 99.0, "dec_deg": 88.0},
                 "gaia_astrometry": {
                     "validated": True,
+                    "query_status": "ok",
                     "target_source_id": "synthetic-target",
                     "sources": sources,
                 },

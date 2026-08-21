@@ -8,6 +8,7 @@ turn a photometric peak into a planetary claim.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -25,7 +26,7 @@ from .discovery import (
     recovered_period,
     robustness_diagnostics,
 )
-from .inputs import load_light_curve_table
+from .inputs import MINIMUM_BLS_CANDIDATE_SNR, _read_json, load_light_curve_table
 from .search import _input_manifest_records, run_bls_on_candidate
 from .screening import fixed_ephemeris_screen
 from .workspace import CandidateWorkspace, load_candidate, validate_candidate_id
@@ -344,6 +345,17 @@ def _survey_result_suffix(survey: SurveyWorkspace) -> str:
     return ".survey-" + survey.survey_id
 
 
+def _provenanced_input_manifest(
+    candidate: CandidateWorkspace, table: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Return hash-bound raw inputs returned by one provenance-restricted loader call."""
+    return _input_manifest_records(
+        candidate,
+        [Path(path) for path in table.get("input_files", [])],
+        list(table.get("input_sha256s", [])),
+    )
+
+
 def _robustness_path(survey: SurveyWorkspace, candidate: CandidateWorkspace) -> Path:
     """Return the candidate-local robustness artifact path for one survey."""
     return candidate.path / "outputs" / ("survey_robustness" + _survey_result_suffix(survey) + ".json")
@@ -479,10 +491,14 @@ def run_survey_sensitivity(
     _load_target_record(survey, candidate.candidate_id)
     if not _current_eligible_audit(candidate):
         raise RuntimeError("survey sensitivity requires a current eligible novelty audit")
-    table = load_light_curve_table(candidate, sectors=survey.metadata["sectors"])
+    table = load_light_curve_table(
+        candidate,
+        sectors=survey.metadata["sectors"],
+        require_raw_provenance=True,
+    )
     if table is None:
         raise RuntimeError("survey sensitivity diagnostics require real candidate photometry")
-    input_manifest = _input_manifest_records(candidate, sectors=survey.metadata["sectors"])
+    input_manifest = _provenanced_input_manifest(candidate, table)
     if not input_manifest:
         raise RuntimeError("survey sensitivity diagnostics require hashable candidate inputs")
     configuration = json.loads(json.dumps(SENSITIVITY_CONFIGURATION))
@@ -766,7 +782,11 @@ def _run_survey_robustness(
     tested at three fixed phase offsets. A majority recovery is a triage
     criterion only; it does not estimate completeness or validate a source.
     """
-    table = load_light_curve_table(candidate, sectors=survey.metadata["sectors"])
+    table = load_light_curve_table(
+        candidate,
+        sectors=survey.metadata["sectors"],
+        require_raw_provenance=True,
+    )
     if table is None:
         raise RuntimeError("survey robustness diagnostics require real candidate photometry")
     configuration = json.loads(json.dumps(ROBUSTNESS_CONFIGURATION))
@@ -949,21 +969,54 @@ def _existing_sector_bls_result(
     output = candidate.path / "outputs" / ("bls_search_results" + suffix + ".json")
     manifest = candidate.path / "outputs" / ("bls_search_manifest" + suffix + ".json")
     try:
-        payload = json.loads(output.read_text(encoding="utf-8"))
-        manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
+        payload = _read_json(output)
+        manifest_payload = _read_json(manifest)
+        if payload is None or manifest_payload is None:
+            return None
         configuration = manifest_payload["configuration"]
     except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
     expected_configuration = dict(REFERENCE_BLS_CONFIGURATION)
     expected_configuration["sectors"] = list(sectors)
+    if not isinstance(configuration, dict):
+        return None
+    table = load_light_curve_table(
+        candidate, sectors=sectors, require_raw_provenance=True
+    )
+    if table is None:
+        return None
+    try:
+        expected_inputs = _provenanced_input_manifest(candidate, table)
+    except (OSError, ValueError):
+        return None
+    if not expected_inputs:
+        return None
+    try:
+        snr = float(payload["snr"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not math.isfinite(snr):
+        return None
+    expected_detection_status = (
+        "detected" if snr >= MINIMUM_BLS_CANDIDATE_SNR else "no-detection"
+    )
     if (
         not isinstance(payload, dict)
         or not isinstance(manifest_payload, dict)
         or payload.get("source") != "candidate-data"
+        or payload.get("time_system") != "BTJD_TDB"
+        or payload.get("detection_threshold_snr") != MINIMUM_BLS_CANDIDATE_SNR
+        or payload.get("detection_status") != expected_detection_status
+        or manifest_payload.get("schema") != "exonym-bls-search-manifest-1"
         or manifest_payload.get("candidate_id") != candidate.candidate_id
         or manifest_payload.get("source") != "candidate-data"
+        or manifest_payload.get("detection_status") != expected_detection_status
         or manifest_payload.get("result_path") != output.relative_to(candidate.path).as_posix()
-        or manifest_payload.get("inputs") != _input_manifest_records(candidate, sectors=sectors)
+        or manifest_payload.get("result_sha256")
+        != hashlib.sha256(output.read_bytes()).hexdigest()
+        or manifest_payload.get("inputs") != expected_inputs
+        or configuration.get("time_system") != "BTJD_TDB"
+        or configuration.get("detection_threshold_snr") != MINIMUM_BLS_CANDIDATE_SNR
     ):
         return None
     for key, expected_value in expected_configuration.items():
@@ -1007,7 +1060,9 @@ def run_survey_search(
             result_suffix=_survey_result_suffix(survey),
             duration_grid_hours=ROBUSTNESS_CONFIGURATION["duration_grid_hours"],
         )
-        payload = json.loads(output.read_text(encoding="utf-8"))
+        payload = _read_json(output)
+        if payload is None:
+            raise RuntimeError("survey BLS output is not a strict JSON object")
         record["search_reused"] = False
     else:
         output, payload = existing

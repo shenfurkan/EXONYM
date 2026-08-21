@@ -590,7 +590,7 @@ def run_phase_curve_search(workspace: CandidateWorkspace) -> Path:
     outputs_dir = workspace.path / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
 
-    table = load_light_curve_table(workspace)
+    table = load_light_curve_table(workspace, require_raw_provenance=True)
     if table is None:
         raise RuntimeError("phase-curve analysis requires observed candidate photometry")
     ephemeris = load_transit_ephemeris(workspace)

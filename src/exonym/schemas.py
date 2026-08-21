@@ -16,6 +16,7 @@ import json
 import math
 import re
 from functools import partial
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -98,6 +99,18 @@ def _read_json(path: Path) -> object:
     return _parse_json(path.read_text(encoding="utf-8"))
 
 
+def _parse_utc_timestamp(value: object) -> Optional[datetime]:
+    """Parse a timezone-aware ISO timestamp as UTC, or return None."""
+    if not isinstance(value, str):
+        return None
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
+
+
 def _file_sha256(path: Path) -> str:
     """Return the SHA-256 digest for one regular candidate-local file."""
     digest = hashlib.sha256()
@@ -170,7 +183,27 @@ def _validate_novelty_audit_evidence(
     if not isinstance(evidence, list):
         return
     expected_urls: Optional[Dict[str, str]] = None
-    if instance.get("status") == "eligible":
+    eligible = instance.get("status") == "eligible"
+    audit_retrieved_at = _parse_utc_timestamp(instance.get("retrieved_at"))
+    if eligible:
+        if instance.get("candidate_id") != workspace_dir.name:
+            report.add(
+                audit_path,
+                "novelty-evidence-provenance-invalid",
+                "eligible novelty audit candidate_id does not match its workspace",
+            )
+        if len(evidence) != 3:
+            report.add(
+                audit_path,
+                "novelty-evidence-provenance-invalid",
+                "eligible novelty evidence must retain exactly three provider responses",
+            )
+        if audit_retrieved_at is None:
+            report.add(
+                audit_path,
+                "novelty-evidence-provenance-invalid",
+                "eligible novelty audit has no valid retrieval timestamp",
+            )
         try:
             metadata = _read_json(workspace_dir / "candidate.json")
             identifiers = metadata.get("identifiers") if isinstance(metadata, dict) else None
@@ -186,6 +219,7 @@ def _validate_novelty_audit_evidence(
             )
     response_paths = set()
     retrieval_ids = set()
+    providers = set()
     for entry in evidence:
         if not isinstance(entry, dict):
             continue
@@ -242,11 +276,26 @@ def _validate_novelty_audit_evidence(
                     )
         response_paths.add(resolved_path)
         retrieval_ids.add(relative_path.parts[3])
+        provider = entry.get("provider")
+        if isinstance(provider, str):
+            providers.add(provider)
+        if eligible and _parse_utc_timestamp(entry.get("retrieved_at")) != audit_retrieved_at:
+            report.add(
+                audit_path,
+                "novelty-evidence-provenance-invalid",
+                "eligible novelty evidence retrieval time does not match the audit",
+            )
     if len(response_paths) != len(evidence) or len(retrieval_ids) > 1:
         report.add(
             audit_path,
             "novelty-evidence-provenance-invalid",
             "novelty evidence responses must be distinct files from one retrieval",
+        )
+    if eligible and providers != {"nasa-toi", "nasa-confirmed", "exofop"}:
+        report.add(
+            audit_path,
+            "novelty-evidence-provenance-invalid",
+            "eligible novelty evidence must include each independent registry provider once",
         )
 
 

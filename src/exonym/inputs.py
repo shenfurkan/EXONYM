@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -46,10 +47,38 @@ EPHEMERIS_CONFIG_NAMES = (
 
 def _read_json(path: Path) -> Optional[Dict[str, Any]]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, TypeError):
+        payload = json.loads(
+            path.read_text(encoding="utf-8"),
+            parse_float=_parse_finite_float,
+            parse_constant=_reject_nonfinite_json_constant,
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _parse_finite_float(value: str) -> float:
+    """Parse a JSON number without permitting infinities through overflow."""
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite JSON number")
+    return parsed
+
+
+def _reject_nonfinite_json_constant(value: str) -> object:
+    """Reject non-standard JSON numeric constants."""
+    raise ValueError("non-finite JSON constant: {0}".format(value))
+
+
+def _reject_duplicate_json_keys(pairs: Sequence[Tuple[str, object]]) -> Dict[str, object]:
+    """Reject ambiguous JSON objects instead of silently keeping the final key."""
+    result: Dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key: {0}".format(key))
+        result[key] = value
+    return result
 
 
 def _first_number(payload: Dict[str, Any], keys: Sequence[str]) -> Optional[float]:
@@ -73,12 +102,14 @@ def _has_complete_candidate_ephemeris(result: Dict[str, Any], source_prefix: str
 
 
 def _epoch_btjd_from_transit_config(transit: Dict[str, Any]) -> Optional[float]:
-    explicit = _first_number(transit, ("epoch_btjd", "t0_btjd"))
-    if explicit is not None:
-        return explicit
     declared_system = str(
         transit.get("epoch_time_system", transit.get("time_system", ""))
     ).strip().upper()
+    if declared_system and declared_system not in ("BTJD", BTJD_TIME_SYSTEM):
+        return None
+    explicit = _first_number(transit, ("epoch_btjd", "t0_btjd"))
+    if explicit is not None:
+        return explicit
     if declared_system not in ("BTJD", BTJD_TIME_SYSTEM):
         return None
     return _first_number(transit, ("t0", "epoch"))
@@ -93,23 +124,38 @@ def _sha256(path: Path) -> str:
 
 
 def _is_candidate_photometry_input(
-    candidate_root: Path, record: Dict[str, Any]
+    workspace: CandidateWorkspace, candidate_root: Path, record: Dict[str, Any]
 ) -> bool:
-    """Confirm that a manifest input is an unchanged candidate photometry product."""
+    """Confirm that a manifest input is an unchanged raw, provenanced FITS product."""
     if not isinstance(record.get("path"), str):
         return False
-    product_path = (candidate_root / record["path"]).resolve()
     try:
+        product_path = (candidate_root / record["path"]).resolve()
         relative = product_path.relative_to(candidate_root)
-    except ValueError:
+    except (OSError, ValueError):
         return False
-    return (
-        len(relative.parts) >= 3
-        and relative.parts[:2] in (("data", "raw"), ("data", "processed"))
-        and product_path.name.lower().endswith((".fits", ".fits.fz", ".fz"))
-        and product_path.is_file()
-        and record.get("sha256") == _sha256(product_path)
-    )
+    if (
+        len(relative.parts) < 3
+        or relative.parts[:2] != ("data", "raw")
+        or not product_path.name.lower().endswith((".fits", ".fits.fz", ".fz"))
+        or not product_path.is_file()
+        or record.get("sha256") != _sha256(product_path)
+    ):
+        return False
+    sidecar_path = product_path.with_name(product_path.stem + ".provenance.json")
+    try:
+        sidecar_relative = sidecar_path.resolve().relative_to(candidate_root).as_posix()
+    except (OSError, ValueError):
+        return False
+    if (
+        not sidecar_path.is_file()
+        or record.get("provenance_path") != sidecar_relative
+        or record.get("provenance_sha256") != _sha256(sidecar_path)
+    ):
+        return False
+    from .gatekeeper import has_valid_raw_product_provenance
+
+    return has_valid_raw_product_provenance(workspace, product_path)
 
 
 def is_manifest_bound_bls_result(
@@ -120,25 +166,49 @@ def is_manifest_bound_bls_result(
 ) -> bool:
     suffix = signal or ""
     manifest_path = workspace.path / "outputs" / ("bls_search_manifest" + suffix + ".json")
+    try:
+        result_relative = result_path.resolve().relative_to(workspace.path.resolve()).as_posix()
+    except (OSError, ValueError):
+        return False
+    if not result_path.is_file():
+        return False
     manifest = _read_json(manifest_path)
     if manifest is None:
         return False
     configuration = manifest.get("configuration")
     if not isinstance(configuration, dict):
         return False
+    period = _first_number(payload, ("best_period",))
+    epoch = _first_number(payload, ("best_epoch",))
+    duration_hours = _first_number(payload, ("best_duration_hours",))
+    depth_ppm = _first_number(payload, ("best_depth_ppm",))
+    event_count = payload.get("n_distinct_transit_events")
     if (
         manifest.get("schema") != "exonym-bls-search-manifest-1"
         or manifest.get("candidate_id") != workspace.candidate_id
         or manifest.get("source") != "candidate-data"
         or manifest.get("detection_status") != "detected"
-        or manifest.get("result_path") != result_path.relative_to(workspace.path).as_posix()
+        or manifest.get("result_path") != result_relative
         or manifest.get("result_sha256") != _sha256(result_path)
         or configuration.get("engine") != "bls"
         or configuration.get("signal") != signal
         or configuration.get("time_system") != BTJD_TIME_SYSTEM
+        or configuration.get("detection_threshold_snr") != MINIMUM_BLS_CANDIDATE_SNR
         or payload.get("detection_status") != "detected"
         or payload.get("time_system") != BTJD_TIME_SYSTEM
+        or payload.get("detection_threshold_snr") != MINIMUM_BLS_CANDIDATE_SNR
         or (_first_number(payload, ("snr",)) or 0.0) < MINIMUM_BLS_CANDIDATE_SNR
+        or period is None
+        or period <= 0.0
+        or epoch is None
+        or duration_hours is None
+        or duration_hours <= 0.0
+        or duration_hours / 24.0 >= period
+        or depth_ppm is None
+        or depth_ppm <= 0.0
+        or isinstance(event_count, bool)
+        or not isinstance(event_count, int)
+        or event_count < 2
     ):
         return False
     inputs = manifest.get("inputs")
@@ -146,9 +216,70 @@ def is_manifest_bound_bls_result(
         return False
     candidate_root = workspace.path.resolve()
     for record in inputs:
-        if not isinstance(record, dict) or not _is_candidate_photometry_input(candidate_root, record):
+        if not isinstance(record, dict) or not _is_candidate_photometry_input(
+            workspace, candidate_root, record
+        ):
             return False
     return True
+
+
+def is_bls_bound_transit_config(
+    workspace: CandidateWorkspace,
+    config_path: Path,
+    payload: Dict[str, Any],
+    signal: Optional[str] = None,
+) -> bool:
+    """Confirm a BLS-derived transit config still names the current BLS evidence."""
+    if payload.get("source") != "candidate-data-bls":
+        return False
+    try:
+        config_path.resolve().relative_to(workspace.path.resolve())
+    except (OSError, ValueError):
+        return False
+    provenance = payload.get("bls_provenance")
+    transit = payload.get("transit")
+    if not isinstance(provenance, dict) or not isinstance(transit, dict):
+        return False
+    result_record = provenance.get("result")
+    manifest_record = provenance.get("manifest")
+    if not isinstance(result_record, dict) or not isinstance(manifest_record, dict):
+        return False
+    suffix = signal or ""
+    expected_result = workspace.path / "outputs" / ("bls_search_results" + suffix + ".json")
+    expected_manifest = workspace.path / "outputs" / ("bls_search_manifest" + suffix + ".json")
+    if (
+        not expected_result.is_file()
+        or not expected_manifest.is_file()
+        or result_record.get("path")
+        != expected_result.relative_to(workspace.path).as_posix()
+        or result_record.get("sha256") != _sha256(expected_result)
+        or manifest_record.get("path")
+        != expected_manifest.relative_to(workspace.path).as_posix()
+        or manifest_record.get("sha256") != _sha256(expected_manifest)
+    ):
+        return False
+    result = _read_json(expected_result)
+    if result is None or not is_manifest_bound_bls_result(workspace, expected_result, result, signal):
+        return False
+    values = (
+        (_first_number(transit, ("period_days", "period")), _first_number(result, ("best_period",))),
+        (_epoch_btjd_from_transit_config(transit), _first_number(result, ("best_epoch",))),
+        (
+            _first_number(transit, ("duration_days",)),
+            (
+                _first_number(result, ("best_duration_hours",)) / 24.0
+                if _first_number(result, ("best_duration_hours",)) is not None
+                else None
+            ),
+        ),
+        (_first_number(transit, ("depth_ppm", "depth")), _first_number(result, ("best_depth_ppm",))),
+    )
+    return all(
+        configured is not None
+        and measured is not None
+        and math.isclose(configured, measured, rel_tol=1e-12, abs_tol=1e-12)
+        for configured, measured in values
+    )
 
 
 def load_transit_ephemeris(
@@ -183,10 +314,19 @@ def load_transit_ephemeris(
             workspace.path / "config" / "signals" / ("transit_config" + signal + ".json")
         )
         payload = _read_json(config_path)
+        if payload is not None and payload.get("source") == "candidate-data-bls" and not is_bls_bound_transit_config(
+            workspace, config_path, payload, signal
+        ):
+            payload = None
         if payload is not None:
             transit = payload.get("transit")
             if not isinstance(transit, dict):
                 transit = payload
+            source_prefix = (
+                "candidate-data-bls"
+                if payload.get("source") == "candidate-data-bls"
+                else "candidate-config-signal"
+            )
             period_value = _first_number(transit, ("period", "period_days", "p"))
             epoch_value = _epoch_btjd_from_transit_config(transit)
             duration_hours_value = _first_number(
@@ -197,41 +337,50 @@ def load_transit_ephemeris(
             found = False
             if period_value is not None and period_value > 0:
                 result["period_days"] = period_value
-                result["field_sources"]["period_days"] = "candidate-config-signal"
+                result["field_sources"]["period_days"] = source_prefix
                 found = True
             if epoch_value is not None:
                 result["epoch_btjd"] = epoch_value
-                result["field_sources"]["epoch_btjd"] = "candidate-config-signal"
+                result["field_sources"]["epoch_btjd"] = source_prefix
                 result["time_system"] = BTJD_TIME_SYSTEM
                 found = True
             if duration_hours_value is not None and duration_hours_value > 0:
                 result["duration_days"] = duration_hours_value / 24.0
-                result["field_sources"]["duration_days"] = "candidate-config-signal"
+                result["field_sources"]["duration_days"] = source_prefix
                 found = True
             if duration_days_value is not None and duration_days_value > 0:
                 result["duration_days"] = duration_days_value
-                result["field_sources"]["duration_days"] = "candidate-config-signal"
+                result["field_sources"]["duration_days"] = source_prefix
                 found = True
             if depth_value is not None and depth_value >= 0:
                 result["depth_ppm"] = depth_value
-                result["field_sources"]["depth_ppm"] = "candidate-config-signal"
+                result["field_sources"]["depth_ppm"] = source_prefix
                 found = True
             if found:
                 result["source"] = (
-                    "candidate-config-signal"
-                    if _has_complete_candidate_ephemeris(result, "candidate-config-signal")
-                    else "partial-candidate-config-signal"
+                    source_prefix
+                    if _has_complete_candidate_ephemeris(result, source_prefix)
+                    else "partial-" + source_prefix
                 )
                 return result
 
     for config_name in EPHEMERIS_CONFIG_NAMES:
         config_path = workspace.path / "config" / config_name
         payload = _read_json(config_path)
+        if payload is not None and payload.get("source") == "candidate-data-bls" and not is_bls_bound_transit_config(
+            workspace, config_path, payload, None
+        ):
+            payload = None
         if payload is None:
             continue
         transit = payload.get("transit")
         if not isinstance(transit, dict):
             transit = payload
+        source_prefix = (
+            "candidate-data-bls"
+            if payload.get("source") == "candidate-data-bls"
+            else "candidate-config"
+        )
         period_value = _first_number(transit, ("period", "period_days", "p"))
         epoch_value = _epoch_btjd_from_transit_config(transit)
         duration_hours_value = _first_number(
@@ -242,30 +391,30 @@ def load_transit_ephemeris(
         found = False
         if period_value is not None and period_value > 0:
             result["period_days"] = period_value
-            result["field_sources"]["period_days"] = "candidate-config"
+            result["field_sources"]["period_days"] = source_prefix
             found = True
         if epoch_value is not None:
             result["epoch_btjd"] = epoch_value
-            result["field_sources"]["epoch_btjd"] = "candidate-config"
+            result["field_sources"]["epoch_btjd"] = source_prefix
             result["time_system"] = BTJD_TIME_SYSTEM
             found = True
         if duration_hours_value is not None and duration_hours_value > 0:
             result["duration_days"] = duration_hours_value / 24.0
-            result["field_sources"]["duration_days"] = "candidate-config"
+            result["field_sources"]["duration_days"] = source_prefix
             found = True
         if duration_days_value is not None and duration_days_value > 0:
             result["duration_days"] = duration_days_value
-            result["field_sources"]["duration_days"] = "candidate-config"
+            result["field_sources"]["duration_days"] = source_prefix
             found = True
         if depth_value is not None and depth_value >= 0:
             result["depth_ppm"] = depth_value
-            result["field_sources"]["depth_ppm"] = "candidate-config"
+            result["field_sources"]["depth_ppm"] = source_prefix
             found = True
         if found:
             result["source"] = (
-                "candidate-config"
-                if _has_complete_candidate_ephemeris(result, "candidate-config")
-                else "partial-candidate-config"
+                source_prefix
+                if _has_complete_candidate_ephemeris(result, source_prefix)
+                else "partial-" + source_prefix
             )
             break
 
@@ -530,6 +679,8 @@ def load_light_curve_table(
     workspace: CandidateWorkspace,
     max_points: Optional[int] = 4000,
     sectors: Optional[Sequence[int]] = None,
+    raw_only: bool = False,
+    require_raw_provenance: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Return a light curve table from candidate FITS products, or None.
 
@@ -544,9 +695,17 @@ def load_light_curve_table(
     depend on the number of observed sectors. Returns None when no readable
     light curve exists after filtering.
     """
+    if require_raw_provenance:
+        raw_only = True
+        from .gatekeeper import has_valid_raw_product_provenance
+
     roots = (
-        workspace.path / "data" / "processed",
-        workspace.path / "data" / "raw",
+        (workspace.path / "data" / "raw",)
+        if raw_only
+        else (
+            workspace.path / "data" / "processed",
+            workspace.path / "data" / "raw",
+        )
     )
     fits_files: List[Path] = []
     processed_names: set = set()
@@ -578,6 +737,15 @@ def load_light_curve_table(
     seen_sectors: set = set()
     for path in fits_files:
         try:
+            if require_raw_provenance and not has_valid_raw_product_provenance(workspace, path):
+                _warnings.warn(
+                    "skipped {0}: raw provenance sidecar is missing, invalid, or stale".format(
+                        path.name
+                    ),
+                    stacklevel=2,
+                )
+                continue
+            input_sha256 = _sha256(path)
             _lc = lk.read(path)
             # Apply the TESS quality bitmask so that momentum-dump, scattered-
             # light, and other flagged cadences are excluded before any
@@ -663,6 +831,12 @@ def load_light_curve_table(
                 if max_points is not None
                 else (time, flux, flux_err, sector_values)
             )
+            if input_sha256 != _sha256(path):
+                _warnings.warn(
+                    "skipped {0}: product bytes changed while loading".format(path.name),
+                    stacklevel=2,
+                )
+                continue
             if binned[0].size >= 50:
                 tables.append(
                     {
@@ -672,6 +846,7 @@ def load_light_curve_table(
                         "flux_err_source": flux_err_source,
                         "sector": binned[3],
                         "path": path,
+                        "sha256": input_sha256,
                         "time_system": BTJD_TIME_SYSTEM,
                     }
                 )
@@ -695,11 +870,16 @@ def load_light_curve_table(
         "flux_err_sources": sorted({table["flux_err_source"] for table in tables}),
         "sector": sector_values.astype(int),
         "input_files": [table["path"] for table in tables],
+        "input_sha256s": [table["sha256"] for table in tables],
         "time_system": BTJD_TIME_SYSTEM,
     }
 
 
-def load_tpf_cubes(workspace: CandidateWorkspace) -> List[Dict[str, Any]]:
+def load_tpf_cubes(
+    workspace: CandidateWorkspace,
+    raw_only: bool = False,
+    require_raw_provenance: bool = False,
+) -> List[Dict[str, Any]]:
     """Return TPF pixel cubes from candidate data, or an empty list.
 
     Each entry has ``path``, ``sector``, ``time``, ``quality``, ``flux``
@@ -707,9 +887,17 @@ def load_tpf_cubes(workspace: CandidateWorkspace) -> List[Dict[str, Any]]:
     TPFs without a positive sector in their primary header or canonical file
     name are skipped rather than assigned an inferred sector number.
     """
+    if require_raw_provenance:
+        raw_only = True
+        from .gatekeeper import has_valid_raw_product_provenance
+
     roots = (
-        workspace.path / "data" / "processed",
-        workspace.path / "data" / "raw",
+        (workspace.path / "data" / "raw",)
+        if raw_only
+        else (
+            workspace.path / "data" / "processed",
+            workspace.path / "data" / "raw",
+        )
     )
     fits_files: List[Path] = []
     processed_names: set = set()
@@ -739,6 +927,14 @@ def load_tpf_cubes(workspace: CandidateWorkspace) -> List[Dict[str, Any]]:
     cubes: List[Dict[str, Any]] = []
     for path in fits_files:
         try:
+            if require_raw_provenance and not has_valid_raw_product_provenance(workspace, path):
+                _warnings.warn(
+                    "skipped {0}: raw provenance sidecar is missing, invalid, or stale".format(
+                        path.name
+                    ),
+                    stacklevel=2,
+                )
+                continue
             with fits.open(path, memmap=False) as hdul:
                 if len(hdul) < 3:
                     continue

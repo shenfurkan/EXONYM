@@ -459,35 +459,38 @@ def _bls_runtime_provenance() -> Dict[str, str]:
 
 
 def _input_manifest_records(
-    workspace: CandidateWorkspace, sectors: Optional[Sequence[int]] = None
+    workspace: CandidateWorkspace,
+    input_files: Sequence[Path],
+    input_sha256s: Sequence[str],
 ) -> List[Dict[str, Any]]:
-    """Describe the exact light-curve products selected by the input loader."""
-    from .inputs import load_light_curve_table
-
-    table = load_light_curve_table(workspace, sectors=sectors)
-    if table is None:
+    """Describe raw products only while they retain their acquisition provenance."""
+    if len(input_files) != len(input_sha256s) or not input_files:
         return []
+    from .gatekeeper import has_valid_raw_product_provenance
 
     records: List[Dict[str, Any]] = []
-    for path in table.get("input_files", []):
+    candidate_root = workspace.path.resolve()
+    for path, expected_sha256 in zip(input_files, input_sha256s):
         product_path = Path(path)
         sidecar_path = product_path.with_name(product_path.stem + ".provenance.json")
-        provenance: Optional[Dict[str, Any]] = None
-        if sidecar_path.is_file():
-            try:
-                provenance = json.loads(sidecar_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                provenance = None
+        try:
+            relative_path = product_path.resolve().relative_to(candidate_root).as_posix()
+            provenance_path = sidecar_path.resolve().relative_to(candidate_root).as_posix()
+        except (OSError, ValueError):
+            return []
+        if (
+            not product_path.is_file()
+            or _sha256(product_path) != expected_sha256
+            or not sidecar_path.is_file()
+            or not has_valid_raw_product_provenance(workspace, product_path)
+        ):
+            return []
         records.append(
             {
-                "path": product_path.relative_to(workspace.path).as_posix(),
-                "sha256": _sha256(product_path),
-                "provenance_path": (
-                    sidecar_path.relative_to(workspace.path).as_posix()
-                    if sidecar_path.is_file()
-                    else None
-                ),
-                "provenance": provenance,
+                "path": relative_path,
+                "sha256": expected_sha256,
+                "provenance_path": provenance_path,
+                "provenance_sha256": _sha256(sidecar_path),
             }
         )
     return records
@@ -589,38 +592,64 @@ def run_bls_on_candidate(
     tls_errors: Optional[np.ndarray] = None
     bls_errors: Optional[np.ndarray] = None
     bls_error_sources: Optional[List[str]] = None
+    input_records: List[Dict[str, Any]] = []
+    input_files: List[Path] = []
+    input_sha256s: List[str] = []
     if engine == "tls":
         from .inputs import load_light_curve_table
 
-        native_table = load_light_curve_table(workspace, max_points=None, sectors=sectors)
+        native_table = load_light_curve_table(
+            workspace,
+            max_points=None,
+            sectors=sectors,
+            require_raw_provenance=True,
+        )
         loaded = None
         if native_table is not None:
+            input_files = [Path(path) for path in native_table.get("input_files", [])]
+            input_sha256s = list(native_table.get("input_sha256s", []))
+            input_records = _input_manifest_records(
+                workspace, input_files, input_sha256s
+            )
+            if len(input_records) != len(input_files):
+                raise ValueError(
+                    "TLS transit search requires schema-valid, hash-matched raw provenance sidecars"
+                )
             loaded = (
                 np.asarray(native_table["time"], dtype=float),
                 np.asarray(native_table["flux"], dtype=float),
             )
             tls_errors = np.asarray(native_table["flux_err"], dtype=float)
     else:
-        loaded = load_candidate_light_curve(workspace, sectors=sectors)
-        if loaded is not None:
-            # Keep the compact public loader compatible while acquiring the
-            # per-cadence uncertainties needed by the weighted BLS engine.
-            # A test or third-party caller may provide only (time, flux); in
-            # that case find_transits uses its explicit robust-scatter fallback.
-            from .inputs import load_light_curve_table
+        from .inputs import load_light_curve_table
 
-            bls_table = load_light_curve_table(workspace, sectors=sectors)
-            if bls_table is not None:
-                candidate_time = np.asarray(bls_table["time"], dtype=float)
-                candidate_errors = np.asarray(bls_table["flux_err"], dtype=float)
-                if candidate_time.shape == loaded[0].shape and np.array_equal(candidate_time, loaded[0]):
-                    bls_errors = candidate_errors
-                    bls_error_sources = list(bls_table.get("flux_err_sources", []))
+        # Vettable BLS evidence is intentionally limited to raw FITS products
+        # with validated acquisition sidecars. Processed products currently
+        # have no recursive derivation-manifest contract.
+        bls_table = load_light_curve_table(
+            workspace, sectors=sectors, raw_only=True, require_raw_provenance=True
+        )
+        loaded = None
+        if bls_table is not None:
+            input_files = [Path(path) for path in bls_table.get("input_files", [])]
+            input_sha256s = list(bls_table.get("input_sha256s", []))
+            input_records = _input_manifest_records(
+                workspace, input_files, input_sha256s
+            )
+            if len(input_records) != len(input_files):
+                raise ValueError(
+                    "BLS transit search requires schema-valid, hash-matched raw provenance sidecars"
+                )
+            loaded = (
+                np.asarray(bls_table["time"], dtype=float),
+                np.asarray(bls_table["flux"], dtype=float),
+            )
+            bls_errors = np.asarray(bls_table["flux_err"], dtype=float)
+            bls_error_sources = list(bls_table.get("flux_err_sources", []))
     if loaded is None:
         raise ValueError("no readable candidate light-curve photometry available for BLS transit search")
     time, flux = loaded
     source = "candidate-data"
-    input_records = _input_manifest_records(workspace, sectors=sectors)
 
     if engine == "tls":
         if tls_errors is None:
@@ -678,6 +707,13 @@ def run_bls_on_candidate(
     if signal_provenance is not None:
         payload["signal"] = signal
         payload["search_provenance"] = signal_provenance
+
+    if engine in ("bls", "tls"):
+        current_input_records = _input_manifest_records(
+            workspace, input_files, input_sha256s
+        )
+        if current_input_records != input_records:
+            raise RuntimeError("search input products or provenance changed during the search")
 
     outputs_dir = workspace.path / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)

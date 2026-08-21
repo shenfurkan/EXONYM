@@ -19,6 +19,37 @@ from exonym.search import (
 from exonym.workspace import create_candidate
 
 
+def _write_raw_provenance(product):
+    sidecar = product.with_name(product.stem + ".provenance.json")
+    sidecar.write_text(
+        json.dumps(
+            {
+                "source_uri": "https://archive.example.invalid/" + product.name,
+                "download_timestamp_utc": "2026-01-01T00:00:00Z",
+                "sha256": hashlib.sha256(product.read_bytes()).hexdigest(),
+                "fetched_by": "synthetic-test",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _raw_bls_table(workspace, time, flux):
+    product = workspace.path / "data" / "raw" / "s0001_lc.fits"
+    product.parent.mkdir(parents=True, exist_ok=True)
+    product.write_bytes(b"synthetic-raw-photometry")
+    _write_raw_provenance(product)
+    return {
+        "time": time,
+        "flux": flux,
+        "flux_err": np.full_like(time, 0.001),
+        "flux_err_sources": ["reported"],
+        "sector": np.ones(time.size, dtype=int),
+        "input_files": [product],
+        "input_sha256s": [hashlib.sha256(product.read_bytes()).hexdigest()],
+    }
+
+
 def test_find_transits_synthetic():
     time = np.linspace(0, 20, 2000)
     period = 4.0
@@ -193,6 +224,19 @@ def test_run_bls_on_candidate_requires_real_photometry(tmp_path):
     assert not (workspace.path / "outputs" / "bls_search_manifest.json").exists()
 
 
+def test_run_bls_rejects_a_loader_result_without_raw_provenance(tmp_path, monkeypatch):
+    workspace = create_candidate(tmp_path, "candidate-provenance-bls")
+    time = np.linspace(0.0, 30.0, 100)
+    table = _raw_bls_table(workspace, time, np.ones_like(time))
+    table["input_files"][0].with_name("s0001_lc.provenance.json").unlink()
+    monkeypatch.setattr(
+        "exonym.inputs.load_light_curve_table", lambda *_args, **_kwargs: table
+    )
+
+    with pytest.raises(ValueError, match="raw provenance sidecars"):
+        run_bls_on_candidate(workspace)
+
+
 def test_run_bls_output_suffix_preserves_the_default_result(tmp_path, monkeypatch):
     # Arrange
     workspace = create_candidate(tmp_path, "candidate-output-suffix")
@@ -201,8 +245,9 @@ def test_run_bls_output_suffix_preserves_the_default_result(tmp_path, monkeypatc
     default_result.write_text('{"source": "candidate-data", "snr": 2.0}\n', encoding="utf-8")
     time = np.linspace(0.0, 30.0, 100)
     flux = np.ones_like(time)
+    table = _raw_bls_table(workspace, time, flux)
     monkeypatch.setattr(
-        "exonym.search.load_candidate_light_curve", lambda _, sectors=None: (time, flux)
+        "exonym.inputs.load_light_curve_table", lambda *_args, **_kwargs: table
     )
     monkeypatch.setattr(
         "exonym.search.find_transits",
@@ -222,8 +267,9 @@ def test_run_bls_duration_grid_is_recorded_and_selects_the_best_trial(tmp_path, 
     workspace = create_candidate(tmp_path, "candidate-duration-grid")
     time = np.linspace(0.0, 30.0, 100)
     flux = np.ones_like(time)
+    table = _raw_bls_table(workspace, time, flux)
     monkeypatch.setattr(
-        "exonym.search.load_candidate_light_curve", lambda _, sectors=None: (time, flux)
+        "exonym.inputs.load_light_curve_table", lambda *_args, **_kwargs: table
     )
 
     calls = []
@@ -295,6 +341,7 @@ def test_run_bls_signal_uses_prior_duration_and_preserves_each_signal_output(tmp
 
     time = np.linspace(0.0, 30.0, 100)
     flux = np.ones_like(time)
+    table = _raw_bls_table(workspace, time, flux)
     calls = []
 
     def fake_find_transits(time_btjd, flux_values, **kwargs):
@@ -309,7 +356,7 @@ def test_run_bls_signal_uses_prior_duration_and_preserves_each_signal_output(tmp
         )
 
     monkeypatch.setattr(
-        "exonym.search.load_candidate_light_curve", lambda _, sectors=None: (time, flux)
+        "exonym.inputs.load_light_curve_table", lambda *_args, **_kwargs: table
     )
     monkeypatch.setattr("exonym.search.find_transits", fake_find_transits)
 
@@ -497,6 +544,7 @@ def test_run_bls_on_candidate_with_real_data(tmp_path):
     lk.LightCurve(time=time, flux=flux, flux_err=np.full_like(flux, 0.001), meta=meta).to_fits(
         path=raw / "s0030_lc.fits", overwrite=True
     )
+    _write_raw_provenance(raw / "s0030_lc.fits")
 
     out = run_bls_on_candidate(workspace)
     payload = json.loads(out.read_text(encoding="utf-8"))
@@ -513,6 +561,8 @@ def test_run_bls_on_candidate_with_real_data(tmp_path):
     assert manifest["source"] == "candidate-data"
     assert manifest["inputs"][0]["path"] == "data/raw/s0030_lc.fits"
     assert len(manifest["inputs"][0]["sha256"]) == 64
+    assert manifest["inputs"][0]["provenance_path"] == "data/raw/s0030_lc.provenance.json"
+    assert len(manifest["inputs"][0]["provenance_sha256"]) == 64
     assert manifest["configuration"]["uncertainty_source"] == ["reported"]
     assert manifest["configuration"]["time_system"] == "BTJD_TDB"
     assert manifest["runtime"] == {
@@ -587,6 +637,7 @@ def test_quality_flag_masking_excludes_bad_cadences(tmp_path):
     primary.header["MISSION"] = "TESS"
     primary.header["TELESCOP"] = "TESS"
     fitsio.HDUList([primary, ext]).writeto(raw / "s0030_lc.fits", overwrite=True)
+    _write_raw_provenance(raw / "s0030_lc.fits")
 
     out = run_bls_on_candidate(workspace, period_min=0.5, period_max=10.0)
     payload = json.loads(out.read_text(encoding="utf-8"))

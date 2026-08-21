@@ -111,7 +111,7 @@ def _prepare_observed_transit_input(workspace: Any, signal: Optional[str]) -> Di
 
     from ..inputs import BTJD_TIME_SYSTEM, load_light_curve_table, load_transit_ephemeris
 
-    table = load_light_curve_table(workspace, max_points=None)
+    table = load_light_curve_table(workspace, max_points=None, require_raw_provenance=True)
     if table is None:
         raise ValueError("TRICERATOPS requires a readable candidate light curve")
 

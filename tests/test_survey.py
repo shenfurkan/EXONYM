@@ -71,12 +71,38 @@ def _eligible_audit(workspace):
 
 def _bls_result(snr=8.0):
     return {
+        "detection_status": "detected" if snr >= 7.1 else "no-detection",
+        "time_system": "BTJD_TDB",
+        "detection_threshold_snr": 7.1,
         "best_period": 3.0,
         "best_epoch": 1.0,
         "best_depth_ppm": 1000.0,
         "best_duration_hours": 2.0,
         "snr": snr,
         "n_distinct_transit_events": 3,
+    }
+
+
+def _raw_input_table(workspace):
+    product = workspace.path / "data" / "raw" / "s0017_lc.fits"
+    product.parent.mkdir(parents=True, exist_ok=True)
+    product.write_bytes(b"synthetic-raw-survey-photometry")
+    product_hash = hashlib.sha256(product.read_bytes()).hexdigest()
+    sidecar = product.with_name(product.stem + ".provenance.json")
+    sidecar.write_text(
+        json.dumps(
+            {
+                "source_uri": "https://archive.example.invalid/" + product.name,
+                "download_timestamp_utc": "2026-01-01T00:00:00Z",
+                "sha256": product_hash,
+                "fetched_by": "synthetic-test",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "input_files": [product],
+        "input_sha256s": [product_hash],
     }
 
 
@@ -470,17 +496,31 @@ def test_survey_search_reuses_matching_result_after_interrupted_record_write(tmp
     register_survey_target(survey, workspace)
     _eligible_audit(workspace)
     outputs = workspace.path / "outputs"
-    (outputs / "bls_search_results.survey-test-survey.json").write_text(
+    output = outputs / "bls_search_results.survey-test-survey.json"
+    output.write_text(
         json.dumps({"source": "candidate-data", **_bls_result(snr=6.0)}) + "\n",
         encoding="utf-8",
     )
+    table = _raw_input_table(workspace)
+    product = table["input_files"][0]
+    sidecar = product.with_name(product.stem + ".provenance.json")
     (outputs / "bls_search_manifest.survey-test-survey.json").write_text(
         json.dumps(
             {
+                "schema": "exonym-bls-search-manifest-1",
                 "candidate_id": workspace.candidate_id,
                 "source": "candidate-data",
                 "result_path": "outputs/bls_search_results.survey-test-survey.json",
-                "inputs": [],
+                "result_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+                "detection_status": "no-detection",
+                "inputs": [
+                    {
+                        "path": "data/raw/s0017_lc.fits",
+                        "sha256": table["input_sha256s"][0],
+                        "provenance_path": "data/raw/s0017_lc.provenance.json",
+                        "provenance_sha256": hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+                    }
+                ],
                 "configuration": {
                     "period_min_days": 0.5,
                     "period_max_days": 20.0,
@@ -498,6 +538,8 @@ def test_survey_search_reuses_matching_result_after_interrupted_record_write(tmp
                     "cadence": "median-binned",
                     "use_threads": None,
                     "uncertainty_source": ["reported"],
+                    "time_system": "BTJD_TDB",
+                    "detection_threshold_snr": 7.1,
                     "sectors": [17],
                 },
             }
@@ -509,6 +551,7 @@ def test_survey_search_reuses_matching_result_after_interrupted_record_write(tmp
         raise AssertionError("matching BLS result should be reused")
 
     monkeypatch.setattr("exonym.survey.run_bls_on_candidate", fail_if_called)
+    monkeypatch.setattr("exonym.survey.load_light_curve_table", lambda *_args, **_kwargs: table)
     monkeypatch.setattr("exonym.survey._run_survey_robustness", _robustness_artifact)
 
     # Act

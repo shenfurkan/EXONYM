@@ -12,6 +12,7 @@ import math
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Set
 
+from .archive import load_validated_archival_report
 from .workspace import CandidateWorkspace
 
 
@@ -73,10 +74,9 @@ def export_ds9_regions(
     PRF localization result exists, only its fitted source IDs are included as
     labels; its centroid offsets are never converted into sky coordinates.
     """
-    archival_path = workspace.path / ARCHIVAL_REPORT_RELATIVE_PATH
-    archival = _load_json_object(archival_path)
+    archival = load_validated_archival_report(workspace)
     gaia = archival.get("gaia_astrometry") if archival else None
-    if not isinstance(gaia, dict) or gaia.get("validated") is not True:
+    if not isinstance(gaia, dict):
         raise ValueError("a validated candidate-local archival report is required")
     sources = gaia.get("sources")
     if not isinstance(sources, list):

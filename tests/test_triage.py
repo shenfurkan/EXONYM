@@ -40,6 +40,18 @@ def _write_synthetic_lc_fits(path: Path, sector: int = 1, period: float = 2.5, d
     lk.LightCurve(time=time, flux=flux, flux_err=err, meta=meta).to_fits(
         path=path, overwrite=True
     )
+    sidecar = path.with_name(path.stem + ".provenance.json")
+    sidecar.write_text(
+        json.dumps(
+            {
+                "source_uri": "https://archive.example.invalid/" + path.name,
+                "download_timestamp_utc": "2026-01-01T00:00:00Z",
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "fetched_by": "synthetic-test",
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def _setup_synthetic_workspace(tmp_path: Path, candidate_id: str = "synth-triage-target") -> Path:
@@ -64,12 +76,14 @@ def _setup_synthetic_workspace(tmp_path: Path, candidate_id: str = "synth-triage
     )
 
     # 2. Synthetic light curve FITS
-    _write_synthetic_lc_fits(cand_path / "data" / "processed" / "s0001_lc.fits", sector=1)
+    _write_synthetic_lc_fits(cand_path / "data" / "raw" / "s0001_lc.fits", sector=1)
 
     return cand_path
 
 
-def _write_passing_pre_vetting_artifacts(candidate_path: Path, candidate_id: str) -> None:
+def _write_passing_pre_vetting_artifacts(
+    candidate_path: Path, candidate_id: str, include_search: bool = True
+) -> None:
     """Write minimal candidate-data diagnostic reports for routing tests."""
     outputs = candidate_path / "outputs"
     outputs.mkdir(parents=True, exist_ok=True)
@@ -212,12 +226,35 @@ def _write_passing_pre_vetting_artifacts(candidate_path: Path, candidate_id: str
         ),
         encoding="utf-8",
     )
+    if include_search:
+        _write_remaining_real_data_prerequisites(
+            candidate_path, include_analysis_outputs=False
+        )
 
 
-def _write_remaining_real_data_prerequisites(candidate_path: Path) -> None:
+def _write_remaining_real_data_prerequisites(
+    candidate_path: Path, include_analysis_outputs: bool = True
+) -> None:
     """Complete the provenance-only prerequisites for readiness-order tests."""
     outputs = candidate_path / "outputs"
-    input_path = candidate_path / "data" / "processed" / "s0001_lc.fits"
+    input_path = candidate_path / "data" / "raw" / "s0001_lc.fits"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    if not input_path.exists():
+        input_path.write_bytes(b"synthetic-raw-photometry")
+    input_sha256 = hashlib.sha256(input_path.read_bytes()).hexdigest()
+    provenance_path = input_path.with_name(input_path.stem + ".provenance.json")
+    if not provenance_path.exists():
+        provenance_path.write_text(
+            json.dumps(
+                {
+                    "source_uri": "https://archive.example.invalid/s0001_lc.fits",
+                    "download_timestamp_utc": "2026-01-01T00:00:00Z",
+                    "sha256": input_sha256,
+                    "fetched_by": "synthetic-test",
+                }
+            ),
+            encoding="utf-8",
+        )
     result_path = outputs / "bls_search_results.json"
     result_path.write_text(
         json.dumps(
@@ -231,6 +268,7 @@ def _write_remaining_real_data_prerequisites(candidate_path: Path) -> None:
                 "best_depth_ppm": 1200.0,
                 "snr": 12.0,
                 "n_distinct_transit_events": 3,
+                "detection_threshold_snr": 7.1,
             }
         ),
         encoding="utf-8",
@@ -246,25 +284,33 @@ def _write_remaining_real_data_prerequisites(candidate_path: Path) -> None:
                 "detection_status": "detected",
                 "inputs": [
                     {
-                        "path": "data/processed/s0001_lc.fits",
-                        "sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+                        "path": "data/raw/s0001_lc.fits",
+                        "sha256": input_sha256,
+                        "provenance_path": "data/raw/s0001_lc.provenance.json",
+                        "provenance_sha256": hashlib.sha256(provenance_path.read_bytes()).hexdigest(),
                     }
                 ],
-                "configuration": {"engine": "bls", "signal": None, "time_system": "BTJD_TDB"},
+                "configuration": {
+                    "engine": "bls",
+                    "signal": None,
+                    "time_system": "BTJD_TDB",
+                    "detection_threshold_snr": 7.1,
+                },
             }
         ),
         encoding="utf-8",
     )
-    for filename in (
-        "asteroseismic_results.json",
-        "sed_fit_results.json",
-        "mcmc_transit_fit.json",
-        "ttv_analysis_results.json",
-        "phase_curve_results.json",
-    ):
-        (outputs / filename).write_text(
-            json.dumps({"source": "candidate-data"}), encoding="utf-8"
-        )
+    if include_analysis_outputs:
+        for filename in (
+            "asteroseismic_results.json",
+            "sed_fit_results.json",
+            "mcmc_transit_fit.json",
+            "ttv_analysis_results.json",
+            "phase_curve_results.json",
+        ):
+            (outputs / filename).write_text(
+                json.dumps({"source": "candidate-data"}), encoding="utf-8"
+            )
 
 
 def test_engine_run_generates_valid_schema_manifest(tmp_path: Path):
@@ -285,7 +331,7 @@ def test_engine_run_generates_valid_schema_manifest(tmp_path: Path):
     # Verify that schemas.py validates the workspace with 0 violations
     report = IsolationReport()
     validate_schemas(tmp_path, report)
-    assert report.ok, f"Schema violations: {[v.message for v in report.violations]}"
+    assert report.ok, f"Schema violations: {[v.detail for v in report.violations]}"
 
 
 def test_engine_report_lists_completed_runs(tmp_path: Path):
@@ -322,7 +368,7 @@ def test_automated_triage_requires_review_for_uncalibrated_activity(tmp_path: Pa
 
     report = IsolationReport()
     validate_schemas(tmp_path, report)
-    assert report.ok, f"Schema violations: {[v.message for v in report.violations]}"
+    assert report.ok, f"Schema violations: {[v.detail for v in report.violations]}"
 
 
 def test_automated_triage_review_required_on_odd_even_anomaly(tmp_path: Path):
@@ -358,7 +404,7 @@ def test_automated_triage_review_required_on_odd_even_anomaly(tmp_path: Path):
 
     report = IsolationReport()
     validate_schemas(tmp_path, report)
-    assert report.ok, f"Schema violations: {[v.message for v in report.violations]}"
+    assert report.ok, f"Schema violations: {[v.detail for v in report.violations]}"
 
 
 def test_statistical_vetting_requires_review_for_alternating_events(tmp_path: Path):
@@ -582,7 +628,9 @@ def test_vetting_readiness_requires_all_real_data_prerequisites(tmp_path: Path):
 
     candidate_path = _setup_synthetic_workspace(tmp_path, "synth-vet-prerequisites")
     cand = load_candidate(tmp_path, "synth-vet-prerequisites")
-    _write_passing_pre_vetting_artifacts(candidate_path, cand.candidate_id)
+    _write_passing_pre_vetting_artifacts(
+        candidate_path, cand.candidate_id, include_search=False
+    )
 
     with pytest.raises(RuntimeError, match="real candidate-data prerequisite outputs: search"):
         require_vetting_readiness(cand)

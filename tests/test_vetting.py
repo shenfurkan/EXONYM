@@ -113,7 +113,7 @@ def test_fpp_report_rejects_non_object_json(tmp_path):
 def test_observed_sector_parser_prefers_products_then_uses_holdings_fallback(tmp_path):
     from exonym.vetting.tricera_parse import _observed_sectors
 
-    workspace = type("Workspace", (), {"path": tmp_path})()
+    workspace = type("Workspace", (), {"path": tmp_path, "candidate_id": "dilution-test"})()
     raw = tmp_path / "data" / "raw"
     raw.mkdir(parents=True)
     (raw / "s0007_lc.fits").write_bytes(b"synthetic")
@@ -144,9 +144,26 @@ def _vet_workspace_stub(tmp_path, candidate_id="vet-stub", tic=None):
     stub = types.SimpleNamespace(
         path=tmp_path,
         candidate_id=candidate_id,
+        repository_root=tmp_path,
         metadata={"identifiers": {"tic": tic}} if tic else {"identifiers": {}},
     )
     return stub, outputs
+
+
+def _write_raw_provenance(input_path):
+    sidecar = input_path.with_name(input_path.stem + ".provenance.json")
+    sidecar.write_text(
+        json.dumps(
+            {
+                "source_uri": "https://archive.example.invalid/" + input_path.name,
+                "download_timestamp_utc": "2026-01-01T00:00:00Z",
+                "sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+                "fetched_by": "synthetic-test",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return sidecar
 
 
 def _observed_input_stub(tmp_path):
@@ -311,6 +328,7 @@ def test_run_triceratops_defaults_to_bls_without_signal(tmp_path):
                 "best_duration_hours": 2.0,
                 "snr": 10.0,
                 "n_distinct_transit_events": 3,
+                "detection_threshold_snr": 7.1,
             }
         ),
         encoding="utf-8",
@@ -318,6 +336,7 @@ def test_run_triceratops_defaults_to_bls_without_signal(tmp_path):
     input_path = tmp_path / "data" / "raw" / "observed.fits"
     input_path.parent.mkdir(parents=True, exist_ok=True)
     input_path.write_bytes(b"candidate-photometry")
+    provenance_path = _write_raw_provenance(input_path)
     (tmp_path / "outputs" / "bls_search_manifest.json").write_text(
         json.dumps(
             {
@@ -331,9 +350,16 @@ def test_run_triceratops_defaults_to_bls_without_signal(tmp_path):
                     {
                         "path": "data/raw/observed.fits",
                         "sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+                        "provenance_path": "data/raw/observed.provenance.json",
+                        "provenance_sha256": hashlib.sha256(provenance_path.read_bytes()).hexdigest(),
                     }
                 ],
-                "configuration": {"engine": "bls", "signal": None, "time_system": "BTJD_TDB"},
+                "configuration": {
+                    "engine": "bls",
+                    "signal": None,
+                    "time_system": "BTJD_TDB",
+                    "detection_threshold_snr": 7.1,
+                },
             }
         ),
         encoding="utf-8",
@@ -642,12 +668,14 @@ def test_load_transit_ephemeris_uses_matching_signal_bls_result(tmp_path):
                 "best_depth_ppm": 700.0,
                 "snr": 10.0,
                 "n_distinct_transit_events": 3,
+                "detection_threshold_snr": 7.1,
             }
         ),
         encoding="utf-8",
     )
     input_path = workspace.path / "data" / "raw" / "observed.fits"
     input_path.write_bytes(b"candidate-photometry")
+    provenance_path = _write_raw_provenance(input_path)
     (workspace.path / "outputs" / "bls_search_manifest.02.json").write_text(
         json.dumps(
             {
@@ -661,9 +689,16 @@ def test_load_transit_ephemeris_uses_matching_signal_bls_result(tmp_path):
                     {
                         "path": "data/raw/observed.fits",
                         "sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+                        "provenance_path": "data/raw/observed.provenance.json",
+                        "provenance_sha256": hashlib.sha256(provenance_path.read_bytes()).hexdigest(),
                     }
                 ],
-                "configuration": {"engine": "bls", "signal": ".02", "time_system": "BTJD_TDB"},
+                "configuration": {
+                    "engine": "bls",
+                    "signal": ".02",
+                    "time_system": "BTJD_TDB",
+                    "detection_threshold_snr": 7.1,
+                },
             }
         ),
         encoding="utf-8",
@@ -680,6 +715,41 @@ def test_load_transit_ephemeris_uses_matching_signal_bls_result(tmp_path):
         "duration_days": "bls-search",
         "depth_ppm": "bls-search",
     }
+
+    signal_config = workspace.path / "config" / "signals" / "transit_config.02.json"
+    signal_config.parent.mkdir(parents=True, exist_ok=True)
+    signal_config.write_text(
+        json.dumps(
+            {
+                "source": "candidate-data-bls",
+                "bls_provenance": {
+                    "result": {
+                        "path": "outputs/bls_search_results.02.json",
+                        "sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
+                    },
+                    "manifest": {
+                        "path": "outputs/bls_search_manifest.02.json",
+                        "sha256": hashlib.sha256(
+                            (workspace.path / "outputs" / "bls_search_manifest.02.json").read_bytes()
+                        ).hexdigest(),
+                    },
+                },
+                "transit": {
+                    "period_days": 4.25,
+                    "epoch_btjd": 1742.5,
+                    "epoch_time_system": "BTJD_TDB",
+                    "duration_days": 3.0 / 24.0,
+                    "depth_ppm": 900.0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rejected_config = load_transit_ephemeris(workspace, signal=".02")
+
+    assert rejected_config["source"] == "bls-search"
+    assert rejected_config["depth_ppm"] == pytest.approx(700.0)
 
 
 # ---------------------------------------------------------------------------
@@ -892,7 +962,7 @@ def test_prf_localization_requires_a_competing_source_for_target_dominance(tmp_p
 
     # Assert
     assert report["source"] == "not-run-no-candidate-tpf"
-    assert report["summary"]["conclusion"] == "not-run-no-candidate-tpf"
+    assert report["summary"]["conclusion"] == "inconclusive_no_candidate_tpf"
     assert report["summary"]["sectors_with_competing_sources_modeled"] == 0
     assert report["sector_results"] == []
 
@@ -1366,7 +1436,7 @@ def test_phase_curve_run_records_eccentric_secondary_control(tmp_path, monkeypat
     table.pop("_duration_days")
     table.pop("_epoch_btjd")
     table.pop("_period_days")
-    monkeypatch.setattr(phasecurve, "load_light_curve_table", lambda _workspace: table)
+    monkeypatch.setattr(phasecurve, "load_light_curve_table", lambda *_args, **_kwargs: table)
     monkeypatch.setattr(phasecurve, "load_transit_ephemeris", lambda _workspace: ephemeris)
 
     output = phasecurve.run_phase_curve_search(workspace)
@@ -1565,8 +1635,8 @@ def test_light_curve_table_keeps_the_per_sector_binning_budget(tmp_path):
     assert set(np.unique(table["sector"])) == {1, 2}
 
 
-def test_load_gaia_neighbors_parses_csv(tmp_path):
-    from exonym.localization import _load_gaia_neighbors
+def test_localization_ignores_unvalidated_external_gaia_csv(tmp_path):
+    from exonym.localization import _load_archival_gaia_neighbors
     from exonym.workspace import create_candidate
 
     workspace = create_candidate(tmp_path, "gaia-csv-test")
@@ -1578,12 +1648,10 @@ def test_load_gaia_neighbors_parses_csv(tmp_path):
         "456,25.9242,-2.6270,20.28,11.5,0.0001,false\n",
         encoding="utf-8",
     )
-    rows = _load_gaia_neighbors(workspace)
-    assert len(rows) == 2
-    assert rows[0]["is_target"] is True
-    assert rows[0]["source_id"] == "123"
-    assert rows[1]["separation_arcsec"] == pytest.approx(11.5)
-    assert rows[1]["flux_ratio"] == pytest.approx(0.0001)
+    rows, metadata = _load_archival_gaia_neighbors(workspace)
+
+    assert rows == []
+    assert metadata["availability"] == "unavailable"
 
 
 # ---------------------------------------------------------------------------
@@ -1717,7 +1785,7 @@ def test_activity_does_not_mask_with_a_synthetic_ephemeris(tmp_path, monkeypatch
             "duration_days": "synthetic-demo",
         },
     }
-    monkeypatch.setattr(activity, "load_light_curve_table", lambda _workspace: table)
+    monkeypatch.setattr(activity, "load_light_curve_table", lambda *_args, **_kwargs: table)
     monkeypatch.setattr(activity, "load_transit_ephemeris", lambda _workspace: synthetic_ephemeris)
 
     # Act
@@ -1774,14 +1842,16 @@ def test_dilution_reads_validated_archival_neighbors(tmp_path):
     from exonym.dilution import _load_archival_gaia_neighbor_rows
 
     # Arrange
-    workspace = type("Workspace", (), {"path": tmp_path})()
+    workspace = type("Workspace", (), {"path": tmp_path, "candidate_id": "dilution-test"})()
     output = tmp_path / "outputs"
     output.mkdir()
     output.joinpath("archival_vetting_report.json").write_text(
         json.dumps(
             {
+                "candidate_id": workspace.candidate_id,
                 "gaia_astrometry": {
                     "validated": True,
+                    "query_status": "ok",
                     "search_radius_arcsec": 30.0,
                     "target_source_id": "synthetic-target",
                     "sources": [
@@ -1823,11 +1893,20 @@ def test_dilution_rejects_unvalidated_archival_neighbors(tmp_path):
     from exonym.dilution import _load_archival_gaia_neighbor_rows
 
     # Arrange
-    workspace = type("Workspace", (), {"path": tmp_path})()
+    workspace = type("Workspace", (), {"path": tmp_path, "candidate_id": "dilution-test"})()
     output = tmp_path / "outputs"
     output.mkdir()
     output.joinpath("archival_vetting_report.json").write_text(
-        json.dumps({"gaia_astrometry": {"validated": False, "sources": []}}),
+        json.dumps(
+            {
+                "candidate_id": workspace.candidate_id,
+                "gaia_astrometry": {
+                    "validated": False,
+                    "query_status": "unvalidated",
+                    "sources": [],
+                },
+            }
+        ),
         encoding="utf-8",
     )
 

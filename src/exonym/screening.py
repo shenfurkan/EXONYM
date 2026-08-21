@@ -266,7 +266,11 @@ def run_fixed_ephemeris_screen(
     if ephemeris.get("time_system") != BTJD_TIME_SYSTEM:
         raise ValueError("fixed-ephemeris screening requires a BTJD_TDB epoch")
 
-    table = load_light_curve_table(workspace, max_points=SCREENING_MAX_POINTS_PER_PRODUCT)
+    table = load_light_curve_table(
+        workspace,
+        max_points=SCREENING_MAX_POINTS_PER_PRODUCT,
+        require_raw_provenance=True,
+    )
     if table is None:
         raise ValueError("fixed-ephemeris screening requires a readable candidate light curve")
 

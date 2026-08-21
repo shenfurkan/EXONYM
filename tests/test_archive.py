@@ -88,14 +88,16 @@ def test_query_gaia_validates_high_proper_motion_match_at_j2000():
 
 def test_load_validated_archival_gaia_sources_prefers_recorded_target(tmp_path):
     # Arrange
-    workspace = type("Workspace", (), {"path": tmp_path})()
+    workspace = type("Workspace", (), {"path": tmp_path, "candidate_id": "archive-test"})()
     output = tmp_path / "outputs"
     output.mkdir()
     output.joinpath("archival_vetting_report.json").write_text(
         json.dumps(
             {
+                "candidate_id": workspace.candidate_id,
                 "gaia_astrometry": {
                     "validated": True,
+                    "query_status": "ok",
                     "target_source_id": "synthetic-target",
                     "target_match_max_arcsec": 2.0,
                     "search_radius_arcsec": 30.0,

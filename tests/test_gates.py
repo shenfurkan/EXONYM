@@ -5,7 +5,14 @@ import shutil
 import pytest
 
 from exonym.freeze import ReleaseVerificationError, freeze, verify_release
-from exonym.gatekeeper import GateError, advance, gate_errors, next_phase, set_lifecycle_state
+from exonym.gatekeeper import (
+    GateError,
+    advance,
+    gate_errors,
+    has_valid_raw_product_provenance,
+    next_phase,
+    set_lifecycle_state,
+)
 from exonym.survey_harvest import novelty_provider_urls
 from exonym.tagging import add_tags, filter_candidates, has_tag
 from exonym.tracking import candidate_telemetry, overall_progress, parse_checklist
@@ -248,6 +255,26 @@ def test_acquisition_gate_requires_provenance_sidecars(tmp_path):
     assert not gate_errors(candidate)
     (raw / "lc.fits").write_bytes(b"tampered")
     assert any("SHA-256 does not match" in error for error in gate_errors(candidate))
+
+
+@pytest.mark.parametrize(
+    "sidecar_text",
+    (
+        '{"source_uri":"https://archive.example.invalid/lc.fits","sha256":"placeholder","sha256":"placeholder","download_timestamp_utc":"2026-01-01T00:00:00Z","fetched_by":"test"}',
+        '{"source_uri":"https://archive.example.invalid/lc.fits","sha256":"placeholder","download_timestamp_utc":"2026-01-01T00:00:00Z","fetched_by":1e999}',
+    ),
+)
+def test_raw_provenance_rejects_ambiguous_or_nonfinite_json(tmp_path, sidecar_text):
+    candidate = create_candidate(tmp_path, "candidate-alpha")
+    product = candidate.path / "data" / "raw" / "lc.fits"
+    product.write_bytes(b"fits")
+    sidecar = product.with_name("lc.provenance.json")
+    sidecar.write_text(
+        sidecar_text.replace("placeholder", hashlib.sha256(product.read_bytes()).hexdigest()),
+        encoding="utf-8",
+    )
+
+    assert not has_valid_raw_product_provenance(candidate, product)
 
 
 def test_analysis_gate_blocks_fpp_claims_until_observed_photometry_vetting(tmp_path):

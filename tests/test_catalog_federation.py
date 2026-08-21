@@ -52,7 +52,13 @@ def _transport(status_code, body, calls=None):
 
 def _write_coordinate_context(candidate):
     (candidate.path / "outputs" / "archival_vetting_report.json").write_text(
-        json.dumps({"target_coordinates": {"ra_deg": 10.0, "dec_deg": 20.0}}),
+        json.dumps(
+            {
+                "candidate_id": candidate.candidate_id,
+                "target_coordinates": {"ra_deg": 10.0, "dec_deg": 20.0},
+                "gaia_astrometry": {"validated": True, "query_status": "ok"},
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -170,6 +176,28 @@ def test_coordinate_bound_discovery_templates_are_fixed_and_metadata_only(tmp_pa
         discovery = json.loads(manifest_path.with_name("archive-discovery.json").read_text(encoding="utf-8"))
         assert [row["source_record_index"] for row in discovery["records"]] == [0]
     assert _audit(tmp_path).ok
+
+
+def test_coordinate_bound_catalog_queries_reject_an_unowned_archive_report(tmp_path):
+    candidate = _candidate(tmp_path)
+    (candidate.path / "outputs" / "archival_vetting_report.json").write_text(
+        json.dumps(
+            {
+                "candidate_id": "other-candidate",
+                "target_coordinates": {"ra_deg": 10.0, "dec_deg": 20.0},
+                "gaia_astrometry": {"validated": True, "query_status": "ok"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls = []
+
+    manifest_path = fetch_catalog(
+        candidate, ["lamost-dr11"], _transport(200, _provider_success_body(PROVIDERS["lamost-dr11"]), calls)
+    )[0]
+
+    assert calls == []
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["status"] == "unavailable"
 
 
 def test_cross_match_propagates_proper_motion_and_retains_ambiguous_matches():

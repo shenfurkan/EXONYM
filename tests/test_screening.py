@@ -81,7 +81,7 @@ def test_run_fixed_ephemeris_screen_requires_a_signal_prior_and_writes_scoped_ou
     time, flux, _, _, _ = _synthetic_transit_series()
     monkeypatch.setattr(
         "exonym.screening.load_light_curve_table",
-        lambda _workspace, max_points: {
+        lambda _workspace, max_points, **_kwargs: {
             "time": time,
             "flux": flux,
             "sector": np.full(time.size, 31, dtype=int),

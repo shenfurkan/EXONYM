@@ -612,7 +612,7 @@ class ArchivalVettingService:
             dec_deg = float(params["dec_deg"])
 
         if ra_deg is None or dec_deg is None:
-            cubes = load_tpf_cubes(workspace)
+            cubes = load_tpf_cubes(workspace, require_raw_provenance=True)
             for cube in cubes:
                 header = cube.get("header", {})
                 if "RA_OBJ" in header and "DEC_OBJ" in header:
@@ -790,6 +790,58 @@ def _finite_float(value: Any) -> Optional[float]:
     return numeric if math.isfinite(numeric) else None
 
 
+def _load_archival_report(workspace: CandidateWorkspace) -> Optional[Dict[str, Any]]:
+    """Load one archival report without accepting ambiguous JSON records."""
+    path = workspace.path / ARCHIVAL_REPORT_RELATIVE_PATH
+    if not path.is_file():
+        return None
+
+    def reject_constant(value: str) -> object:
+        raise ValueError("non-finite JSON constant: {0}".format(value))
+
+    def parse_finite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError("non-finite JSON number")
+        return parsed
+
+    def unique_object(pairs: List[Tuple[str, object]]) -> Dict[str, object]:
+        result: Dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key: {0}".format(key))
+            result[key] = value
+        return result
+
+    try:
+        report = json.loads(
+            path.read_text(encoding="utf-8"),
+            parse_float=parse_finite_float,
+            parse_constant=reject_constant,
+            object_pairs_hook=unique_object,
+        )
+    except (json.JSONDecodeError, OSError, UnicodeError, ValueError):
+        return None
+    return report if isinstance(report, dict) else None
+
+
+def load_validated_archival_report(
+    workspace: CandidateWorkspace,
+) -> Optional[Dict[str, Any]]:
+    """Return an owned, successful, validated Gaia archival report only."""
+    report = _load_archival_report(workspace)
+    if report is None or report.get("candidate_id") != workspace.candidate_id:
+        return None
+    gaia = report.get("gaia_astrometry")
+    if (
+        not isinstance(gaia, dict)
+        or gaia.get("validated") is not True
+        or gaia.get("query_status") != "ok"
+    ):
+        return None
+    return report
+
+
 def load_validated_archival_gaia_sources(
     workspace: CandidateWorkspace,
 ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
@@ -803,16 +855,10 @@ def load_validated_archival_gaia_sources(
         "availability": "unavailable",
         "source": str(ARCHIVAL_REPORT_RELATIVE_PATH).replace("\\", "/"),
     }
-    path = workspace.path / ARCHIVAL_REPORT_RELATIVE_PATH
-    if not path.is_file():
+    report = load_validated_archival_report(workspace)
+    if report is None:
         return None, [], metadata
-    try:
-        report = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, UnicodeError):
-        return None, [], metadata
-    gaia = report.get("gaia_astrometry") if isinstance(report, dict) else None
-    if not isinstance(gaia, dict) or gaia.get("validated") is not True:
-        return None, [], metadata
+    gaia = report["gaia_astrometry"]
     sources = gaia.get("sources")
     if not isinstance(sources, list):
         return None, [], metadata

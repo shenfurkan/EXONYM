@@ -1018,7 +1018,7 @@ def run_mcmc_transit_fit(
     rho_prior_log10_sigma = density_prior["log10_sigma"]
     ldtk_prior = _load_ldtk_prior(workspace) if use_ldtk_prior else None
 
-    table = load_light_curve_table(workspace, max_points=None)
+    table = load_light_curve_table(workspace, max_points=None, require_raw_provenance=True)
     if table is None:
         raise RuntimeError("transit fitting requires observed candidate photometry")
     source = "candidate-data"
@@ -1265,7 +1265,7 @@ def _run_dynesty_transit_fit(
     rho_prior_solar = density_prior["rho_solar"]
     rho_prior_log10_sigma = density_prior["log10_sigma"]
     ldtk_prior = _load_ldtk_prior(workspace) if use_ldtk_prior else None
-    table = load_light_curve_table(workspace, max_points=None)
+    table = load_light_curve_table(workspace, max_points=None, require_raw_provenance=True)
     if table is None:
         raise RuntimeError("transit fitting requires observed candidate photometry")
     source = "candidate-data"
