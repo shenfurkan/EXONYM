@@ -17,21 +17,37 @@ from exonym.survey import (
     survey_summary,
     validate_survey_id,
 )
+from exonym.survey_harvest import novelty_provider_urls
 from exonym.workspace import create_candidate
 
 
 def _eligible_audit(workspace):
     retrieval_id = "a" * 32
+    tic = workspace.metadata["identifiers"]["tic"]
+    source_uris = dict(novelty_provider_urls(tic))
     evidence_dir = workspace.path / "data" / "external" / "novelty" / retrieval_id
     evidence_dir.mkdir(parents=True, exist_ok=True)
     evidence = []
     for index, provider in enumerate(("nasa-toi", "nasa-confirmed", "exofop")):
         extension = "json" if provider == "exofop" else "csv"
         response_path = evidence_dir / "{0}-{1}.{2}".format(index, provider, extension)
-        response_path.write_bytes(provider.encode("ascii"))
+        if provider == "nasa-toi":
+            response = b"toi,tid\n"
+        elif provider == "nasa-confirmed":
+            response = b"pl_name,tic_id\n"
+        else:
+            response = json.dumps(
+                {
+                    "basic_info": {"tic_id": tic},
+                    "tois": [],
+                    "ctois": [],
+                    "planet_parameters": [],
+                }
+            ).encode("utf-8")
+        response_path.write_bytes(response)
         evidence.append(
             {
-                "source_uri": "https://example.invalid/{0}".format(provider),
+                "source_uri": source_uris[provider],
                 "retrieved_at": "2026-01-01T00:00:00Z",
                 "finding": "Synthetic {0} eligibility response.".format(provider),
                 "evidence_sha256": hashlib.sha256(response_path.read_bytes()).hexdigest(),

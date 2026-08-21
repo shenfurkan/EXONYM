@@ -205,6 +205,17 @@ def _nea_urls(tic: str) -> Tuple[Tuple[str, str], ...]:
     )
 
 
+def novelty_provider_urls(tic: str) -> Tuple[Tuple[str, str], ...]:
+    """Return the canonical three-registry novelty queries for one TIC."""
+    normalized_tic = str(tic)
+    if not _TIC_PATTERN.fullmatch(normalized_tic):
+        raise ValueError("TIC identifier must be a positive integer string")
+    exofop_url = "https://exofop.ipac.caltech.edu/tess/target.php?" + urllib.parse.urlencode(
+        {"id": normalized_tic, "json": ""}
+    )
+    return _nea_urls(normalized_tic) + (("exofop", exofop_url),)
+
+
 def _csv_has_records(payload: bytes, expected_columns: Sequence[str]) -> bool:
     """Return whether a schema-valid NASA CSV response has data rows."""
     try:
@@ -260,6 +271,43 @@ def _validate_exofop_response(payload: Mapping[str, object], tic: str) -> None:
             raise ValueError("ExoFOP response is missing the {0} registration field".format(field))
 
 
+def _strict_json_object(payload: bytes) -> Mapping[str, object]:
+    """Parse an ExoFOP response without accepting duplicate keys or non-finite values."""
+    def unique_object(pairs: Sequence[Tuple[str, object]]) -> Dict[str, object]:
+        result: Dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key: {0}".format(key))
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> object:
+        raise ValueError("non-finite JSON constant: {0}".format(value))
+
+    data = json.loads(
+        payload.decode("utf-8"),
+        object_pairs_hook=unique_object,
+        parse_constant=reject_constant,
+    )
+    if not isinstance(data, Mapping):
+        raise ValueError("ExoFOP response is not a JSON object")
+    return data
+
+
+def novelty_response_has_registration(
+    provider: str, source_uri: str, payload: bytes, tic: str
+) -> bool:
+    """Validate one retained response and report whether it contains a registry record."""
+    expected_urls = dict(novelty_provider_urls(tic))
+    if provider not in expected_urls or source_uri != expected_urls[provider]:
+        raise ValueError("novelty response does not use the canonical provider query")
+    if provider in _NASA_RESPONSE_COLUMNS:
+        return _csv_has_records(payload, _NASA_RESPONSE_COLUMNS[provider])
+    exofop_data = _strict_json_object(payload)
+    _validate_exofop_response(exofop_data, str(tic))
+    return _exofop_has_registration(exofop_data)
+
+
 def evaluate_live_novelty(
     tic: str,
     timeout: float = DEFAULT_HTTP_TIMEOUT_SECONDS,
@@ -275,23 +323,16 @@ def evaluate_live_novelty(
     timeout = _validate_timeout(timeout)
     responses: List[Tuple[str, str, bytes]] = []
     try:
-        for source_name, source_url in _nea_urls(str(tic)):
+        for source_name, source_url in novelty_provider_urls(str(tic)):
             payload = transport(source_url, timeout)
             responses.append((source_name, source_url, payload))
-            if _csv_has_records(payload, _NASA_RESPONSE_COLUMNS[source_name]):
-                return NoveltyResult("ineligible", "NASA Exoplanet Archive returned a registered record.", tuple(responses))
-
-        exofop_url = "https://exofop.ipac.caltech.edu/tess/target.php?" + urllib.parse.urlencode(
-            {"id": str(tic), "json": ""}
-        )
-        exofop_payload = transport(exofop_url, timeout)
-        responses.append(("exofop", exofop_url, exofop_payload))
-        exofop_data = json.loads(exofop_payload.decode("utf-8"))
-        if not isinstance(exofop_data, Mapping):
-            raise ValueError("ExoFOP response is not a JSON object")
-        _validate_exofop_response(exofop_data, str(tic))
-        if _exofop_has_registration(exofop_data):
-            return NoveltyResult("ineligible", "ExoFOP returned a TOI, cTOI, or planet registration.", tuple(responses))
+            if novelty_response_has_registration(source_name, source_url, payload, str(tic)):
+                reason = (
+                    "NASA Exoplanet Archive returned a registered record."
+                    if source_name.startswith("nasa-")
+                    else "ExoFOP returned a TOI, cTOI, or planet registration."
+                )
+                return NoveltyResult("ineligible", reason, tuple(responses))
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
         return NoveltyResult("unavailable", "Live novelty check was incomplete: {0}".format(exc), tuple(responses))
     return NoveltyResult(
@@ -321,6 +362,14 @@ def write_novelty_audit(
         or set(providers) != set(_NOVELTY_PROVIDERS)
     ):
         raise RuntimeError("an eligible novelty audit requires all independent registry responses")
+    if result.status == "eligible":
+        tic = candidate.metadata["identifiers"].get("tic")
+        try:
+            for provider, source_uri, payload in result.responses:
+                if novelty_response_has_registration(provider, source_uri, payload, str(tic)):
+                    raise RuntimeError("an eligible novelty audit cannot retain a registered source response")
+        except ValueError as exc:
+            raise RuntimeError("an eligible novelty audit requires canonical valid registry responses") from exc
     retrieved = _utc_now()
     retrieval_id = uuid.uuid4().hex
     evidence_dir = candidate.path / "data" / "external" / "novelty" / retrieval_id

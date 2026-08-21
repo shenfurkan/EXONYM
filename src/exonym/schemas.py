@@ -169,6 +169,21 @@ def _validate_novelty_audit_evidence(
     evidence = instance.get("evidence")
     if not isinstance(evidence, list):
         return
+    expected_urls: Optional[Dict[str, str]] = None
+    if instance.get("status") == "eligible":
+        try:
+            metadata = _read_json(workspace_dir / "candidate.json")
+            identifiers = metadata.get("identifiers") if isinstance(metadata, dict) else None
+            tic = identifiers.get("tic") if isinstance(identifiers, dict) else None
+            from .survey_harvest import novelty_provider_urls
+
+            expected_urls = dict(novelty_provider_urls(str(tic)))
+        except (OSError, UnicodeError, ValueError):
+            report.add(
+                audit_path,
+                "novelty-evidence-provenance-invalid",
+                "eligible novelty evidence requires a candidate TIC and canonical registry queries",
+            )
     response_paths = set()
     retrieval_ids = set()
     for entry in evidence:
@@ -191,12 +206,40 @@ def _validate_novelty_audit_evidence(
                 "novelty evidence response path is missing or outside the candidate workspace",
             )
             continue
-        if entry.get("evidence_sha256") != _file_sha256(resolved_path):
+        hash_matches = entry.get("evidence_sha256") == _file_sha256(resolved_path)
+        if not hash_matches:
             report.add(
                 audit_path,
                 "novelty-evidence-provenance-invalid",
                 "novelty evidence response SHA-256 does not match",
             )
+        elif expected_urls is not None:
+            provider = entry.get("provider")
+            source_uri = entry.get("source_uri")
+            if provider not in expected_urls or source_uri != expected_urls[provider]:
+                report.add(
+                    audit_path,
+                    "novelty-evidence-provenance-invalid",
+                    "eligible novelty evidence does not use its candidate-matched provider query",
+                )
+            else:
+                try:
+                    from .survey_harvest import novelty_response_has_registration
+
+                    if novelty_response_has_registration(
+                        provider, source_uri, resolved_path.read_bytes(), str(tic)
+                    ):
+                        report.add(
+                            audit_path,
+                            "novelty-evidence-provenance-invalid",
+                            "eligible novelty evidence contains a registered source record",
+                        )
+                except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+                    report.add(
+                        audit_path,
+                        "novelty-evidence-provenance-invalid",
+                        "eligible novelty evidence response is not semantically valid: {0}".format(exc),
+                    )
         response_paths.add(resolved_path)
         retrieval_ids.add(relative_path.parts[3])
     if len(response_paths) != len(evidence) or len(retrieval_ids) > 1:

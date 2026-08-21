@@ -14,6 +14,7 @@ from exonym.survey import (
     register_survey_target,
     run_survey_sensitivity,
 )
+from exonym.survey_harvest import novelty_provider_urls
 from exonym.workspace import create_candidate, load_candidate
 
 
@@ -408,6 +409,7 @@ def _valid_novelty_audit():
 
 def _write_valid_v2_novelty_audit(repo):
     workspace = repo / "candidate" / "candidate-alpha"
+    source_uris = dict(novelty_provider_urls("123456789"))
     retrieval_id = "a" * 32
     evidence_dir = workspace / "data" / "external" / "novelty" / retrieval_id
     evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -415,10 +417,16 @@ def _write_valid_v2_novelty_audit(repo):
     for index, provider in enumerate(("nasa-toi", "nasa-confirmed", "exofop")):
         extension = "json" if provider == "exofop" else "csv"
         response_path = evidence_dir / "{0}-{1}.{2}".format(index, provider, extension)
-        response_path.write_bytes(provider.encode("ascii"))
+        response_path.write_bytes(
+            (
+                b'{"basic_info":{"tic_id":"123456789"},"tois":[],"ctois":[],"planet_parameters":[]}'
+                if provider == "exofop"
+                else (b"toi,tid\n" if provider == "nasa-toi" else b"pl_name,tic_id\n")
+            )
+        )
         evidence.append(
             {
-                "source_uri": "https://example.invalid/{0}".format(provider),
+                "source_uri": source_uris[provider],
                 "retrieved_at": "2000-01-01T00:00:00Z",
                 "finding": "Synthetic {0} response.".format(provider),
                 "evidence_sha256": hashlib.sha256(response_path.read_bytes()).hexdigest(),
@@ -682,6 +690,25 @@ def test_v2_novelty_audit_rejects_a_tampered_retained_response(tmp_path):
     assert any(
         violation.path == audit_path.as_posix()
         and violation.rule == "novelty-evidence-provenance-invalid"
+        for violation in report.violations
+    )
+
+
+def test_v2_novelty_audit_rejects_a_semantically_invalid_retained_response(tmp_path):
+    repo = _make_repo(tmp_path)
+    audit_path, evidence_dir = _write_valid_v2_novelty_audit(repo)
+    response_path = evidence_dir / "0-nasa-toi.csv"
+    response_path.write_bytes(b"not a NASA response")
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    audit["evidence"][0]["evidence_sha256"] = hashlib.sha256(response_path.read_bytes()).hexdigest()
+    audit_path.write_text(json.dumps(audit), encoding="utf-8")
+
+    report = _audit(repo)
+
+    assert any(
+        violation.path == audit_path.as_posix()
+        and violation.rule == "novelty-evidence-provenance-invalid"
+        and "semantically valid" in violation.detail
         for violation in report.violations
     )
 

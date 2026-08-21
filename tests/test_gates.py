@@ -6,6 +6,7 @@ import pytest
 
 from exonym.freeze import ReleaseVerificationError, freeze, verify_release
 from exonym.gatekeeper import GateError, advance, gate_errors, next_phase, set_lifecycle_state
+from exonym.survey_harvest import novelty_provider_urls
 from exonym.tagging import add_tags, filter_candidates, has_tag
 from exonym.tracking import candidate_telemetry, overall_progress, parse_checklist
 from exonym.workspace import create_candidate, discover_candidates, load_candidate
@@ -25,16 +26,33 @@ def _reload(tmp_path):
 
 def _novelty_audit_payload(candidate, status="eligible", expires_at=None):
     retrieval_id = "a" * 32
+    tic = candidate.metadata["identifiers"].get("tic")
+    if not isinstance(tic, str):
+        raise ValueError("novelty gate test candidates require a TIC")
+    source_uris = dict(novelty_provider_urls(tic))
     evidence_dir = candidate.path / "data" / "external" / "novelty" / retrieval_id
     evidence_dir.mkdir(parents=True, exist_ok=True)
     evidence = []
     for index, provider in enumerate(("nasa-toi", "nasa-confirmed", "exofop")):
         extension = "json" if provider == "exofop" else "csv"
         response_path = evidence_dir / "{0}-{1}.{2}".format(index, provider, extension)
-        response_path.write_bytes(provider.encode("ascii"))
+        if provider == "nasa-toi":
+            response = b"toi,tid\n"
+        elif provider == "nasa-confirmed":
+            response = b"pl_name,tic_id\n"
+        else:
+            response = json.dumps(
+                {
+                    "basic_info": {"tic_id": tic},
+                    "tois": [],
+                    "ctois": [],
+                    "planet_parameters": [],
+                }
+            ).encode("utf-8")
+        response_path.write_bytes(response)
         evidence.append(
             {
-                "source_uri": "https://example.invalid/{0}".format(provider),
+                "source_uri": source_uris[provider],
                 "retrieved_at": "2000-01-01T00:00:00Z",
                 "finding": "Synthetic {0} response supports the recorded novelty decision.".format(provider),
                 "evidence_sha256": hashlib.sha256(response_path.read_bytes()).hexdigest(),
@@ -188,7 +206,7 @@ def test_advance_promotes_phase_and_writes_gate_record(tmp_path):
 
 
 def test_acquisition_gate_requires_provenance_sidecars(tmp_path):
-    candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha")
+    candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha", tic="123456789")
     candidate.path.joinpath("docs/01_intake_manifest.md").unlink()
     _check(candidate.path / "docs" / "01_intake_manifest.md", "a", checked=True, mandatory=True)
     _check(candidate.path / "docs" / "01_intake_manifest.md", "b", checked=True, mandatory=True)
@@ -233,7 +251,7 @@ def test_acquisition_gate_requires_provenance_sidecars(tmp_path):
 
 
 def test_analysis_gate_blocks_fpp_claims_until_observed_photometry_vetting(tmp_path):
-    candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha")
+    candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha", tic="123456789")
     claims = candidate.path / "claims"
     claims.mkdir(parents=True, exist_ok=True)
     _write_verified_fpp_claim(candidate)
@@ -374,7 +392,7 @@ def _checked_doc(path, items=4):
 
 
 def _to_review_phase(tmp_path):
-    candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha")
+    candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha", tic="123456789")
     # Exercise review behavior against a historical workspace that reached the
     # phase before the FPP claim gate was intentionally disabled.
     metadata = dict(candidate.metadata)
@@ -390,7 +408,7 @@ def _to_review_phase(tmp_path):
 
 
 def test_feasibility_gate_rejects_nonconforming_or_ineligible_novelty_audit(tmp_path):
-    candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha")
+    candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha", tic="123456789")
     _checked_doc(candidate.path / "docs" / "01_intake_manifest.md")
     advance(candidate)
     candidate = _reload(tmp_path)
@@ -406,7 +424,7 @@ def test_feasibility_gate_rejects_nonconforming_or_ineligible_novelty_audit(tmp_
 def test_novelty_gate_rejects_legacy_or_tampered_response_evidence(tmp_path):
     from exonym.gatekeeper import _gate_novelty_audit
 
-    candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha")
+    candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha", tic="123456789")
     _write_novelty_audit(candidate)
     audit_path = candidate.path / "decisions" / "novelty_audit.json"
     audit = json.loads(audit_path.read_text(encoding="utf-8"))
@@ -420,6 +438,49 @@ def test_novelty_gate_rejects_legacy_or_tampered_response_evidence(tmp_path):
     (candidate.path / audit["evidence"][0]["response_path"]).write_bytes(b"tampered")
 
     assert "SHA-256" in _gate_novelty_audit(candidate)[1]
+
+
+def test_novelty_gate_rejects_semantically_mismatched_evidence(tmp_path):
+    from exonym.gatekeeper import _gate_novelty_audit
+
+    candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha", tic="123456789")
+    audit_path = candidate.path / "decisions" / "novelty_audit.json"
+    _write_novelty_audit(candidate)
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    audit["evidence"][0]["source_uri"] = audit["evidence"][1]["source_uri"]
+    audit_path.write_text(json.dumps(audit), encoding="utf-8")
+
+    assert "canonical provider query" in _gate_novelty_audit(candidate)[1]
+
+    _write_novelty_audit(candidate)
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    response_path = candidate.path / audit["evidence"][0]["response_path"]
+    response_path.write_bytes(b"not a NASA CSV response")
+    audit["evidence"][0]["evidence_sha256"] = hashlib.sha256(response_path.read_bytes()).hexdigest()
+    audit_path.write_text(json.dumps(audit), encoding="utf-8")
+
+    assert "not semantically valid" in _gate_novelty_audit(candidate)[1]
+
+
+def test_novelty_gate_requires_matching_entry_timestamps_and_strict_json(tmp_path):
+    from exonym.gatekeeper import _gate_novelty_audit
+
+    candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha", tic="123456789")
+    audit_path = candidate.path / "decisions" / "novelty_audit.json"
+    _write_novelty_audit(candidate)
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    audit["evidence"][0]["retrieved_at"] = "2000-01-01T00:00:01Z"
+    audit_path.write_text(json.dumps(audit), encoding="utf-8")
+
+    assert "retrieval time does not match" in _gate_novelty_audit(candidate)[1]
+
+    _write_novelty_audit(candidate)
+    duplicate_status = audit_path.read_text(encoding="utf-8").replace(
+        '"status": "eligible"', '"status": "ineligible", "status": "eligible"'
+    )
+    audit_path.write_text(duplicate_status, encoding="utf-8")
+
+    assert "invalid novelty audit JSON" in _gate_novelty_audit(candidate)[1]
 
 
 def test_review_gate_requires_a_current_novelty_audit(tmp_path):

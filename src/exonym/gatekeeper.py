@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from .resources import ResourceUnavailableError, read_schema_text
 from .schemas import NOVELTY_AUDIT_SCHEMA, PROVENANCE_SCHEMA
+from .survey_harvest import novelty_provider_urls, novelty_response_has_registration
 from .tracking import phase_document_path, parse_checklist
 from .workspace import (
     CandidateWorkspace,
@@ -164,7 +165,9 @@ def _parse_utc_timestamp(value: object) -> Optional[datetime]:
     return parsed.astimezone(timezone.utc)
 
 
-def _gate_novelty_evidence(workspace: CandidateWorkspace, audit: Dict) -> Tuple[bool, str]:
+def _gate_novelty_evidence(
+    workspace: CandidateWorkspace, audit: Dict, audit_retrieved_at: datetime
+) -> Tuple[bool, str]:
     """Require retained, hash-matched responses from all independent registries."""
     if audit.get("schema_version") != 2:
         return False, "eligible novelty audits must use evidence-bound schema version 2"
@@ -173,6 +176,11 @@ def _gate_novelty_evidence(workspace: CandidateWorkspace, audit: Dict) -> Tuple[
         return False, "eligible novelty audit must retain exactly three independent registry responses"
 
     workspace_root = workspace.path.resolve()
+    tic = workspace.metadata["identifiers"].get("tic")
+    try:
+        expected_urls = dict(novelty_provider_urls(str(tic)))
+    except ValueError:
+        return False, "eligible novelty audit requires a candidate TIC for canonical registry queries"
     providers = []
     paths = set()
     retrieval_ids = set()
@@ -184,8 +192,8 @@ def _gate_novelty_evidence(workspace: CandidateWorkspace, audit: Dict) -> Tuple[
         response_path = entry.get("response_path")
         if provider not in NOVELTY_AUDIT_REQUIRED_PROVIDERS:
             return False, "eligible novelty audit contains an unsupported registry provider"
-        if not isinstance(source_uri, str) or not source_uri.startswith("https://"):
-            return False, "eligible novelty audit evidence must use an HTTPS source URI"
+        if not isinstance(source_uri, str) or source_uri != expected_urls[provider]:
+            return False, "eligible novelty audit evidence does not use the canonical provider query"
         if not isinstance(response_path, str):
             return False, "eligible novelty audit evidence has no candidate-local response path"
         relative_path = Path(response_path)
@@ -204,6 +212,17 @@ def _gate_novelty_evidence(workspace: CandidateWorkspace, audit: Dict) -> Tuple[
             return False, "eligible novelty audit evidence response is missing"
         if entry.get("evidence_sha256") != _sha256_file(resolved_path):
             return False, "eligible novelty audit evidence SHA-256 does not match the retained response"
+        expected_extension = ".json" if provider == "exofop" else ".csv"
+        if not relative_path.name.endswith("-{0}{1}".format(provider, expected_extension)):
+            return False, "eligible novelty audit evidence filename does not match its provider"
+        entry_retrieved_at = _parse_utc_timestamp(entry.get("retrieved_at"))
+        if entry_retrieved_at != audit_retrieved_at:
+            return False, "eligible novelty audit evidence retrieval time does not match the audit"
+        try:
+            if novelty_response_has_registration(provider, source_uri, resolved_path.read_bytes(), str(tic)):
+                return False, "eligible novelty audit evidence contains a registered source record"
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+            return False, "eligible novelty audit evidence response is not semantically valid: {0}".format(exc)
         providers.append(provider)
         paths.add(resolved_path)
         retrieval_ids.add(relative_path.parts[3])
@@ -221,8 +240,12 @@ def _gate_novelty_audit(workspace: CandidateWorkspace) -> Tuple[bool, str]:
     if not audit_path.is_file():
         return False, "missing novelty audit: {0}".format(NOVELTY_AUDIT_RELATIVE_PATH)
     try:
-        audit = json.loads(audit_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
+        audit = json.loads(
+            audit_path.read_text(encoding="utf-8"),
+            parse_constant=_reject_json_constant,
+            object_pairs_hook=_unique_json_object,
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
         return False, "invalid novelty audit JSON: {0}".format(exc)
 
     try:
@@ -248,10 +271,6 @@ def _gate_novelty_audit(workspace: CandidateWorkspace) -> Tuple[bool, str]:
         return False, "novelty audit candidate_id does not match the workspace"
     if audit.get("status") != NOVELTY_AUDIT_ELIGIBLE_STATUS:
         return False, "novelty audit status is not eligible: {0}".format(audit.get("status"))
-    evidence_ok, evidence_detail = _gate_novelty_evidence(workspace, audit)
-    if not evidence_ok:
-        return False, evidence_detail
-
     retrieved_at = _parse_utc_timestamp(audit.get("retrieved_at"))
     freshness = audit.get("freshness")
     expires_at = _parse_utc_timestamp(
@@ -266,6 +285,9 @@ def _gate_novelty_audit(workspace: CandidateWorkspace) -> Tuple[bool, str]:
         return False, "novelty audit freshness expiry must be later than retrieval date"
     if expires_at <= now:
         return False, "novelty audit is stale: freshness.expires_at has passed"
+    evidence_ok, evidence_detail = _gate_novelty_evidence(workspace, audit, retrieved_at)
+    if not evidence_ok:
+        return False, evidence_detail
     return True, "novelty audit is eligible and current through {0}".format(
         audit["freshness"]["expires_at"]
     )

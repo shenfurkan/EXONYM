@@ -76,7 +76,45 @@
             "type": "string",
             "pattern": "^data/external/novelty/[a-f0-9]{32}/[0-9]+-(nasa-toi|nasa-confirmed|exofop)\\.(csv|json)$"
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {"provider": {"const": "nasa-toi"}},
+              "required": ["provider"]
+            },
+            "then": {
+              "properties": {
+                "source_uri": {"pattern": "^https://exoplanetarchive\\.ipac\\.caltech\\.edu/TAP/sync\\?"},
+                "response_path": {"pattern": "^data/external/novelty/[a-f0-9]{32}/[0-9]+-nasa-toi\\.csv$"}
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {"provider": {"const": "nasa-confirmed"}},
+              "required": ["provider"]
+            },
+            "then": {
+              "properties": {
+                "source_uri": {"pattern": "^https://exoplanetarchive\\.ipac\\.caltech\\.edu/TAP/sync\\?"},
+                "response_path": {"pattern": "^data/external/novelty/[a-f0-9]{32}/[0-9]+-nasa-confirmed\\.csv$"}
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {"provider": {"const": "exofop"}},
+              "required": ["provider"]
+            },
+            "then": {
+              "properties": {
+                "source_uri": {"pattern": "^https://exofop\\.ipac\\.caltech\\.edu/tess/target\\.php\\?"},
+                "response_path": {"pattern": "^data/external/novelty/[a-f0-9]{32}/[0-9]+-exofop\\.json$"}
+              }
+            }
+          }
+        ]
       }
     }
   },
