@@ -132,6 +132,50 @@ def _build_parser() -> argparse.ArgumentParser:
         "report", help="Show the survey denominator and recorded outcomes."
     )
     survey_report_parser.add_argument("survey_id")
+    survey_harvest_parser = survey_commands.add_parser(
+        "harvest", help="Stream a supplied TCE CSV, retain live novelty evidence, and register eligible targets."
+    )
+    survey_harvest_parser.add_argument("survey_id")
+    survey_harvest_parser.add_argument("--source", required=True, help="HTTPS or local CSV TCE release source.")
+    survey_harvest_parser.add_argument("--max-candidates", type=int, default=25)
+    survey_harvest_parser.add_argument("--minimum-snr", type=float, default=20.0)
+    survey_harvest_parser.add_argument("--period-min", type=float, default=1.0)
+    survey_harvest_parser.add_argument("--period-max", type=float, default=15.0)
+    survey_harvest_parser.add_argument("--depth-min", type=float, default=200.0)
+    survey_harvest_parser.add_argument("--depth-max", type=float, default=1500.0)
+    survey_harvest_parser.add_argument("--radius-min", type=float, default=1.2)
+    survey_harvest_parser.add_argument("--radius-max", type=float, default=3.5)
+    survey_harvest_parser.add_argument("--stellar-radius-max", type=float, default=1.3)
+    survey_harvest_parser.add_argument("--tmag-max", type=float, default=12.5)
+    survey_harvest_parser.add_argument("--timeout", type=float, default=20.0)
+    survey_harvest_parser.add_argument("--freshness-hours", type=float, default=24.0)
+    survey_auto_vet_parser = survey_commands.add_parser(
+        "auto-vet", help="Run bounded candidate-local evidence collection without changing workflow state or claims."
+    )
+    survey_auto_vet_parser.add_argument("candidate_id", nargs="?")
+    survey_auto_vet_parser.add_argument("--all", action="store_true", help="Process every registered candidate workspace.")
+    survey_auto_vet_parser.add_argument("--sectors", nargs="+", type=int, default=None)
+    survey_auto_vet_parser.add_argument("--n-draws", type=int, default=2000)
+    survey_auto_vet_parser.add_argument("--no-download", action="store_true")
+    survey_loop_parser = survey_commands.add_parser(
+        "run-loop", help="Run bounded harvest and candidate-local vetting cycles; never reports a validation claim."
+    )
+    survey_loop_parser.add_argument("survey_id")
+    survey_loop_parser.add_argument("--source", required=True)
+    survey_loop_parser.add_argument("--max-cycles", type=int, default=1)
+    survey_loop_parser.add_argument("--max-candidates", type=int, default=25)
+    survey_loop_parser.add_argument("--minimum-snr", type=float, default=20.0)
+    survey_loop_parser.add_argument("--period-min", type=float, default=1.0)
+    survey_loop_parser.add_argument("--period-max", type=float, default=15.0)
+    survey_loop_parser.add_argument("--depth-min", type=float, default=200.0)
+    survey_loop_parser.add_argument("--depth-max", type=float, default=1500.0)
+    survey_loop_parser.add_argument("--radius-min", type=float, default=1.2)
+    survey_loop_parser.add_argument("--radius-max", type=float, default=3.5)
+    survey_loop_parser.add_argument("--stellar-radius-max", type=float, default=1.3)
+    survey_loop_parser.add_argument("--tmag-max", type=float, default=12.5)
+    survey_loop_parser.add_argument("--timeout", type=float, default=20.0)
+    survey_loop_parser.add_argument("--freshness-hours", type=float, default=24.0)
+    survey_loop_parser.add_argument("--n-draws", type=int, default=2000)
 
     engine_parser = commands.add_parser(
         "engine", help="Inspect and validate analytical and vetting engines."
@@ -483,7 +527,24 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _print_json(value: object) -> None:
-    print(json.dumps(value, indent=2, sort_keys=True))
+    print(json.dumps(value, indent=2, sort_keys=True), flush=True)
+
+
+def _harvest_filters(args: argparse.Namespace):
+    """Build one explicit source-release filter contract from CLI arguments."""
+    from .survey_harvest import TceFilters
+
+    return TceFilters(
+        minimum_snr=args.minimum_snr,
+        period_min_days=args.period_min,
+        period_max_days=args.period_max,
+        depth_min_ppm=args.depth_min,
+        depth_max_ppm=args.depth_max,
+        radius_min_earth=args.radius_min,
+        radius_max_earth=args.radius_max,
+        stellar_radius_max_solar=args.stellar_radius_max,
+        tmag_max=args.tmag_max,
+    )
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -545,6 +606,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
                 _print_json(survey.metadata)
                 return 0
+            if args.survey_action == "auto-vet":
+                from .autonomous import auto_vet_candidate
+
+                if bool(args.all) == (args.candidate_id is not None):
+                    raise ValueError("provide exactly one candidate_id or --all")
+                candidates = (
+                    discover_candidates(repository_root)
+                    if args.all
+                    else [load_survey_candidate(repository_root, args.candidate_id)]
+                )
+                manifests = [
+                    auto_vet_candidate(
+                        candidate,
+                        sectors=args.sectors,
+                        n_draws=args.n_draws,
+                        download=not args.no_download,
+                    ).relative_to(repository_root).as_posix()
+                    for candidate in candidates
+                ]
+                _print_json(manifests)
+                return 0
             survey = load_survey(repository_root, args.survey_id)
             if args.survey_action == "add-target":
                 candidate = load_survey_candidate(repository_root, args.candidate_id)
@@ -567,6 +649,49 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 return 0
             if args.survey_action == "report":
                 _print_json(survey_summary(survey))
+                return 0
+            if args.survey_action == "harvest":
+                from .survey_harvest import harvest_tces
+
+                outcomes = harvest_tces(
+                    survey,
+                    args.source,
+                    _harvest_filters(args),
+                    args.max_candidates,
+                    novelty_timeout=args.timeout,
+                    freshness_hours=args.freshness_hours,
+                )
+                _print_json(outcomes)
+                return 0
+            if args.survey_action == "run-loop":
+                from .autonomous import auto_vet_candidate
+                from .survey_harvest import harvest_tces
+
+                if args.max_cycles < 1:
+                    raise ValueError("max_cycles must be at least one")
+                cycles = []
+                for _ in range(args.max_cycles):
+                    outcomes = harvest_tces(
+                        survey,
+                        args.source,
+                        _harvest_filters(args),
+                        args.max_candidates,
+                        novelty_timeout=args.timeout,
+                        freshness_hours=args.freshness_hours,
+                    )
+                    manifests = []
+                    for outcome in outcomes:
+                        candidate_id = outcome.get("candidate_id")
+                        if outcome.get("status") != "registered" or candidate_id is None:
+                            continue
+                        candidate = load_survey_candidate(repository_root, candidate_id)
+                        manifests.append(
+                            auto_vet_candidate(candidate, n_draws=args.n_draws)
+                            .relative_to(repository_root)
+                            .as_posix()
+                        )
+                    cycles.append({"harvest": outcomes, "auto_vet_manifests": manifests})
+                _print_json({"cycles": cycles, "claim_eligible": False})
                 return 0
 
         if args.command == "engine":

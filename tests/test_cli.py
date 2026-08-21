@@ -115,6 +115,25 @@ def test_cli_survey_sensitivity_dispatches_without_changing_candidate_state(
     assert calls == [("test-survey", "survey-target")]
     assert "survey_sensitivity.survey-test-survey.json" in capsys.readouterr().out
 
+
+def test_cli_survey_harvest_dispatches_with_explicit_source(tmp_path, capsys, monkeypatch):
+    # Arrange
+    repo = _repo(tmp_path)
+    root = ["--root", str(repo)]
+    assert main(root + ["survey", "init", "test-survey", "--mission", "tess", "--sectors", "17"]) == 0
+    calls = []
+
+    def fake_harvest(survey, source, filters, max_candidates, novelty_timeout, freshness_hours):
+        calls.append((survey.survey_id, source, filters.minimum_snr, max_candidates, novelty_timeout, freshness_hours))
+        return []
+
+    monkeypatch.setattr("exonym.survey_harvest.harvest_tces", fake_harvest)
+
+    # Act / Assert
+    assert main(root + ["survey", "harvest", "test-survey", "--source", "https://example.invalid/tces.csv"]) == 0
+    assert calls == [("test-survey", "https://example.invalid/tces.csv", 20.0, 25, 20.0, 24.0)]
+    assert capsys.readouterr().out.endswith("[]\n")
+
 def test_cli_init_sets_mission_and_tags(tmp_path, capsys):
     repo = _repo(tmp_path)
     root = ["--root", str(repo)]
