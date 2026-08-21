@@ -92,7 +92,7 @@
         "duration_hours": {"$ref": "#/$defs/duration_summary"},
         "occultation_probability_from_sampled_posterior": {"type": "number", "minimum": 0, "maximum": 1},
         "posterior_template_samples": {"type": "integer", "minimum": 1, "maximum": 512},
-        "transit_fit": {"$ref": "#/$defs/eccentric_transit_fit"},
+        "transit_fit": {"anyOf": [{"$ref": "#/$defs/circular_transit_fit"}, {"$ref": "#/$defs/eccentric_transit_fit"}]},
         "geometry": {"type": "string", "minLength": 1},
         "caveat": {"type": "string", "minLength": 1}
       },
