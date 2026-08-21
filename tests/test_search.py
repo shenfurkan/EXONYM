@@ -1,6 +1,7 @@
 """Tests for the target-neutral BLS transit search engine."""
 
 import json
+import hashlib
 import sys
 import types
 
@@ -102,6 +103,8 @@ def test_find_transits_uses_weighted_astropy_bls_and_observed_event_count(monkey
     assert captured["autopower"]["minimum_n_transit"] == 2
     assert 0.0 < captured["autopower"]["frequency_factor"] <= 1.0
     assert result.snr == pytest.approx(6.0)
+    assert result.detection_status == "no-detection"
+    assert result.best_period is None
     assert result.n_distinct_transit_events >= 2
     assert result.n_period_trials == 1
 
@@ -325,7 +328,7 @@ def test_run_bls_signal_uses_prior_duration_and_preserves_each_signal_output(tmp
         "mode": "targeted-prior",
         "signal": ".01",
         "prior_path": "config/signals/transit_config.01.json",
-        "prior_source": "candidate-config-signal",
+        "prior_source": "partial-candidate-config-signal",
         "prior_period_days": 4.2,
         "prior_epoch_btjd": 11.0,
         "prior_duration_hours": 2.4,
@@ -371,6 +374,105 @@ def test_synthetic_bls_result_cannot_seed_an_ephemeris(tmp_path):
     assert ephemeris["source"] == "synthetic-demo"
 
 
+def test_no_detection_bls_result_cannot_seed_an_ephemeris(tmp_path):
+    from exonym.inputs import load_transit_ephemeris
+
+    workspace = create_candidate(tmp_path, "no-detection-bls-guard")
+    outputs = workspace.path / "outputs"
+    outputs.mkdir(parents=True, exist_ok=True)
+    (outputs / "bls_search_results.json").write_text(
+        json.dumps(
+            {
+                "source": "candidate-data",
+                "detection_status": "no-detection",
+                "best_period": 3.0,
+                "best_epoch": 1.0,
+                "best_duration_hours": 2.0,
+                "best_depth_ppm": 500.0,
+                "n_distinct_transit_events": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ephemeris = load_transit_ephemeris(workspace)
+
+    assert ephemeris["source"] == "synthetic-demo"
+
+
+def test_unbound_bls_result_cannot_seed_an_ephemeris(tmp_path):
+    from exonym.inputs import load_transit_ephemeris
+
+    workspace = create_candidate(tmp_path, "unbound-bls-guard")
+    outputs = workspace.path / "outputs"
+    outputs.mkdir(parents=True, exist_ok=True)
+    (outputs / "bls_search_results.json").write_text(
+        json.dumps(
+            {
+                "source": "candidate-data",
+                "detection_status": "detected",
+                "best_period": 3.0,
+                "best_epoch": 1.0,
+                "best_duration_hours": 2.0,
+                "best_depth_ppm": 500.0,
+                "n_distinct_transit_events": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ephemeris = load_transit_ephemeris(workspace)
+
+    assert ephemeris["source"] == "synthetic-demo"
+
+
+def test_bls_manifest_requires_candidate_photometry_inputs(tmp_path):
+    from exonym.inputs import load_transit_ephemeris
+
+    workspace = create_candidate(tmp_path, "non-photometry-bls-input")
+    outputs = workspace.path / "outputs"
+    result_path = outputs / "bls_search_results.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "source": "candidate-data",
+                "detection_status": "detected",
+                "time_system": "BTJD_TDB",
+                "best_period": 3.0,
+                "best_epoch": 1.0,
+                "best_duration_hours": 2.0,
+                "best_depth_ppm": 500.0,
+                "snr": 8.0,
+                "n_distinct_transit_events": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+    candidate_json = workspace.path / "candidate.json"
+    (outputs / "bls_search_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "exonym-bls-search-manifest-1",
+                "candidate_id": workspace.candidate_id,
+                "result_path": "outputs/bls_search_results.json",
+                "result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
+                "source": "candidate-data",
+                "detection_status": "detected",
+                "inputs": [
+                    {
+                        "path": "candidate.json",
+                        "sha256": hashlib.sha256(candidate_json.read_bytes()).hexdigest(),
+                    }
+                ],
+                "configuration": {"engine": "bls", "signal": None, "time_system": "BTJD_TDB"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert load_transit_ephemeris(workspace)["source"] == "synthetic-demo"
+
+
 def test_run_bls_on_candidate_with_real_data(tmp_path):
     import lightkurve as lk
 
@@ -399,6 +501,9 @@ def test_run_bls_on_candidate_with_real_data(tmp_path):
     out = run_bls_on_candidate(workspace)
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert payload["source"] == "candidate-data"
+    assert payload["detection_status"] == "detected"
+    assert payload["time_system"] == "BTJD_TDB"
+    assert 1000.0 < payload["best_epoch"] < 3000.0
     assert payload["n_points"] == 600
     assert payload["best_period"] > 0
     assert payload["n_period_trials"] > 0
@@ -409,11 +514,35 @@ def test_run_bls_on_candidate_with_real_data(tmp_path):
     assert manifest["inputs"][0]["path"] == "data/raw/s0030_lc.fits"
     assert len(manifest["inputs"][0]["sha256"]) == 64
     assert manifest["configuration"]["uncertainty_source"] == ["reported"]
+    assert manifest["configuration"]["time_system"] == "BTJD_TDB"
     assert manifest["runtime"] == {
         "implementation": "astropy.timeseries.BoxLeastSquares",
         "package": "astropy",
         "version": "6.0.1",
     }
+
+
+def test_light_curve_loader_rejects_non_tdb_time_system(tmp_path):
+    from astropy.io import fits
+    import lightkurve as lk
+
+    from exonym.inputs import load_light_curve_table
+
+    workspace = create_candidate(tmp_path, "non-tdb-photometry")
+    raw = workspace.path / "data" / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
+    path = raw / "s0030_lc.fits"
+    lk.LightCurve(
+        time=np.linspace(2459000.0, 2459001.0, 60),
+        flux=np.ones(60),
+        flux_err=np.full(60, 0.001),
+        meta={"MISSION": "TESS", "TELESCOP": "TESS", "BJDREFI": 2457000, "SECTOR": 30},
+    ).to_fits(path=path, overwrite=True)
+    with fits.open(path, mode="update") as hdul:
+        hdul[0].header["TIMESYS"] = "UTC"
+
+    with pytest.warns(UserWarning, match="TIMESYS must be TDB"):
+        assert load_light_curve_table(workspace) is None
 
 
 def test_quality_flag_masking_excludes_bad_cadences(tmp_path):
@@ -464,7 +593,7 @@ def test_quality_flag_masking_excludes_bad_cadences(tmp_path):
     # The loader uses quality==0 masking; the dip should be absent so BLS
     # should not lock onto the ~1-day spurious period of the bad cluster.
     # We assert SNR is low, meaning no strong periodic signal was detected.
-    assert payload["snr"] < 50.0, (
+    assert payload["detection_status"] == "no-detection" or payload["snr"] < 50.0, (
         "BLS SNR is suspiciously high — quality masking may not have removed the bad cadences. "
         f"Recovered period={payload['best_period']:.3f} d, SNR={payload['snr']:.1f}"
     )

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.invalid/schemas/novelty-audit-1.0.json",
+  "$id": "https://example.invalid/schemas/novelty-audit.json",
   "title": "Candidate Novelty Audit",
   "type": "object",
   "additionalProperties": false,
@@ -15,7 +15,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": 1
+      "enum": [1, 2]
     },
     "candidate_id": {
       "type": "string",
@@ -67,9 +67,74 @@
           "evidence_sha256": {
             "type": "string",
             "pattern": "^[a-f0-9]{64}$"
+          },
+          "provider": {
+            "type": "string",
+            "enum": ["nasa-toi", "nasa-confirmed", "exofop"]
+          },
+          "response_path": {
+            "type": "string",
+            "pattern": "^data/external/novelty/[a-f0-9]{32}/[0-9]+-(nasa-toi|nasa-confirmed|exofop)\\.(csv|json)$"
           }
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"schema_version": {"const": 2}},
+        "required": ["schema_version"]
+      },
+      "then": {
+        "properties": {
+          "evidence": {
+            "items": {
+              "required": ["provider", "response_path"]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "schema_version": {"const": 2},
+          "status": {"const": "eligible"}
+        },
+        "required": ["schema_version", "status"]
+      },
+      "then": {
+        "properties": {
+          "evidence": {
+            "minItems": 3,
+            "maxItems": 3,
+            "allOf": [
+              {
+                "contains": {
+                  "type": "object",
+                  "properties": {"provider": {"const": "nasa-toi"}},
+                  "required": ["provider"]
+                }
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "properties": {"provider": {"const": "nasa-confirmed"}},
+                  "required": ["provider"]
+                }
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "properties": {"provider": {"const": "exofop"}},
+                  "required": ["provider"]
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
 }

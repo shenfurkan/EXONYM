@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from .inputs import MINIMUM_BLS_CANDIDATE_SNR
 from .workspace import CandidateWorkspace
 
 
@@ -38,21 +39,29 @@ def _write_bls_transit_config(candidate: CandidateWorkspace, result_path: Path) 
     """Persist only measured BLS values as a candidate-local downstream input."""
     try:
         result = json.loads(result_path.read_text(encoding="utf-8"))
+        if result.get("detection_status") != "detected":
+            raise ValueError("BLS result is not a detected transit signal")
+        if result.get("time_system") != "BTJD_TDB":
+            raise ValueError("BLS result does not declare a BTJD_TDB epoch")
         period = float(result["best_period"])
         epoch = float(result["best_epoch"])
         duration_hours = float(result["best_duration_hours"])
         depth = float(result["best_depth_ppm"])
+        snr = float(result["snr"])
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise RuntimeError("BLS output cannot provide a candidate-local transit configuration") from exc
-    if not all(math.isfinite(value) for value in (period, epoch, duration_hours, depth)):
+    if not all(math.isfinite(value) for value in (period, epoch, duration_hours, depth, snr)):
         raise RuntimeError("BLS output contains non-finite transit measurements")
     if period <= 0.0 or duration_hours <= 0.0 or duration_hours / 24.0 >= period or depth <= 0.0:
         raise RuntimeError("BLS output contains unusable transit measurements")
+    if snr < MINIMUM_BLS_CANDIDATE_SNR:
+        raise RuntimeError("BLS output does not meet the candidate-selection threshold")
     payload = {
         "source": "candidate-data-bls",
         "transit": {
             "period_days": period,
             "epoch_btjd": epoch,
+            "epoch_time_system": "BTJD_TDB",
             "duration_days": duration_hours / 24.0,
             "depth_ppm": depth,
         },
@@ -70,7 +79,8 @@ def _has_raw_fits(candidate: CandidateWorkspace) -> bool:
 def auto_vet_candidate(
     candidate: CandidateWorkspace,
     sectors: Optional[Sequence[int]] = None,
-    n_draws: int = 2000,
+    n_draws: int = 500,
+    fit_samples: int = 3000,
     download: bool = True,
 ) -> Path:
     """Run a bounded evidence chain and write an engine-run manifest.
@@ -81,6 +91,8 @@ def auto_vet_candidate(
     """
     if isinstance(n_draws, bool) or int(n_draws) < 1:
         raise ValueError("n_draws must be at least one")
+    if isinstance(fit_samples, bool) or int(fit_samples) < 1:
+        raise ValueError("fit_samples must be at least one")
     run_id = uuid.uuid4().hex
     run_dir = candidate.path / "runs" / "auto-vet" / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
@@ -104,9 +116,20 @@ def auto_vet_candidate(
     if download and not _has_raw_fits(candidate):
         def ingest() -> List[Path]:
             from .ingest import fetch_tess_products, fetch_tess_tpfs, ingest_products
+            import lightkurve as lk
 
-            products = fetch_tess_products(candidate, sectors=sectors, provider="spoc")
-            products.extend(fetch_tess_tpfs(candidate, sectors=sectors, provider="spoc"))
+            tic = candidate.metadata["identifiers"].get("tic")
+            sr_lc = lk.search_lightcurve(f"TIC {tic}", author="SPOC")
+            sr_tp = lk.search_targetpixelfile(f"TIC {tic}", author="SPOC")
+            if not sr_lc or not sr_tp:
+                raise RuntimeError("MAST returned no requested SPOC products")
+            common = sorted(list(set(sr_lc.table['sequence_number']).intersection(set(sr_tp.table['sequence_number']))))
+            if not common:
+                raise RuntimeError("No common LC and TPF sectors for target")
+            use_sectors = list(sectors) if sectors else [common[0]]
+
+            products = fetch_tess_products(candidate, sectors=use_sectors, provider="spoc")
+            products.extend(fetch_tess_tpfs(candidate, sectors=use_sectors, provider="spoc"))
             if not products:
                 raise RuntimeError("MAST returned no requested SPOC products")
             return ingest_products(candidate, products, fetched_by="exonym-auto-vet/1.2.0")
@@ -132,7 +155,7 @@ def auto_vet_candidate(
         ("asteroseismology", lambda: __import__("exonym.asteroseismology", fromlist=["run_asteroseismology"]).run_asteroseismology(candidate)),
         ("sed", lambda: __import__("exonym.sed", fromlist=["run_sed_fit"]).run_sed_fit(candidate)),
         ("dilution", lambda: __import__("exonym.dilution", fromlist=["run_dilution_sensitivity"]).run_dilution_sensitivity(candidate)),
-        ("fit", lambda: __import__("exonym.transit_fit", fromlist=["run_mcmc_transit_fit"]).run_mcmc_transit_fit(candidate)),
+        ("fit", lambda: __import__("exonym.transit_fit", fromlist=["run_mcmc_transit_fit"]).run_mcmc_transit_fit(candidate, n_samples=int(fit_samples))),
         ("ttv", lambda: __import__("exonym.ttv", fromlist=["run_ttv_analysis"]).run_ttv_analysis(candidate)),
         ("phasecurve", lambda: __import__("exonym.phasecurve", fromlist=["run_phase_curve_search"]).run_phase_curve_search(candidate)),
         ("plot", lambda: __import__("exonym.plotting", fromlist=["generate_candidate_plots"]).generate_candidate_plots(candidate)),

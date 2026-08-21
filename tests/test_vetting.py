@@ -12,6 +12,20 @@ from exonym.vetting.oddeven import odd_even_gate, odd_even_z
 from exonym.vetting.tricera_parse import fpp_gate, load_fpp_report
 
 
+def test_legacy_numpy_scalar_compatibility_only_fills_missing_aliases():
+    from types import SimpleNamespace
+
+    from exonym.vetting.tricera_parse import _ensure_legacy_numpy_scalars
+
+    numpy_stub = SimpleNamespace(int="existing")
+
+    _ensure_legacy_numpy_scalars(numpy_stub)
+
+    assert numpy_stub.int == "existing"
+    assert numpy_stub.float is float
+    assert numpy_stub.bool is bool
+
+
 def test_centroid_offset_z_uses_cos_dec():
     z = centroid_offset_z(ra_offset_arcsec=0.0, dec_offset_arcsec=3.0, dec_deg=0.0, sigma_arcsec=1.0)
     assert z == pytest.approx(3.0)
@@ -184,6 +198,7 @@ def test_prepare_observed_transit_input_uses_measured_candidate_photometry(tmp_p
         "period_days": 2.0,
         "epoch_btjd": 1000.0,
         "duration_days": 0.125,
+        "time_system": "BTJD_TDB",
         "source": "candidate-config",
         "field_sources": {
             "period_days": "candidate-config",
@@ -227,6 +242,7 @@ def test_prepare_observed_transit_input_rejects_estimated_errors(tmp_path, monke
         "period_days": 2.0,
         "epoch_btjd": 1000.0,
         "duration_days": 0.125,
+        "time_system": "BTJD_TDB",
         "field_sources": {
             "period_days": "candidate-config",
             "epoch_btjd": "candidate-config",
@@ -282,8 +298,44 @@ def test_run_triceratops_defaults_to_bls_without_signal(tmp_path):
     from exonym.vetting.tricera_parse import run_triceratops_simulation
 
     stub, _ = _vet_workspace_stub(tmp_path)
-    (tmp_path / "outputs" / "bls_search_results.json").write_text(
-        json.dumps({"best_period": 7.5, "best_depth_ppm": 900.0, "best_duration_hours": 2.0}),
+    result_path = tmp_path / "outputs" / "bls_search_results.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "source": "candidate-data",
+                "detection_status": "detected",
+                "time_system": "BTJD_TDB",
+                "best_period": 7.5,
+                "best_epoch": 1.0,
+                "best_depth_ppm": 900.0,
+                "best_duration_hours": 2.0,
+                "snr": 10.0,
+                "n_distinct_transit_events": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+    input_path = tmp_path / "data" / "raw" / "observed.fits"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_bytes(b"candidate-photometry")
+    (tmp_path / "outputs" / "bls_search_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "exonym-bls-search-manifest-1",
+                "candidate_id": stub.candidate_id,
+                "result_path": "outputs/bls_search_results.json",
+                "result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
+                "source": "candidate-data",
+                "detection_status": "detected",
+                "inputs": [
+                    {
+                        "path": "data/raw/observed.fits",
+                        "sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+                    }
+                ],
+                "configuration": {"engine": "bls", "signal": None, "time_system": "BTJD_TDB"},
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -367,6 +419,7 @@ def test_run_triceratops_does_not_monkeypatch_tls_client(tmp_path, monkeypatch):
     import requests
 
     original_request = requests.Session.request
+    original_session_init = requests.Session.__init__
     rng_state_before = np.random.get_state()
 
     # Act
@@ -377,6 +430,8 @@ def test_run_triceratops_does_not_monkeypatch_tls_client(tmp_path, monkeypatch):
     assert report["source"] == "triceratops-monte-carlo"
     assert module.query_TRILEGAL is query_trilegal
     assert requests.Session.request is original_request
+    assert requests.Session.__init__ is original_session_init
+    assert requests.Session().verify is True
     assert report["random_seed"] == 1729
     assert report["backend"]["package"] == "triceratops"
     rng_state_after = np.random.get_state()
@@ -387,7 +442,10 @@ def test_run_triceratops_does_not_monkeypatch_tls_client(tmp_path, monkeypatch):
     assert np.array_equal(captured["flux_0"], observed_input["flux"])
     assert captured["flux_err_0"] == observed_input["flux_err"]
     assert captured["exptime"] == observed_input["exposure_days"]
-    assert report["input_provenance"] == observed_input["provenance"]
+    assert report["input_provenance"] == {
+        **observed_input["provenance"],
+        "scene_artifacts": [],
+    }
     assert report["claim_eligible"] is False
     assert "provenance-bound observed photometry" in report["claim_block_reason"]
     claim_path = tmp_path / "claims" / "fpp_claim.json"
@@ -410,7 +468,7 @@ def test_run_triceratops_requires_readiness_inside_public_function(tmp_path, mon
     assert not (tmp_path / "outputs" / "triceratops_report.json").exists()
 
 
-def test_run_triceratops_does_not_claim_nonfinite_monte_carlo_fpp(tmp_path, monkeypatch):
+def test_run_triceratops_rejects_nonfinite_monte_carlo_fpp(tmp_path, monkeypatch):
     import types
 
     from exonym.vetting.tricera_parse import run_triceratops_simulation
@@ -443,11 +501,9 @@ def test_run_triceratops_does_not_claim_nonfinite_monte_carlo_fpp(tmp_path, monk
     monkeypatch.setitem(sys.modules, "triceratops", package)
     monkeypatch.setitem(sys.modules, "triceratops.triceratops", module)
 
-    report_path = run_triceratops_simulation(stub, allow_fallback=False)
+    with pytest.raises(RuntimeError, match="TRICERATOPS Monte Carlo did not run"):
+        run_triceratops_simulation(stub, allow_fallback=False)
 
-    report = json.loads(report_path.read_text(encoding="utf-8"))
-    assert report["source"] == "triceratops-monte-carlo"
-    assert report["FPP"] is None
     assert not (tmp_path / "claims" / "fpp_claim.json").exists()
 
 
@@ -559,7 +615,7 @@ def test_load_transit_ephemeris_keeps_partial_config_provenance_explicit(tmp_pat
 
     ephemeris = load_transit_ephemeris(workspace)
 
-    assert ephemeris["source"] == "candidate-config"
+    assert ephemeris["source"] == "partial-candidate-config"
     assert ephemeris["field_sources"] == {
         "period_days": "candidate-config",
         "epoch_btjd": "synthetic-demo",
@@ -573,13 +629,41 @@ def test_load_transit_ephemeris_uses_matching_signal_bls_result(tmp_path):
     from exonym.workspace import create_candidate
 
     workspace = create_candidate(tmp_path, "signal-bls-ephemeris-test")
-    (workspace.path / "outputs" / "bls_search_results.02.json").write_text(
+    result_path = workspace.path / "outputs" / "bls_search_results.02.json"
+    result_path.write_text(
         json.dumps(
             {
+                "source": "candidate-data",
+                "detection_status": "detected",
+                "time_system": "BTJD_TDB",
                 "best_period": 4.25,
                 "best_epoch": 1742.5,
                 "best_duration_hours": 3.0,
                 "best_depth_ppm": 700.0,
+                "snr": 10.0,
+                "n_distinct_transit_events": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+    input_path = workspace.path / "data" / "raw" / "observed.fits"
+    input_path.write_bytes(b"candidate-photometry")
+    (workspace.path / "outputs" / "bls_search_manifest.02.json").write_text(
+        json.dumps(
+            {
+                "schema": "exonym-bls-search-manifest-1",
+                "candidate_id": workspace.candidate_id,
+                "result_path": "outputs/bls_search_results.02.json",
+                "result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
+                "source": "candidate-data",
+                "detection_status": "detected",
+                "inputs": [
+                    {
+                        "path": "data/raw/observed.fits",
+                        "sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+                    }
+                ],
+                "configuration": {"engine": "bls", "signal": ".02", "time_system": "BTJD_TDB"},
             }
         ),
         encoding="utf-8",
@@ -666,6 +750,17 @@ def test_asteroseismic_optional_adapters_write_hashed_candidate_local_manifests(
     from exonym.isolation import IsolationReport
     from exonym.schemas import validate_schemas
     from exonym.workspace import create_candidate
+
+    # Keep adapter import failures local to this module under test rather than
+    # mutating the shared importlib module used by schema/resource loading.
+    monkeypatch.setattr(
+        asteroseismology,
+        "importlib",
+        SimpleNamespace(
+            import_module=asteroseismology.importlib.import_module,
+            util=SimpleNamespace(find_spec=asteroseismology.importlib.util.find_spec),
+        ),
+    )
 
     workspace = create_candidate(tmp_path, "astero-adapter-test")
     time = np.linspace(0.0, 1.0, 100)
@@ -824,8 +919,13 @@ def test_tpf_loader_skips_unverified_sector_and_uses_canonical_sector_name(tmp_p
         ]
     )
     aperture = fits.ImageHDU(data=np.ones((2, 2), dtype=np.int16))
+    primary = fits.PrimaryHDU()
+    primary.header["TELESCOP"] = "TESS"
+    primary.header["TIMESYS"] = "TDB"
+    primary.header["TIMEUNIT"] = "d"
+    primary.header["BJDREFI"] = 2457000
     for filename in ("unverified_tp.fits", "s0030_tp.fits"):
-        fits.HDUList([fits.PrimaryHDU(), pixels, aperture]).writeto(raw / filename)
+        fits.HDUList([primary, pixels, aperture]).writeto(raw / filename)
 
     with pytest.warns(UserWarning, match="sector cannot be verified"):
         cubes = load_tpf_cubes(workspace)
@@ -981,13 +1081,14 @@ def test_native_transit_window_preserves_sector_cadence_and_baselines():
             np.full(second_sector_time.size, 703),
         )),
     }
-    ephemeris = {"period_days": 3.0, "epoch_btjd": 0.0}
+    ephemeris = {"period_days": 3.0, "epoch_btjd": 0.0, "duration_days": 0.2}
 
     phase, flux, flux_err, sector_index, labels, exposures = _native_transit_window_data(
         table, ephemeris
     )
 
     assert phase.size == flux.size == flux_err.size == sector_index.size
+    assert phase.size == time.size
     assert labels == [701, 703]
     assert np.allclose(exposures, 120.0)
     assert set(sector_index) == {0, 1}

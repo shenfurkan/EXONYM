@@ -5,7 +5,7 @@
   "required": ["schema_version", "candidate_id", "provider", "retrieval_id", "source_uri", "release", "query_template_id", "request_method", "request_parameters", "retrieved_at", "expires_at", "status", "attempts", "citation", "artifacts"],
   "properties": {
     "schema_version": {"const": 1}, "candidate_id": {"$ref": "#/$defs/id"}, "provider": {"$ref": "#/$defs/provider"}, "retrieval_id": {"$ref": "#/$defs/id"},
-    "source_uri": {"type": "string", "format": "uri"}, "release": {"type": "string", "minLength": 1}, "query_template_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*-v1$"}, "request_method": {"enum": ["GET", "POST"]},
+    "source_uri": {"type": "string", "format": "uri"}, "release": {"type": "string", "minLength": 1}, "query_template_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*-v[1-9][0-9]*$"}, "request_method": {"enum": ["GET", "POST"]},
     "request_parameters": {"type": "object", "additionalProperties": {"type": "string"}}, "retrieved_at": {"type": "string", "format": "date-time"}, "expires_at": {"type": "string", "format": "date-time"},
     "status": {"enum": ["available", "empty", "unavailable", "ambiguous", "requires-authentication"]}, "attempts": {"type": "integer", "minimum": 0}, "citation": {"type": "string", "minLength": 1},
     "artifacts": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/artifact"}}

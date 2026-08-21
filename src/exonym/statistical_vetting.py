@@ -14,7 +14,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .inputs import BTJD_TIME_SYSTEM, is_manifest_bound_bls_result
 from .workspace import CandidateWorkspace, validate_signal_suffix
+
+
+MINIMUM_CROWDING_SEARCH_RADIUS_ARCSEC: float = 21.0
 
 
 DIAGNOSTIC_NAMES = ("screening", "archive", "localization", "activity", "dilution")
@@ -103,27 +107,58 @@ def _screening_record(workspace: CandidateWorkspace, signal: Optional[str]) -> D
     if data is None or artifact is None:
         return _missing_record("screening", path)
     screen = data.get("screen")
+    ephemeris = data.get("ephemeris")
     odd_even = screen.get("odd_even") if isinstance(screen, dict) else None
     z = _finite_number(odd_even.get("z")) if isinstance(odd_even, dict) else None
     consistent = odd_even.get("consistent_at_threshold") if isinstance(odd_even, dict) else None
     threshold = _finite_number(odd_even.get("consistency_threshold_sigma")) if isinstance(odd_even, dict) else None
     primary = screen.get("primary") if isinstance(screen, dict) else None
     half_phase = screen.get("half_phase_control") if isinstance(screen, dict) else None
+    half_significance = _finite_number(half_phase.get("depth_significance_sigma")) if isinstance(half_phase, dict) else None
+    primary_depth = _finite_number(primary.get("depth_ppm")) if isinstance(primary, dict) else None
+    primary_significance = _finite_number(primary.get("depth_significance_sigma")) if isinstance(primary, dict) else None
     double_period = screen.get("double_period_hypothesis") if isinstance(screen, dict) else None
+    double_primary = double_period.get("primary") if isinstance(double_period, dict) else None
     alternating = double_period.get("alternating_event") if isinstance(double_period, dict) else None
-    control_significances = [
-        _finite_number(item.get("depth_significance_sigma"))
-        for item in (half_phase, alternating)
-        if isinstance(item, dict)
-    ]
+    alternating_significance = (
+        _finite_number(alternating.get("depth_significance_sigma"))
+        if isinstance(alternating, dict)
+        else None
+    )
+    complete_controls = (
+        isinstance(primary, dict)
+        and primary.get("status") == "measured"
+        and primary_depth is not None
+        and primary_depth > 0.0
+        and primary_significance is not None
+        and primary_significance > 0.0
+        and isinstance(odd_even, dict)
+        and odd_even.get("status") == "measured"
+        and z is not None
+        and threshold is not None
+        and threshold > 0.0
+        and isinstance(consistent, bool)
+        and isinstance(half_phase, dict)
+        and half_phase.get("status") == "measured"
+        and half_significance is not None
+        and isinstance(double_primary, dict)
+        and double_primary.get("status") == "measured"
+        and isinstance(alternating, dict)
+        and alternating.get("status") == "measured"
+        and alternating_significance is not None
+    )
     if data.get("candidate_id") != workspace.candidate_id or data.get("source") != "candidate-data":
         status, reason = "blocked", "Screening is not a candidate-data artifact owned by this workspace."
-    elif not isinstance(primary, dict) or primary.get("status") != "measured" or threshold is None:
-        status, reason = "blocked", "Screening lacks a measured primary event or recorded comparison threshold."
-    elif consistent is not True or any(
-        value is not None and abs(value) >= threshold for value in control_significances
+    elif not isinstance(ephemeris, dict) or ephemeris.get("epoch_time_system") != BTJD_TIME_SYSTEM:
+        status, reason = "blocked", "Screening does not declare a BTJD_TDB ephemeris."
+    elif not complete_controls:
+        status, reason = "blocked", "Screening lacks complete measured primary, odd-even, half-phase, or doubled-period controls."
+    elif (
+        consistent is not True
+        or abs(half_significance) >= threshold
+        or abs(alternating_significance) >= threshold
     ):
-        status, reason = "review-required", "Odd-even screening is unresolved or disagrees with the declared transit."
+        status, reason = "review-required", "Odd-even screening is unresolved or secondary eclipse detected."
     else:
         status, reason = "pass", "Odd-even depths are consistent at the recorded diagnostic threshold."
     return _record(
@@ -146,12 +181,35 @@ def _archive_record(workspace: CandidateWorkspace) -> Dict[str, Any]:
     binary = assessment.get("1_is_hidden_binary") if isinstance(assessment, dict) else None
     crowding = assessment.get("2_has_nearby_contaminants") if isinstance(assessment, dict) else None
     ruwe = _finite_number(gaia.get("ruwe")) if isinstance(gaia, dict) else None
+    search_radius = _finite_number(gaia.get("search_radius_arcsec")) if isinstance(gaia, dict) else None
+    nearby_count = gaia.get("nearby_sources_count") if isinstance(gaia, dict) else None
+    binary_ruwe = _finite_number(binary.get("ruwe")) if isinstance(binary, dict) else None
+    crowding_radius = _finite_number(crowding.get("search_radius_arcsec")) if isinstance(crowding, dict) else None
     if data.get("candidate_id") != workspace.candidate_id or not isinstance(gaia, dict):
         status, reason = "blocked", "Archive report is not a complete candidate-owned Gaia diagnostic."
     elif gaia.get("validated") is not True or gaia.get("query_status") != "ok":
         status, reason = "blocked", "Gaia target identity or archive query is unsuitable for automated routing."
     elif not isinstance(binary, dict) or not isinstance(crowding, dict):
         status, reason = "blocked", "Archive report lacks the recorded binarity and crowding assessments."
+    elif (
+        ruwe is None
+        or ruwe <= 0.0
+        or binary_ruwe is None
+        or not math.isclose(binary_ruwe, ruwe, rel_tol=1e-9, abs_tol=1e-12)
+        or not isinstance(binary.get("answer"), bool)
+        or not isinstance(gaia.get("suspected_binary"), bool)
+        or binary.get("answer") is not gaia.get("suspected_binary")
+        or not isinstance(nearby_count, int)
+        or nearby_count < 1
+        or search_radius is None
+        or search_radius < MINIMUM_CROWDING_SEARCH_RADIUS_ARCSEC
+        or crowding_radius is None
+        or not math.isclose(crowding_radius, search_radius, rel_tol=1e-9, abs_tol=1e-12)
+        or crowding.get("search_radius_sufficient_for_crowding") is not True
+        or not isinstance(crowding.get("answer"), bool)
+        or crowding.get("answer") != (nearby_count > 1)
+    ):
+        status, reason = "blocked", "Archive report lacks complete validated RUWE or sufficient-radius crowding evidence."
     elif binary.get("answer") is True or crowding.get("answer") is True:
         status, reason = "review-required", "Archive context indicates possible multiplicity or nearby contaminating sources."
     else:
@@ -182,6 +240,8 @@ def _localization_record(workspace: CandidateWorkspace) -> Dict[str, Any]:
         status, reason = "blocked", "Localization lacks candidate-data PRF inputs or a usable summary."
     elif data.get("calibration_status") != "uncalibrated":
         status, reason = "blocked", "Localization declares an unsupported calibration status."
+    elif ratio is None or ratio >= 1.0 or summary.get("target_in_aperture") is True:
+        status, reason = "review-required", "Uncalibrated localization is consistent with the target but requires human review."
     else:
         status, reason = "review-required", "Current localization is an uncalibrated PRF/scene diagnostic and cannot route a source automatically."
     return _record(
@@ -213,7 +273,7 @@ def _activity_record(workspace: CandidateWorkspace, screen_record: Dict[str, Any
     elif aliases:
         status, reason = "review-required", "The activity peak is compatible with the transit period or a simple harmonic."
     else:
-        status, reason = "review-required", "Activity is an uncalibrated correlated-noise diagnostic and cannot automatically clear a transit signal."
+        status, reason = "review-required", "Activity period has no simple transit alias but requires human review."
     return _record(
         "activity", status, reason, artifact,
         "Analytic GLS false-alarm probability; no correlated-noise population calibration.",
@@ -237,10 +297,18 @@ def _dilution_record(workspace: CandidateWorkspace) -> Dict[str, Any]:
         status, reason = "blocked", "Dilution analysis lacks candidate-data aperture and contamination inputs."
     elif contamination.get("availability") != "available":
         status, reason = "blocked", "Dilution contamination inputs are unavailable or unsuitable for automated routing."
-    elif depth.get("interpretation") != "stable":
-        status, reason = "review-required", "Transit depth is aperture-sensitive and requires human review."
-    else:
+    elif (
+        contamination_factor is None
+        or contamination_factor < 0.0
+        or stability is None
+        or stability < 0.0
+        or depth.get("interpretation") not in ("stable", "aperture-sensitive")
+    ):
+        status, reason = "blocked", "Dilution analysis lacks a complete aperture-depth stability measurement."
+    elif depth.get("interpretation") == "stable":
         status, reason = "pass", "Recorded aperture depths are stable with available contamination context."
+    else:
+        status, reason = "review-required", "Transit depth is aperture-sensitive and requires human review."
     return _record(
         "dilution", status, reason, artifact,
         "Aperture-depth comparison and Gaia G-band flux-ratio sensitivity bound.",
@@ -304,6 +372,68 @@ def record_decisive_rejection(workspace: CandidateWorkspace, reason: str, eviden
     return path
 
 
+def _has_detected_hash_bound_bls_result(
+    workspace: CandidateWorkspace, signal: Optional[str]
+) -> bool:
+    """Require a detected BLS result and unchanged candidate-local inputs."""
+    suffix = ".{0}".format(signal.lstrip(".")) if signal else ""
+    result_path = workspace.path / "outputs" / "bls_search_results{0}.json".format(suffix)
+    manifest_path = workspace.path / "outputs" / "bls_search_manifest{0}.json".format(suffix)
+    result = _load_object(result_path)
+    manifest = _load_object(manifest_path)
+    if result is None or manifest is None:
+        return False
+    configuration = manifest.get("configuration")
+    if not isinstance(configuration, dict):
+        return False
+    period = _finite_number(result.get("best_period"))
+    epoch = _finite_number(result.get("best_epoch"))
+    duration_hours = _finite_number(result.get("best_duration_hours"))
+    depth_ppm = _finite_number(result.get("best_depth_ppm"))
+    events = result.get("n_distinct_transit_events")
+    if (
+        result.get("source") != "candidate-data"
+        or result.get("detection_status") != "detected"
+        or result.get("time_system") != BTJD_TIME_SYSTEM
+        or period is None
+        or period <= 0.0
+        or epoch is None
+        or duration_hours is None
+        or duration_hours <= 0.0
+        or duration_hours / 24.0 >= period
+        or depth_ppm is None
+        or depth_ppm <= 0.0
+        or isinstance(events, bool)
+        or not isinstance(events, int)
+        or events < 2
+        or manifest.get("schema") != "exonym-bls-search-manifest-1"
+        or manifest.get("candidate_id") != workspace.candidate_id
+        or manifest.get("source") != "candidate-data"
+        or manifest.get("detection_status") != "detected"
+        or manifest.get("result_path") != result_path.relative_to(workspace.path).as_posix()
+        or manifest.get("result_sha256") != _sha256(result_path)
+        or configuration.get("engine") != "bls"
+        or configuration.get("signal") != signal
+        or configuration.get("time_system") != BTJD_TIME_SYSTEM
+    ):
+        return False
+    inputs = manifest.get("inputs")
+    if not isinstance(inputs, list) or not inputs:
+        return False
+    candidate_root = workspace.path.resolve()
+    for record in inputs:
+        if not isinstance(record, dict) or not isinstance(record.get("path"), str):
+            return False
+        path = (candidate_root / record["path"]).resolve()
+        try:
+            path.relative_to(candidate_root)
+        except ValueError:
+            return False
+        if not path.is_file() or record.get("sha256") != _sha256(path):
+            return False
+    return is_manifest_bound_bls_result(workspace, result_path, result, signal)
+
+
 def _require_real_data_prerequisites(workspace: CandidateWorkspace, signal: Optional[str]) -> None:
     """Require the ordered candidate-data outputs that must precede TRICERATOPS."""
     suffix = ".{0}".format(signal.lstrip(".")) if signal else ""
@@ -333,6 +463,8 @@ def _require_real_data_prerequisites(workspace: CandidateWorkspace, signal: Opti
         data = _load_object(path)
         if data is None or data.get(field) != expected:
             missing.append(name)
+    if not _has_detected_hash_bound_bls_result(workspace, signal):
+        missing.append("detected hash-bound BLS search")
     if missing:
         raise RuntimeError(
             "TRICERATOPS requires real candidate-data prerequisite outputs: {0}.".format(

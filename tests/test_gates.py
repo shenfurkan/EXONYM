@@ -23,28 +23,39 @@ def _reload(tmp_path):
     return load_candidate(tmp_path, "candidate-alpha")
 
 
-def _novelty_audit_payload(candidate_id="candidate-alpha", status="eligible", expires_at=None):
+def _novelty_audit_payload(candidate, status="eligible", expires_at=None):
+    retrieval_id = "a" * 32
+    evidence_dir = candidate.path / "data" / "external" / "novelty" / retrieval_id
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    evidence = []
+    for index, provider in enumerate(("nasa-toi", "nasa-confirmed", "exofop")):
+        extension = "json" if provider == "exofop" else "csv"
+        response_path = evidence_dir / "{0}-{1}.{2}".format(index, provider, extension)
+        response_path.write_bytes(provider.encode("ascii"))
+        evidence.append(
+            {
+                "source_uri": "https://example.invalid/{0}".format(provider),
+                "retrieved_at": "2000-01-01T00:00:00Z",
+                "finding": "Synthetic {0} response supports the recorded novelty decision.".format(provider),
+                "evidence_sha256": hashlib.sha256(response_path.read_bytes()).hexdigest(),
+                "provider": provider,
+                "response_path": response_path.relative_to(candidate.path).as_posix(),
+            }
+        )
     return {
-        "schema_version": 1,
-        "candidate_id": candidate_id,
+        "schema_version": 2,
+        "candidate_id": candidate.candidate_id,
         "retrieved_at": "2000-01-01T00:00:00Z",
         "freshness": {"expires_at": expires_at or "2099-01-01T00:00:00Z"},
         "status": status,
         "decision_basis": "A documented novelty assessment supports this workflow decision.",
-        "evidence": [
-            {
-                "source_uri": "https://example.invalid/novelty-evidence",
-                "retrieved_at": "2000-01-01T00:00:00Z",
-                "finding": "The source was assessed under the recorded novelty protocol.",
-                "evidence_sha256": "a" * 64,
-            }
-        ],
+        "evidence": evidence,
     }
 
 
 def _write_novelty_audit(candidate, **overrides):
     expires_at = overrides.pop("expires_at", None)
-    payload = _novelty_audit_payload(candidate.candidate_id, expires_at=expires_at)
+    payload = _novelty_audit_payload(candidate, expires_at=expires_at)
     payload.update(overrides)
     path = candidate.path / "decisions" / "novelty_audit.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -390,6 +401,25 @@ def test_feasibility_gate_rejects_nonconforming_or_ineligible_novelty_audit(tmp_
 
     _write_novelty_audit(candidate, status="ineligible")
     assert any("status is not eligible" in error for error in gate_errors(candidate))
+
+
+def test_novelty_gate_rejects_legacy_or_tampered_response_evidence(tmp_path):
+    from exonym.gatekeeper import _gate_novelty_audit
+
+    candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha")
+    _write_novelty_audit(candidate)
+    audit_path = candidate.path / "decisions" / "novelty_audit.json"
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    audit["schema_version"] = 1
+    audit_path.write_text(json.dumps(audit), encoding="utf-8")
+
+    assert "schema version 2" in _gate_novelty_audit(candidate)[1]
+
+    _write_novelty_audit(candidate)
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    (candidate.path / audit["evidence"][0]["response_path"]).write_bytes(b"tampered")
+
+    assert "SHA-256" in _gate_novelty_audit(candidate)[1]
 
 
 def test_review_gate_requires_a_current_novelty_audit(tmp_path):

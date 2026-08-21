@@ -30,13 +30,14 @@
     },
     "candidate_ephemeris": {
       "type": "object", "additionalProperties": false,
-      "required": ["source", "signal", "period_days", "epoch_btjd", "duration_hours", "input_artifact"],
+      "required": ["source", "signal", "period_days", "epoch_btjd", "duration_hours", "time_system", "input_artifact"],
       "properties": {
-        "source": {"enum": ["candidate-config", "candidate-config-signal", "bls-search"]},
+        "source": {"enum": ["candidate-config", "partial-candidate-config", "candidate-config-signal", "partial-candidate-config-signal", "bls-search"]},
         "signal": {"type": ["string", "null"], "pattern": "^\\.[0-9]{2}$"},
         "period_days": {"type": "number", "exclusiveMinimum": 0},
         "epoch_btjd": {"type": "number"},
         "duration_hours": {"type": "number", "exclusiveMinimum": 0},
+        "time_system": {"const": "BTJD_TDB"},
         "input_artifact": {"$ref": "#/$defs/artifact"}
       }
     },

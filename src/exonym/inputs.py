@@ -8,6 +8,7 @@ exists and are always labelled ``synthetic-demo``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -31,6 +32,10 @@ DEMO_FEH = 0.0
 DEMO_MASS_SOLAR = 1.0
 DEMO_RADIUS_SOLAR = 1.0
 DEMO_PARALLAX_MAS = 10.0
+BTJD_REFERENCE_BJD = 2457000.0
+BTJD_TIME_SYSTEM = "BTJD_TDB"
+# This is a candidate-selection threshold, not a calibrated false-alarm rate.
+MINIMUM_BLS_CANDIDATE_SNR = 7.1
 
 EPHEMERIS_CONFIG_NAMES = (
     "transit_config.json",
@@ -53,8 +58,97 @@ def _first_number(payload: Dict[str, Any], keys: Sequence[str]) -> Optional[floa
         if isinstance(value, dict):
             value = value.get("value")
         if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return float(value)
+            parsed = float(value)
+            if np.isfinite(parsed):
+                return parsed
     return None
+
+
+def _has_complete_candidate_ephemeris(result: Dict[str, Any], source_prefix: str) -> bool:
+    field_sources = result["field_sources"]
+    return all(
+        str(field_sources.get(field, "")).startswith(source_prefix)
+        for field in ("period_days", "epoch_btjd", "duration_days", "depth_ppm")
+    )
+
+
+def _epoch_btjd_from_transit_config(transit: Dict[str, Any]) -> Optional[float]:
+    explicit = _first_number(transit, ("epoch_btjd", "t0_btjd"))
+    if explicit is not None:
+        return explicit
+    declared_system = str(
+        transit.get("epoch_time_system", transit.get("time_system", ""))
+    ).strip().upper()
+    if declared_system not in ("BTJD", BTJD_TIME_SYSTEM):
+        return None
+    return _first_number(transit, ("t0", "epoch"))
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _is_candidate_photometry_input(
+    candidate_root: Path, record: Dict[str, Any]
+) -> bool:
+    """Confirm that a manifest input is an unchanged candidate photometry product."""
+    if not isinstance(record.get("path"), str):
+        return False
+    product_path = (candidate_root / record["path"]).resolve()
+    try:
+        relative = product_path.relative_to(candidate_root)
+    except ValueError:
+        return False
+    return (
+        len(relative.parts) >= 3
+        and relative.parts[:2] in (("data", "raw"), ("data", "processed"))
+        and product_path.name.lower().endswith((".fits", ".fits.fz", ".fz"))
+        and product_path.is_file()
+        and record.get("sha256") == _sha256(product_path)
+    )
+
+
+def is_manifest_bound_bls_result(
+    workspace: CandidateWorkspace,
+    result_path: Path,
+    payload: Dict[str, Any],
+    signal: Optional[str],
+) -> bool:
+    suffix = signal or ""
+    manifest_path = workspace.path / "outputs" / ("bls_search_manifest" + suffix + ".json")
+    manifest = _read_json(manifest_path)
+    if manifest is None:
+        return False
+    configuration = manifest.get("configuration")
+    if not isinstance(configuration, dict):
+        return False
+    if (
+        manifest.get("schema") != "exonym-bls-search-manifest-1"
+        or manifest.get("candidate_id") != workspace.candidate_id
+        or manifest.get("source") != "candidate-data"
+        or manifest.get("detection_status") != "detected"
+        or manifest.get("result_path") != result_path.relative_to(workspace.path).as_posix()
+        or manifest.get("result_sha256") != _sha256(result_path)
+        or configuration.get("engine") != "bls"
+        or configuration.get("signal") != signal
+        or configuration.get("time_system") != BTJD_TIME_SYSTEM
+        or payload.get("detection_status") != "detected"
+        or payload.get("time_system") != BTJD_TIME_SYSTEM
+        or (_first_number(payload, ("snr",)) or 0.0) < MINIMUM_BLS_CANDIDATE_SNR
+    ):
+        return False
+    inputs = manifest.get("inputs")
+    if not isinstance(inputs, list) or not inputs:
+        return False
+    candidate_root = workspace.path.resolve()
+    for record in inputs:
+        if not isinstance(record, dict) or not _is_candidate_photometry_input(candidate_root, record):
+            return False
+    return True
 
 
 def load_transit_ephemeris(
@@ -74,6 +168,7 @@ def load_transit_ephemeris(
         "epoch_btjd": DEMO_EPOCH_BTJD,
         "duration_days": DEMO_DURATION_DAYS,
         "depth_ppm": DEMO_DEPTH_PPM,
+        "time_system": "synthetic-demo",
         "source": "synthetic-demo",
         "field_sources": {
             "period_days": "synthetic-demo",
@@ -93,7 +188,7 @@ def load_transit_ephemeris(
             if not isinstance(transit, dict):
                 transit = payload
             period_value = _first_number(transit, ("period", "period_days", "p"))
-            epoch_value = _first_number(transit, ("t0", "epoch_btjd", "epoch", "t0_btjd"))
+            epoch_value = _epoch_btjd_from_transit_config(transit)
             duration_hours_value = _first_number(
                 transit, ("duration_hrs", "duration_hours", "duration_h")
             )
@@ -107,6 +202,7 @@ def load_transit_ephemeris(
             if epoch_value is not None:
                 result["epoch_btjd"] = epoch_value
                 result["field_sources"]["epoch_btjd"] = "candidate-config-signal"
+                result["time_system"] = BTJD_TIME_SYSTEM
                 found = True
             if duration_hours_value is not None and duration_hours_value > 0:
                 result["duration_days"] = duration_hours_value / 24.0
@@ -121,7 +217,11 @@ def load_transit_ephemeris(
                 result["field_sources"]["depth_ppm"] = "candidate-config-signal"
                 found = True
             if found:
-                result["source"] = "candidate-config-signal"
+                result["source"] = (
+                    "candidate-config-signal"
+                    if _has_complete_candidate_ephemeris(result, "candidate-config-signal")
+                    else "partial-candidate-config-signal"
+                )
                 return result
 
     for config_name in EPHEMERIS_CONFIG_NAMES:
@@ -133,57 +233,82 @@ def load_transit_ephemeris(
         if not isinstance(transit, dict):
             transit = payload
         period_value = _first_number(transit, ("period", "period_days", "p"))
-        epoch_value = _first_number(transit, ("t0", "epoch_btjd", "epoch", "t0_btjd"))
+        epoch_value = _epoch_btjd_from_transit_config(transit)
         duration_hours_value = _first_number(
             transit, ("duration_hrs", "duration_hours", "duration_h")
         )
         duration_days_value = _first_number(transit, ("duration_days",))
         depth_value = _first_number(transit, ("depth_ppm", "depth"))
+        found = False
         if period_value is not None and period_value > 0:
             result["period_days"] = period_value
             result["field_sources"]["period_days"] = "candidate-config"
-            result["source"] = "candidate-config"
+            found = True
         if epoch_value is not None:
             result["epoch_btjd"] = epoch_value
             result["field_sources"]["epoch_btjd"] = "candidate-config"
-            result["source"] = "candidate-config"
+            result["time_system"] = BTJD_TIME_SYSTEM
+            found = True
         if duration_hours_value is not None and duration_hours_value > 0:
             result["duration_days"] = duration_hours_value / 24.0
             result["field_sources"]["duration_days"] = "candidate-config"
-            result["source"] = "candidate-config"
+            found = True
         if duration_days_value is not None and duration_days_value > 0:
             result["duration_days"] = duration_days_value
             result["field_sources"]["duration_days"] = "candidate-config"
-            result["source"] = "candidate-config"
+            found = True
         if depth_value is not None and depth_value >= 0:
             result["depth_ppm"] = depth_value
             result["field_sources"]["depth_ppm"] = "candidate-config"
-            result["source"] = "candidate-config"
-        if result["source"] == "candidate-config":
+            found = True
+        if found:
+            result["source"] = (
+                "candidate-config"
+                if _has_complete_candidate_ephemeris(result, "candidate-config")
+                else "partial-candidate-config"
+            )
             break
 
-    if result["source"] != "candidate-config":
+    if result["source"] == "synthetic-demo":
         suffix = signal if signal is not None else ""
         bls_path = workspace.path / "outputs" / ("bls_search_results" + suffix + ".json")
         payload = _read_json(bls_path)
-        if payload is not None and payload.get("source") != "synthetic-demo":
+        if (
+            payload is not None
+            and payload.get("source") == "candidate-data"
+            and payload.get("detection_status") == "detected"
+            and payload.get("time_system") == BTJD_TIME_SYSTEM
+            and is_manifest_bound_bls_result(workspace, bls_path, payload, signal)
+        ):
             period_value = _first_number(payload, ("best_period",))
             epoch_value = _first_number(payload, ("best_epoch",))
             duration_hours_value = _first_number(payload, ("best_duration_hours",))
             depth_value = _first_number(payload, ("best_depth_ppm",))
+            event_count = _first_number(payload, ("n_distinct_transit_events",))
             if period_value is not None and period_value > 0:
                 result["period_days"] = period_value
                 result["field_sources"]["period_days"] = "bls-search"
             if epoch_value is not None:
                 result["epoch_btjd"] = epoch_value
                 result["field_sources"]["epoch_btjd"] = "bls-search"
+                result["time_system"] = BTJD_TIME_SYSTEM
             if duration_hours_value is not None and duration_hours_value > 0:
                 result["duration_days"] = duration_hours_value / 24.0
                 result["field_sources"]["duration_days"] = "bls-search"
             if depth_value is not None and depth_value >= 0:
                 result["depth_ppm"] = depth_value
                 result["field_sources"]["depth_ppm"] = "bls-search"
-            if period_value is not None or epoch_value is not None:
+            if (
+                period_value is not None
+                and period_value > 0
+                and epoch_value is not None
+                and duration_hours_value is not None
+                and duration_hours_value > 0
+                and depth_value is not None
+                and depth_value > 0
+                and event_count is not None
+                and event_count >= 2
+            ):
                 result["source"] = "bls-search"
 
     if result["period_days"] <= 0 or result["duration_days"] <= 0:
@@ -330,6 +455,77 @@ def _sector_from_canonical_filename(path: Path) -> Optional[int]:
     return sector_value if sector_value > 0 else None
 
 
+def _fits_time_header(path: Path, extension_index: int = 1) -> Dict[str, Any]:
+    """Return the primary and time-extension FITS headers for time normalization."""
+    from astropy.io import fits
+
+    with fits.open(path, memmap=False) as hdul:
+        header = dict(hdul[0].header)
+        if len(hdul) > extension_index:
+            header.update(dict(hdul[extension_index].header))
+    return header
+
+
+def _header_number(header: Dict[str, Any], name: str) -> Optional[float]:
+    value = header.get(name)
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if np.isfinite(number) else None
+
+
+def _time_values_to_btjd_tdb(
+    values: np.ndarray,
+    header: Dict[str, Any],
+    declared_format: Optional[str] = None,
+    declared_scale: Optional[str] = None,
+) -> np.ndarray:
+    """Normalize a declared TDB FITS time vector to BTJD (BJD_TDB - 2457000)."""
+    time = np.asarray(values, dtype=float)
+    finite = time[np.isfinite(time)]
+    if finite.size == 0:
+        raise ValueError("time vector contains no finite values")
+
+    header_scale = str(header.get("TIMESYS", "")).strip().upper()
+    normalized_scale = str(declared_scale or "").strip().upper()
+    if header_scale and header_scale not in ("TDB", "BJD_TDB"):
+        raise ValueError("FITS TIMESYS must be TDB for BTJD ephemerides")
+    if normalized_scale and normalized_scale != "TDB":
+        raise ValueError("light-curve time scale must be TDB for BTJD ephemerides")
+    if not header_scale and normalized_scale != "TDB":
+        raise ValueError("time scale is not declared as TDB")
+
+    time_unit = str(header.get("TIMEUNIT", "")).strip().lower()
+    if time_unit and time_unit not in ("d", "day", "days"):
+        raise ValueError("FITS TIMEUNIT must be days for BTJD ephemerides")
+
+    median_time = float(np.median(finite))
+    time_format = str(declared_format or "").strip().lower()
+    if not time_unit and time_format not in ("btjd", "mjd", "jd"):
+        raise ValueError("time unit is not declared as days")
+    bjd_reference = _header_number(header, "BJDREFI")
+    bjd_fraction = _header_number(header, "BJDREFF")
+    if bjd_reference is not None:
+        bjd_reference += bjd_fraction or 0.0
+    mjd_reference = _header_number(header, "MJDREFI")
+    mjd_fraction = _header_number(header, "MJDREFF")
+    if mjd_reference is not None:
+        mjd_reference += mjd_fraction or 0.0
+
+    if time_format == "mjd" or (mjd_reference is not None and bjd_reference is None):
+        return time + (mjd_reference or 0.0) + 2400000.5 - BTJD_REFERENCE_BJD
+    if median_time > 2000000.0:
+        return time - BTJD_REFERENCE_BJD
+    if bjd_reference is not None:
+        return time + bjd_reference - BTJD_REFERENCE_BJD
+    if time_format == "btjd":
+        return time
+    raise ValueError("time origin is not declared as BTJD or BJD_TDB")
+
+
 def load_light_curve_table(
     workspace: CandidateWorkspace,
     max_points: Optional[int] = 4000,
@@ -401,8 +597,30 @@ def load_light_curve_table(
                     )
                     continue
             light_curve = _lc.remove_nans().normalize()
-            time = np.asarray(light_curve.time.value, dtype=float)
             flux = np.asarray(light_curve.flux.value, dtype=float)
+            sector_value = None
+            try:
+                sector_value = int(light_curve.meta.get("SECTOR", 0))
+            except (TypeError, ValueError):
+                sector_value = None
+            if not sector_value or sector_value <= 0:
+                sector_value = _sector_from_canonical_filename(path)
+            if not sector_value or sector_value <= 0:
+                _warnings.warn(
+                    "skipped {0}: TESS sector cannot be verified from metadata or canonical filename".format(
+                        path.name
+                    ),
+                    stacklevel=2,
+                )
+                continue
+            if requested_sectors is not None and sector_value not in requested_sectors:
+                continue
+            time = _time_values_to_btjd_tdb(
+                np.asarray(light_curve.time.value, dtype=float),
+                _fits_time_header(path),
+                declared_format=getattr(light_curve.time, "format", None),
+                declared_scale=getattr(light_curve.time, "scale", None),
+            )
             if time.size < 50 or time.size != flux.size:
                 continue
             flux_err = None
@@ -432,23 +650,6 @@ def load_light_curve_table(
                 flux_err = np.full_like(flux, _mad_flux_error(flux))
                 if flux_err_source == "reported":
                     flux_err_source = "mad-estimate"
-            sector_value = None
-            try:
-                sector_value = int(light_curve.meta.get("SECTOR", 0))
-            except (TypeError, ValueError):
-                sector_value = None
-            if not sector_value or sector_value <= 0:
-                sector_value = _sector_from_canonical_filename(path)
-            if not sector_value or sector_value <= 0:
-                _warnings.warn(
-                    "skipped {0}: TESS sector cannot be verified from metadata or canonical filename".format(
-                        path.name
-                    ),
-                    stacklevel=2,
-                )
-                continue
-            if requested_sectors is not None and sector_value not in requested_sectors:
-                continue
             if sector_value in seen_sectors:
                 # Different products from the same TESS sector (e.g. SPOC and
                 # QLP copies) would otherwise double-count one sector and make
@@ -471,6 +672,7 @@ def load_light_curve_table(
                         "flux_err_source": flux_err_source,
                         "sector": binned[3],
                         "path": path,
+                        "time_system": BTJD_TIME_SYSTEM,
                     }
                 )
         except Exception as exc:
@@ -493,6 +695,7 @@ def load_light_curve_table(
         "flux_err_sources": sorted({table["flux_err_source"] for table in tables}),
         "sector": sector_values.astype(int),
         "input_files": [table["path"] for table in tables],
+        "time_system": BTJD_TIME_SYSTEM,
     }
 
 
@@ -540,11 +743,11 @@ def load_tpf_cubes(workspace: CandidateWorkspace) -> List[Dict[str, Any]]:
                 if len(hdul) < 3:
                     continue
                 pix_hdu, ap_hdu = hdul[1], hdul[2]
-                time = np.asarray(pix_hdu.data["TIME"], dtype=float)
+                header = dict(hdul[0].header)
+                header.update(dict(pix_hdu.header))
                 quality = np.asarray(pix_hdu.data["QUALITY"], dtype=np.int64)
                 flux = np.asarray(pix_hdu.data["FLUX"], dtype=float)
                 aperture = np.asarray(ap_hdu.data)
-                header = dict(hdul[0].header)
                 sector_value = None
                 for key in ("SECTOR", "SECTOR_NUM"):
                     if key in header:
@@ -564,6 +767,10 @@ def load_tpf_cubes(workspace: CandidateWorkspace) -> List[Dict[str, Any]]:
                         stacklevel=2,
                     )
                     continue
+                time = _time_values_to_btjd_tdb(
+                    np.asarray(pix_hdu.data["TIME"], dtype=float),
+                    header,
+                )
                 if flux.shape[0] == time.size and time.size >= 50:
                     cubes.append(
                         {

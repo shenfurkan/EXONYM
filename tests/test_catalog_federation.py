@@ -1,5 +1,6 @@
 import json
 import io
+from urllib.parse import unquote_plus
 
 import pytest
 
@@ -73,9 +74,9 @@ def _write_candidate_ephemeris(candidate, period_days=3.0, epoch_btjd=1.0, durat
 
 def _provider_success_body(spec):
     if spec.name == "nasa-exoplanet-archive":
-        return b"pl_name,pl_orbper,pl_tranmid,pl_trandur,pl_tsystemref\nSynthetic b,3.0,2457001.0,2.0,BJD_TDB\n"
+        return b"pl_name,pl_orbper,pl_tranmid,pl_trandur,pl_tranmid_systemref\nSynthetic b,3.0,2457001.0,2.0,BJD_TDB\n"
     if spec.name == "nasa-exoplanet-archive-toi":
-        return b"toi,tic_id,pl_orbper,pl_tranmid,pl_trandurh\n100.01,123456789,3.0,2457001.0,2.0\n"
+        return b"toi,tid,pl_orbper,pl_tranmid,pl_trandurh\n100.01,123456789,3.0,2457001.0,2.0\n"
     if spec.expected_format == "json":
         return b'{"data": [{"synthetic": "record"}]}'
     if spec.expected_format == "csv":
@@ -123,6 +124,18 @@ def test_each_allowlisted_provider_uses_a_fixed_template_and_captures_success(tm
     assert (raw_dir / "response.bin").read_bytes() == (b"" if spec.requires_coordinates else body)
     assert (candidate.path / "outputs" / "catalog_context.json").is_file()
     assert _audit(tmp_path).ok
+
+
+def test_nasa_known_signal_templates_use_current_tic_contracts(tmp_path):
+    candidate = _candidate(tmp_path)
+
+    confirmed = _request_for(PROVIDERS["nasa-exoplanet-archive"], candidate)
+    toi = _request_for(PROVIDERS["nasa-exoplanet-archive-toi"], candidate)
+
+    assert "pl_tranmid_systemref" in unquote_plus(confirmed.source_uri)
+    assert "tic_id = 'TIC 123456789'" in unquote_plus(confirmed.source_uri)
+    assert "SELECT toi,tid" in unquote_plus(toi.source_uri)
+    assert "WHERE tid = 123456789" in unquote_plus(toi.source_uri)
 
 
 @pytest.mark.parametrize("provider", ["lamost-dr11", "smoka", "mast-hubble-jwst"])
@@ -312,7 +325,7 @@ def test_known_signal_match_is_hash_bound_and_review_required(tmp_path):
     candidate = _candidate(tmp_path)
     _write_candidate_ephemeris(candidate)
     body = (
-        b"pl_orbper,pl_tranmid,pl_trandur,pl_tsystemref,pl_name\n"
+        b"pl_orbper,pl_tranmid,pl_trandur,pl_tranmid_systemref,pl_name\n"
         b"3.0,2457001.0,2.0,BJD_TDB,Known Planet b\n"
     )
     fetch_catalog(candidate, ["nasa-exoplanet-archive"], _transport(200, body))
@@ -332,7 +345,7 @@ def test_known_signal_match_is_hash_bound_and_review_required(tmp_path):
 def test_known_signal_toi_retrieval_limits_epoch_matching_without_bjd_tdb_contract(tmp_path):
     candidate = _candidate(tmp_path)
     _write_candidate_ephemeris(candidate)
-    body = b"toi,tic_id,pl_orbper,pl_tranmid,pl_trandurh\n100.01,123456789,3.0,2457001.0,2.0\n"
+    body = b"toi,tid,pl_orbper,pl_tranmid,pl_trandurh\n100.01,123456789,3.0,2457001.0,2.0\n"
     fetch_catalog(candidate, ["nasa-exoplanet-archive-toi"], _transport(200, body))
 
     output = match_known_signal_ephemerides(candidate)
@@ -365,7 +378,7 @@ def test_known_signal_parser_rejects_missing_provider_contract_columns(tmp_path)
 
     assert manifest["status"] == "unavailable"
     assert parser_log["known_signal_required_columns"] == [
-        "pl_orbper", "pl_tranmid", "pl_trandur", "pl_tsystemref"
+        "pl_orbper", "pl_tranmid", "pl_trandur", "pl_tranmid_systemref"
     ]
     assert "known-signal field contract missing columns" in parser_log["message"]
     assert record["status"] == "insufficient-current-supported-catalog-evidence"
@@ -387,7 +400,7 @@ def test_known_signal_match_never_treats_absent_supported_retrievals_as_novelty(
 def test_known_signal_match_no_match_is_limited_to_the_current_snapshot(tmp_path):
     candidate = _candidate(tmp_path)
     _write_candidate_ephemeris(candidate)
-    body = b"pl_orbper,pl_tranmid,pl_trandur,pl_tsystemref\n5.0,2457001.0,2.0,BJD_TDB\n"
+    body = b"pl_orbper,pl_tranmid,pl_trandur,pl_tranmid_systemref\n5.0,2457001.0,2.0,BJD_TDB\n"
     fetch_catalog(candidate, ["nasa-exoplanet-archive"], _transport(200, body))
 
     output = match_known_signal_ephemerides(candidate)
@@ -401,7 +414,7 @@ def test_known_signal_match_no_match_is_limited_to_the_current_snapshot(tmp_path
 def test_known_signal_match_excludes_stale_retrievals(tmp_path):
     candidate = _candidate(tmp_path)
     _write_candidate_ephemeris(candidate)
-    body = b"pl_orbper,pl_tranmid,pl_trandur,pl_tsystemref\n3.0,2457001.0,2.0,BJD_TDB\n"
+    body = b"pl_orbper,pl_tranmid,pl_trandur,pl_tranmid_systemref\n3.0,2457001.0,2.0,BJD_TDB\n"
     manifest_path = fetch_catalog(candidate, ["nasa-exoplanet-archive"], _transport(200, body))[0]
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["expires_at"] = "2000-01-01T00:00:00Z"
@@ -418,7 +431,7 @@ def test_known_signal_match_excludes_stale_retrievals(tmp_path):
 def test_known_signal_match_schema_rejects_tampered_snapshot_binding(tmp_path):
     candidate = _candidate(tmp_path)
     _write_candidate_ephemeris(candidate)
-    body = b"pl_orbper,pl_tranmid,pl_trandur,pl_tsystemref\n3.0,2457001.0,2.0,BJD_TDB\n"
+    body = b"pl_orbper,pl_tranmid,pl_trandur,pl_tranmid_systemref\n3.0,2457001.0,2.0,BJD_TDB\n"
     manifest = fetch_catalog(candidate, ["nasa-exoplanet-archive"], _transport(200, body))[0]
     match_known_signal_ephemerides(candidate)
     snapshot = manifest.with_name("snapshot.json")

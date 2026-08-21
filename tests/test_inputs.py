@@ -4,7 +4,7 @@ import types
 import numpy as np
 import pytest
 
-from exonym.inputs import load_light_curve_table
+from exonym.inputs import _time_values_to_btjd_tdb, load_light_curve_table
 from exonym.workspace import create_candidate
 
 
@@ -45,3 +45,15 @@ def test_light_curve_loader_rejects_products_without_a_verified_sector(tmp_path,
 
     # Assert
     assert table is None
+
+
+@pytest.mark.parametrize(
+    "header",
+    (
+        {"TELESCOP": "TESS", "BJDREFI": 2457000},
+        {"TIMESYS": "TDB", "BJDREFI": 2457000},
+    ),
+)
+def test_time_normalization_requires_declared_scale_and_day_units(header):
+    with pytest.raises(ValueError):
+        _time_values_to_btjd_tdb(np.array([100.0, 101.0]), header)

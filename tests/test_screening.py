@@ -68,11 +68,12 @@ def test_run_fixed_ephemeris_screen_requires_a_signal_prior_and_writes_scoped_ou
     (signals / "transit_config.01.json").write_text(
         json.dumps(
             {
-                "transit": {
-                    "period_days": 2.6,
-                    "epoch_btjd": 0.75,
-                    "duration_hours": 2.4,
-                }
+                    "transit": {
+                        "period_days": 2.6,
+                        "epoch_btjd": 0.75,
+                        "duration_hours": 2.4,
+                        "depth_ppm": 800.0,
+                    }
             }
         ),
         encoding="utf-8",
@@ -96,3 +97,14 @@ def test_run_fixed_ephemeris_screen_requires_a_signal_prior_and_writes_scoped_ou
     assert payload["screen"]["primary"]["status"] == "measured"
     with pytest.raises(ValueError, match="no readable signal prior"):
         run_fixed_ephemeris_screen(workspace, signal=".02")
+
+
+def test_run_fixed_ephemeris_screen_rejects_partial_candidate_ephemeris(tmp_path):
+    workspace = create_candidate(tmp_path, "partial-screen-ephemeris")
+    (workspace.path / "config" / "transit_config.json").write_text(
+        json.dumps({"transit": {"period_days": 2.6, "duration_hours": 2.4}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="complete candidate-derived ephemeris"):
+        run_fixed_ephemeris_screen(workspace)

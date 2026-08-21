@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -158,12 +159,17 @@ def test_fetch_tess_products_writes_fits_and_ingests(tmp_path, monkeypatch):
     ][0]
 
     table = Table(
-        rows=[("s0037", "tess2021000000000-s0037-0000000123456789-0218-s.fits")],
-        names=("sequence_number", "obs_id"),
+        rows=[
+            (
+                "s0037",
+                "tess2021000000000-s0037-0000000123456789-0218-s_lc.fits",
+                "mast:TESS/product/tess2021000000000-s0037-0000000123456789-0218-s_lc.fits",
+            )
+        ],
+        names=("sequence_number", "productFilename", "dataURI"),
     )
-    time = np.linspace(2459000.0, 2459030.0, 600)
-    light_curve = lk.LightCurve(time=time, flux=np.ones_like(time))
-    fake_search = _FakeSearch(table, [light_curve])
+    fake_search = _FakeSearch(table, [object()])
+    raw_bytes = b"unaltered-mast-spoc-lightcurve-bytes"
 
     monkeypatch.setattr(lk, "search_lightcurve", lambda *args, **kwargs: fake_search)
     monkeypatch.setattr(
@@ -171,13 +177,25 @@ def test_fetch_tess_products_writes_fits_and_ingests(tmp_path, monkeypatch):
         "search_tesscut",
         lambda *args, **kwargs: pytest.fail("TESSCut must not be queried for a SPOC request"),
     )
+    from astroquery.mast import Observations
+
+    calls = []
+
+    def download_file(data_uri, *, local_path, **kwargs):
+        calls.append((data_uri, local_path))
+        Path(local_path).write_bytes(raw_bytes)
+        return "COMPLETE", None, "https://mast.stsci.edu/api/v0.1/Download/file"
+
+    monkeypatch.setattr(Observations, "download_file", download_file)
 
     products = fetch_tess_products(candidate, exptime=120)
     assert len(products) == 1
     staged, source_uri = products[0]
     assert staged.is_file()
-    assert staged.stat().st_size > 0
+    assert staged.read_bytes() == raw_bytes
     assert source_uri.startswith("https://mast.stsci.edu")
+    assert "uri=mast:TESS/product/tess2021000000000-s0037-0000000123456789-0218-s_lc.fits" in source_uri
+    assert calls[0][0] == "mast:TESS/product/tess2021000000000-s0037-0000000123456789-0218-s_lc.fits"
 
     written = ingest_products(candidate, products)
     raw = candidate.path / "data" / "raw"
@@ -190,42 +208,22 @@ def test_fetch_tess_products_writes_fits_and_ingests(tmp_path, monkeypatch):
     assert len(record["sha256"]) == 64
 
 
-def test_fetch_tesscut_lightcurves_uses_only_requested_provider(tmp_path, monkeypatch):
+def test_fetch_tesscut_is_rejected_before_network_access(tmp_path, monkeypatch):
     import lightkurve as lk
     from astropy.table import Table
 
-    from exonym.ingest import fetch_tess_products, ingest_products
+    from exonym.ingest import fetch_tess_products
 
     create_candidate(tmp_path, "candidate-tesscut", tic="123456789")
     candidate = [
         c for c in discover_candidates(tmp_path) if c.candidate_id == "candidate-tesscut"
     ][0]
-    table = Table(
-        rows=[("s0037", "tesscut-s0037")], names=("sequence_number", "obs_id")
+    monkeypatch.setattr(
+        lk, "search_lightcurve", lambda *args, **kwargs: pytest.fail("network must not run")
     )
-    time = np.linspace(2459000.0, 2459030.0, 600)
-    tesscut = _FakeTessCut(lk.LightCurve(time=time, flux=np.ones_like(time)))
-    fake_search = _FakeSearch(table, [tesscut])
-    calls = []
 
-    def search_tesscut(target, sector=None):
-        calls.append((target, sector))
-        return fake_search
-
-    def unexpected_spoc(*args, **kwargs):
-        pytest.fail("SPOC must not be queried for a TESSCut request")
-
-    monkeypatch.setattr(lk, "search_tesscut", search_tesscut)
-    monkeypatch.setattr(lk, "search_lightcurve", unexpected_spoc)
-
-    products = fetch_tess_products(candidate, sectors=[37], provider="tesscut")
-    assert calls == [("TIC 123456789", 37)]
-    assert products[0][0].name == "s0037_lc.fits"
-
-    written = ingest_products(candidate, products)
-    sidecar = written[0].with_name(written[0].stem + ".provenance.json")
-    record = json.loads(sidecar.read_text(encoding="utf-8"))
-    assert record["source_uri"] == products[0][1]
+    with pytest.raises(ValueError, match="unsupported TESS data provider"):
+        fetch_tess_products(candidate, sectors=[37], provider="tesscut")
 
 
 def test_tesscut_rejects_tpf_requests_without_a_network_call(tmp_path):
@@ -236,7 +234,7 @@ def test_tesscut_rejects_tpf_requests_without_a_network_call(tmp_path):
         c for c in discover_candidates(tmp_path) if c.candidate_id == "candidate-tesscut-tpf"
     ][0]
 
-    with pytest.raises(ValueError, match="light-curve ingestion only"):
+    with pytest.raises(ValueError, match="unsupported TESS data provider"):
         fetch_tess_tpfs(candidate, provider="tesscut")
 
 
@@ -291,14 +289,21 @@ def test_fetch_tess_tpfs_stages_and_ingests_with_sidecars(tmp_path, monkeypatch)
 
     table = Table(
         rows=[
-            ("s0047", "tess2021000000000-s0047-0000000123456789-0218-s.fits"),
-            ("s0053", "tess2021000000000-s0053-0000000123456789-0226-s.fits"),
+            ("s0047", "tess2021000000000-s0047-0000000123456789-0218-s_tp.fits"),
+            ("s0053", "tess2021000000000-s0053-0000000123456789-0226-s_tp.fits"),
         ],
-        names=("sequence_number", "obs_id"),
+        names=("sequence_number", "productFilename"),
     )
     fake_search = _FakeTPFSearch(table)
 
     monkeypatch.setattr(lk, "search_targetpixelfile", lambda *args, **kwargs: fake_search)
+    from astroquery.mast import Observations
+
+    def download_file(data_uri, *, local_path, **kwargs):
+        Path(local_path).write_bytes(b"unaltered-mast-spoc-tpf-bytes")
+        return "COMPLETE", None, "https://mast.stsci.edu/api/v0.1/Download/file"
+
+    monkeypatch.setattr(Observations, "download_file", download_file)
 
     products = fetch_tess_tpfs(candidate, exptime=120)
     assert len(products) == 2

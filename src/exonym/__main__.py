@@ -156,6 +156,7 @@ def _build_parser() -> argparse.ArgumentParser:
     survey_auto_vet_parser.add_argument("--all", action="store_true", help="Process every registered candidate workspace.")
     survey_auto_vet_parser.add_argument("--sectors", nargs="+", type=int, default=None)
     survey_auto_vet_parser.add_argument("--n-draws", type=int, default=2000)
+    survey_auto_vet_parser.add_argument("--fit-samples", type=int, default=3000)
     survey_auto_vet_parser.add_argument("--no-download", action="store_true")
     survey_loop_parser = survey_commands.add_parser(
         "run-loop", help="Run bounded harvest and candidate-local vetting cycles; never reports a validation claim."
@@ -176,6 +177,7 @@ def _build_parser() -> argparse.ArgumentParser:
     survey_loop_parser.add_argument("--timeout", type=float, default=20.0)
     survey_loop_parser.add_argument("--freshness-hours", type=float, default=24.0)
     survey_loop_parser.add_argument("--n-draws", type=int, default=2000)
+    survey_loop_parser.add_argument("--fit-samples", type=int, default=3000)
 
     engine_parser = commands.add_parser(
         "engine", help="Inspect and validate analytical and vetting engines."
@@ -318,9 +320,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ingest_parser.add_argument(
         "--provider",
-        choices=("spoc", "tesscut"),
+        choices=("spoc",),
         default="spoc",
-        help="MAST product provider. TESSCut supports light curves only.",
+        help="MAST product provider. Only raw, provenance-bound SPOC products are supported.",
     )
 
     detrend_parser = commands.add_parser(
@@ -488,8 +490,8 @@ def _build_parser() -> argparse.ArgumentParser:
     archive_parser.add_argument(
         "--radius-arcsec",
         type=float,
-        default=10.0,
-        help="Gaia neighbor search radius in arcseconds.",
+        default=60.0,
+        help="Gaia neighbor search radius in arcseconds (default: 60, sufficient for TESS crowding context).",
     )
 
     rv_parser = commands.add_parser(
@@ -621,6 +623,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         candidate,
                         sectors=args.sectors,
                         n_draws=args.n_draws,
+                        fit_samples=args.fit_samples,
                         download=not args.no_download,
                     ).relative_to(repository_root).as_posix()
                     for candidate in candidates
@@ -686,7 +689,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             continue
                         candidate = load_survey_candidate(repository_root, candidate_id)
                         manifests.append(
-                            auto_vet_candidate(candidate, n_draws=args.n_draws)
+                            auto_vet_candidate(
+                                candidate,
+                                n_draws=args.n_draws,
+                                fit_samples=args.fit_samples,
+                            )
                             .relative_to(repository_root)
                             .as_posix()
                         )

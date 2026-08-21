@@ -78,17 +78,35 @@ def _write_passing_pre_vetting_artifacts(candidate_path: Path, candidate_id: str
             {
                 "candidate_id": candidate_id,
                 "source": "candidate-data",
-                "ephemeris": {"period_days": 2.5},
+                "ephemeris": {
+                    "period_days": 2.5,
+                    "epoch_btjd": 100.5,
+                    "epoch_time_system": "BTJD_TDB",
+                    "duration_hours": 2.4,
+                    "source": "candidate-config",
+                },
                 "screen": {
-                    "primary": {"status": "measured"},
+                    "primary": {
+                        "status": "measured",
+                        "depth_ppm": 1200.0,
+                        "depth_significance_sigma": 8.0,
+                    },
                     "odd_even": {
+                        "status": "measured",
                         "z": 0.2,
                         "consistent_at_threshold": True,
                         "consistency_threshold_sigma": 3.0,
                     },
-                    "half_phase_control": {"depth_significance_sigma": 0.1},
+                    "half_phase_control": {
+                        "status": "measured",
+                        "depth_significance_sigma": 0.1,
+                    },
                     "double_period_hypothesis": {
-                        "alternating_event": {"depth_significance_sigma": 0.1}
+                        "primary": {"status": "measured"},
+                        "alternating_event": {
+                            "status": "measured",
+                            "depth_significance_sigma": 0.1,
+                        },
                     },
                 },
             }
@@ -99,10 +117,21 @@ def _write_passing_pre_vetting_artifacts(candidate_path: Path, candidate_id: str
         json.dumps(
             {
                 "candidate_id": candidate_id,
-                "gaia_astrometry": {"validated": True, "query_status": "ok", "ruwe": 1.0},
+                "gaia_astrometry": {
+                    "validated": True,
+                    "query_status": "ok",
+                    "ruwe": 1.0,
+                    "suspected_binary": False,
+                    "search_radius_arcsec": 60.0,
+                    "nearby_sources_count": 1,
+                },
                 "scientific_assessment": {
-                    "1_is_hidden_binary": {"answer": False},
-                    "2_has_nearby_contaminants": {"answer": False},
+                    "1_is_hidden_binary": {"answer": False, "ruwe": 1.0},
+                    "2_has_nearby_contaminants": {
+                        "answer": False,
+                        "search_radius_arcsec": 60.0,
+                        "search_radius_sufficient_for_crowding": True,
+                    },
                 },
             }
         ),
@@ -188,9 +217,45 @@ def _write_passing_pre_vetting_artifacts(candidate_path: Path, candidate_id: str
 def _write_remaining_real_data_prerequisites(candidate_path: Path) -> None:
     """Complete the provenance-only prerequisites for readiness-order tests."""
     outputs = candidate_path / "outputs"
+    input_path = candidate_path / "data" / "processed" / "s0001_lc.fits"
+    result_path = outputs / "bls_search_results.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "source": "candidate-data",
+                "detection_status": "detected",
+                "time_system": "BTJD_TDB",
+                "best_period": 2.5,
+                "best_epoch": 100.5,
+                "best_duration_hours": 2.4,
+                "best_depth_ppm": 1200.0,
+                "snr": 12.0,
+                "n_distinct_transit_events": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (outputs / "bls_search_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "exonym-bls-search-manifest-1",
+                "candidate_id": candidate_path.name,
+                "result_path": "outputs/bls_search_results.json",
+                "result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
+                "source": "candidate-data",
+                "detection_status": "detected",
+                "inputs": [
+                    {
+                        "path": "data/processed/s0001_lc.fits",
+                        "sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+                    }
+                ],
+                "configuration": {"engine": "bls", "signal": None, "time_system": "BTJD_TDB"},
+            }
+        ),
+        encoding="utf-8",
+    )
     for filename in (
-        "bls_search_results.json",
-        "bls_search_manifest.json",
         "asteroseismic_results.json",
         "sed_fit_results.json",
         "mcmc_transit_fit.json",
@@ -269,20 +334,16 @@ def test_automated_triage_review_required_on_odd_even_anomaly(tmp_path: Path):
     # Manually plant an odd-even failure in screening outputs
     outputs_dir = cand_path / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
-    screen_artifact = {
-        "candidate_id": cand.candidate_id,
-        "source": "candidate-data",
-        "screen": {
-            "primary": {"status": "measured"},
-            "odd_even": {
-                "status": "measured",
-                "z": 4.5,
-                "consistent_at_threshold": False,
-                "consistency_threshold_sigma": 3.0,
-            }
-        }
-    }
     screen_path = cand_path / "outputs" / "fixed_ephemeris_screen.json"
+    screen_artifact = json.loads(screen_path.read_text(encoding="utf-8"))
+    screen_artifact["screen"]["odd_even"].update(
+        {
+            "status": "measured",
+            "z": 4.5,
+            "consistent_at_threshold": False,
+            "consistency_threshold_sigma": 3.0,
+        }
+    )
     screen_path.write_text(
         json.dumps(screen_artifact, indent=2), encoding="utf-8"
     )
@@ -315,7 +376,33 @@ def test_statistical_vetting_requires_review_for_alternating_events(tmp_path: Pa
 
     screening = next(record for record in evidence["diagnostics"] if record["name"] == "screening")
     assert screening["status"] == "review-required"
+
+    screen["screen"]["half_phase_control"]["depth_significance_sigma"] = 0.1
+    screen["screen"]["double_period_hypothesis"]["alternating_event"][
+        "depth_significance_sigma"
+    ] = -3.1
+    screen_path.write_text(json.dumps(screen), encoding="utf-8")
+    evidence = json.loads(build_statistical_vetting_evidence(candidate).read_text(encoding="utf-8"))
+    screening = next(record for record in evidence["diagnostics"] if record["name"] == "screening")
+    assert screening["status"] == "review-required"
     assert evidence["status"] == "review-required"
+
+
+def test_statistical_vetting_requires_review_for_signed_secondary_controls(tmp_path: Path):
+    from exonym.statistical_vetting import build_statistical_vetting_evidence
+
+    candidate_path = _setup_synthetic_workspace(tmp_path, "synth-signed-secondary-controls")
+    candidate = load_candidate(tmp_path, "synth-signed-secondary-controls")
+    _write_passing_pre_vetting_artifacts(candidate_path, candidate.candidate_id)
+    screen_path = candidate_path / "outputs" / "fixed_ephemeris_screen.json"
+    screen = json.loads(screen_path.read_text(encoding="utf-8"))
+    screen["screen"]["half_phase_control"]["depth_significance_sigma"] = -3.1
+    screen_path.write_text(json.dumps(screen), encoding="utf-8")
+
+    evidence = json.loads(build_statistical_vetting_evidence(candidate).read_text(encoding="utf-8"))
+
+    screening = next(record for record in evidence["diagnostics"] if record["name"] == "screening")
+    assert screening["status"] == "review-required"
 
 
 def test_statistical_vetting_requires_review_for_inconclusive_localization(tmp_path: Path):
@@ -367,6 +454,7 @@ def test_statistical_vetting_requires_review_for_aperture_sensitive_depths(tmp_p
     dilution_path = candidate_path / "outputs" / "dilution_sensitivity_results.json"
     dilution = json.loads(dilution_path.read_text(encoding="utf-8"))
     dilution["depth_stability"]["interpretation"] = "aperture-sensitive"
+    dilution["contamination"]["contamination_factor"] = 0.0
     dilution_path.write_text(json.dumps(dilution), encoding="utf-8")
 
     evidence = json.loads(build_statistical_vetting_evidence(candidate).read_text(encoding="utf-8"))
@@ -497,6 +585,42 @@ def test_vetting_readiness_requires_all_real_data_prerequisites(tmp_path: Path):
     _write_passing_pre_vetting_artifacts(candidate_path, cand.candidate_id)
 
     with pytest.raises(RuntimeError, match="real candidate-data prerequisite outputs: search"):
+        require_vetting_readiness(cand)
+
+
+def test_vetting_readiness_rejects_a_non_detection_bls_artifact(tmp_path: Path):
+    from exonym.statistical_vetting import require_vetting_readiness
+
+    candidate_path = _setup_synthetic_workspace(tmp_path, "synth-vet-no-detection")
+    cand = load_candidate(tmp_path, "synth-vet-no-detection")
+    _write_passing_pre_vetting_artifacts(candidate_path, cand.candidate_id)
+    _write_remaining_real_data_prerequisites(candidate_path)
+    result_path = candidate_path / "outputs" / "bls_search_results.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["detection_status"] = "no-detection"
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="detected hash-bound BLS search"):
+        require_vetting_readiness(cand)
+
+
+def test_vetting_readiness_rejects_a_subthreshold_bls_artifact(tmp_path: Path):
+    from exonym.statistical_vetting import require_vetting_readiness
+
+    candidate_path = _setup_synthetic_workspace(tmp_path, "synth-vet-low-snr")
+    cand = load_candidate(tmp_path, "synth-vet-low-snr")
+    _write_passing_pre_vetting_artifacts(candidate_path, cand.candidate_id)
+    _write_remaining_real_data_prerequisites(candidate_path)
+    result_path = candidate_path / "outputs" / "bls_search_results.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["snr"] = 6.0
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    manifest_path = candidate_path / "outputs" / "bls_search_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["result_sha256"] = hashlib.sha256(result_path.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="detected hash-bound BLS search"):
         require_vetting_readiness(cand)
 
 

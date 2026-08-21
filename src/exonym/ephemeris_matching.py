@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from .inputs import EPHEMERIS_CONFIG_NAMES, load_transit_ephemeris
+from .inputs import BTJD_TIME_SYSTEM, EPHEMERIS_CONFIG_NAMES, load_transit_ephemeris
 from .workspace import CandidateWorkspace, validate_signal_suffix
 
 
@@ -257,9 +257,9 @@ def record_known_signal_ephemeris(
 
 
 def _ephemeris_input_path(workspace: CandidateWorkspace, signal: Optional[str], source: str) -> Path:
-    if source == "candidate-config-signal" and signal is not None:
+    if source in ("candidate-config-signal", "partial-candidate-config-signal") and signal is not None:
         return workspace.path / "config" / "signals" / ("transit_config" + signal + ".json")
-    if source == "candidate-config":
+    if source in ("candidate-config", "partial-candidate-config"):
         for name in EPHEMERIS_CONFIG_NAMES:
             path = workspace.path / "config" / name
             if path.is_file():
@@ -285,6 +285,7 @@ def _candidate_ephemeris(
         or epoch is None
         or duration_days is None
         or duration_days <= 0
+        or ephemeris.get("time_system") != BTJD_TIME_SYSTEM
         or not isinstance(field_sources, dict)
         or any(field_sources.get(name) in (None, "synthetic-demo") for name in ("period_days", "epoch_btjd", "duration_days"))
     ):
@@ -298,6 +299,7 @@ def _candidate_ephemeris(
         "period_days": period,
         "epoch_btjd": epoch,
         "duration_hours": duration_days * 24.0,
+        "time_system": BTJD_TIME_SYSTEM,
         "input_artifact": {"path": _relative(workspace, path), "sha256": _sha256(path)},
     }
 
@@ -449,7 +451,7 @@ def _epoch_time_scale(provider: str, source: Mapping[str, Any], contract: Mappin
     if provider != SUPPORTED_PROVIDER:
         return str(contract["epoch_time_scale"])
     lowered = {str(key).lower(): value for key, value in source.items()}
-    declared = str(lowered.get("pl_tsystemref", "")).strip().upper().replace(" ", "_")
+    declared = str(lowered.get("pl_tranmid_systemref", "")).strip().upper().replace(" ", "_")
     return "BJD_TDB" if declared == "BJD_TDB" else "BJD_UNSPECIFIED"
 
 

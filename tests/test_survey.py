@@ -1,6 +1,7 @@
 """Tests for candidate-local blind-discovery survey controls."""
 
 import json
+import hashlib
 
 import pytest
 
@@ -20,21 +21,32 @@ from exonym.workspace import create_candidate
 
 
 def _eligible_audit(workspace):
+    retrieval_id = "a" * 32
+    evidence_dir = workspace.path / "data" / "external" / "novelty" / retrieval_id
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    evidence = []
+    for index, provider in enumerate(("nasa-toi", "nasa-confirmed", "exofop")):
+        extension = "json" if provider == "exofop" else "csv"
+        response_path = evidence_dir / "{0}-{1}.{2}".format(index, provider, extension)
+        response_path.write_bytes(provider.encode("ascii"))
+        evidence.append(
+            {
+                "source_uri": "https://example.invalid/{0}".format(provider),
+                "retrieved_at": "2026-01-01T00:00:00Z",
+                "finding": "Synthetic {0} eligibility response.".format(provider),
+                "evidence_sha256": hashlib.sha256(response_path.read_bytes()).hexdigest(),
+                "provider": provider,
+                "response_path": response_path.relative_to(workspace.path).as_posix(),
+            }
+        )
     audit = {
-        "schema_version": 1,
+        "schema_version": 2,
         "candidate_id": workspace.candidate_id,
         "retrieved_at": "2026-01-01T00:00:00Z",
         "freshness": {"expires_at": "2099-01-01T00:00:00Z"},
         "status": "eligible",
         "decision_basis": "Synthetic test audit.",
-        "evidence": [
-            {
-                "source_uri": "https://example.invalid/audit",
-                "retrieved_at": "2026-01-01T00:00:00Z",
-                "finding": "Synthetic eligibility result.",
-                "evidence_sha256": "a" * 64,
-            }
-        ],
+        "evidence": evidence,
     }
     path = workspace.path / "decisions" / "novelty_audit.json"
     path.parent.mkdir(parents=True, exist_ok=True)

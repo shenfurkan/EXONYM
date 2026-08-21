@@ -31,7 +31,7 @@ from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
 
-from .inputs import load_light_curve_table, load_transit_ephemeris
+from .inputs import BTJD_TIME_SYSTEM, load_light_curve_table, load_transit_ephemeris
 from .workspace import validate_signal_suffix
 from .lightcurve import phase_hours
 from .workspace import CandidateWorkspace
@@ -257,8 +257,14 @@ def run_fixed_ephemeris_screen(
         raise ValueError(
             "no readable signal prior at config/signals/transit_config{0}.json".format(signal)
         )
-    if ephemeris.get("source") == "synthetic-demo":
-        raise ValueError("fixed-ephemeris screening requires candidate ephemeris data")
+    required_fields = ("period_days", "epoch_btjd", "duration_days", "depth_ppm")
+    field_sources = ephemeris.get("field_sources", {})
+    if not isinstance(field_sources, dict) or any(
+        field_sources.get(field) in (None, "synthetic-demo") for field in required_fields
+    ):
+        raise ValueError("fixed-ephemeris screening requires complete candidate-derived ephemeris data")
+    if ephemeris.get("time_system") != BTJD_TIME_SYSTEM:
+        raise ValueError("fixed-ephemeris screening requires a BTJD_TDB epoch")
 
     table = load_light_curve_table(workspace, max_points=SCREENING_MAX_POINTS_PER_PRODUCT)
     if table is None:
@@ -266,6 +272,7 @@ def run_fixed_ephemeris_screen(
 
     period = _require_positive_finite("period_days", ephemeris.get("period_days"))
     duration_days = _require_positive_finite("duration_days", ephemeris.get("duration_days"))
+    _require_positive_finite("depth_ppm", ephemeris.get("depth_ppm"))
     epoch = _finite_float(ephemeris.get("epoch_btjd"))
     if epoch is None:
         raise ValueError("epoch_btjd must be finite")
@@ -287,6 +294,7 @@ def run_fixed_ephemeris_screen(
         "ephemeris": {
             "period_days": period,
             "epoch_btjd": epoch,
+            "epoch_time_system": BTJD_TIME_SYSTEM,
             "duration_hours": duration_hours,
             "source": ephemeris.get("source"),
         },

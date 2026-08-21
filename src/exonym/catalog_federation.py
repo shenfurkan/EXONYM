@@ -35,10 +35,10 @@ RETRIEVAL_TTL = timedelta(days=30)
 RETRYABLE_HTTP_STATUSES = (429, 500, 502, 503, 504)
 KNOWN_SIGNAL_REQUIRED_COLUMNS = {
     "nasa-exoplanet-archive": (
-        "pl_orbper", "pl_tranmid", "pl_trandur", "pl_tsystemref",
+        "pl_orbper", "pl_tranmid", "pl_trandur", "pl_tranmid_systemref",
     ),
     "nasa-exoplanet-archive-toi": (
-        "toi", "tic_id", "pl_orbper", "pl_tranmid", "pl_trandurh",
+        "toi", "tid", "pl_orbper", "pl_tranmid", "pl_trandurh",
     ),
 }
 
@@ -134,7 +134,7 @@ PROVIDERS: Dict[str, ProviderSpec] = {
         "https://exoplanetarchive.ipac.caltech.edu/",
         "NASA Exoplanet Archive TAP current service",
         "NASA Exoplanet Archive, Caltech/IPAC.",
-        "nea-pscomppars-by-tic-v1",
+        "nea-pscomppars-by-tic-v2",
         "csv",
         "BJD_TDB where supplied by the source table",
         "NASA Exoplanet Archive source-native units are retained.",
@@ -145,7 +145,7 @@ PROVIDERS: Dict[str, ProviderSpec] = {
         "https://exoplanetarchive.ipac.caltech.edu/",
         "NASA Exoplanet Archive TOI table current service",
         "NASA Exoplanet Archive, Caltech/IPAC.",
-        "nea-toi-by-tic-v1",
+        "nea-toi-by-tic-v2",
         "csv",
         "BJD declared by the source table; no BJD_TDB conversion is inferred",
         "NASA Exoplanet Archive TOI period and duration remain source-native. Epochs are retained but require an explicit time-standard contract before epoch matching.",
@@ -348,8 +348,8 @@ def _request_for(spec: ProviderSpec, candidate: CandidateWorkspace) -> CatalogRe
     if spec.name == "nasa-exoplanet-archive":
         tic = identifier.split()[1]
         query = (
-            "SELECT pl_name,pl_orbper,pl_tranmid,pl_trandur,pl_tsystemref "
-            "FROM pscomppars WHERE tic_id = {0}"
+            "SELECT pl_name,pl_orbper,pl_tranmid,pl_trandur,pl_tranmid_systemref "
+            "FROM pscomppars WHERE tic_id = 'TIC {0}'"
         ).format(tic)
         params = {"query": query, "format": "csv"}
         return CatalogRequest(
@@ -359,8 +359,8 @@ def _request_for(spec: ProviderSpec, candidate: CandidateWorkspace) -> CatalogRe
     if spec.name == "nasa-exoplanet-archive-toi":
         tic = identifier.split()[1]
         query = (
-            "SELECT toi,tic_id,pl_orbper,pl_tranmid,pl_trandurh "
-            "FROM toi WHERE tic_id = {0}"
+            "SELECT toi,tid,pl_orbper,pl_tranmid,pl_trandurh "
+            "FROM toi WHERE tid = {0}"
         ).format(tic)
         params = {"query": query, "format": "csv"}
         return CatalogRequest(

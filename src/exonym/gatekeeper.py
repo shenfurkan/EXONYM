@@ -28,6 +28,7 @@ from .workspace import (
 
 NOVELTY_AUDIT_RELATIVE_PATH = Path("decisions") / "novelty_audit.json"
 NOVELTY_AUDIT_ELIGIBLE_STATUS = "eligible"
+NOVELTY_AUDIT_REQUIRED_PROVIDERS = frozenset(("nasa-toi", "nasa-confirmed", "exofop"))
 
 
 class GateError(RuntimeError):
@@ -163,6 +164,57 @@ def _parse_utc_timestamp(value: object) -> Optional[datetime]:
     return parsed.astimezone(timezone.utc)
 
 
+def _gate_novelty_evidence(workspace: CandidateWorkspace, audit: Dict) -> Tuple[bool, str]:
+    """Require retained, hash-matched responses from all independent registries."""
+    if audit.get("schema_version") != 2:
+        return False, "eligible novelty audits must use evidence-bound schema version 2"
+    evidence = audit.get("evidence")
+    if not isinstance(evidence, list) or len(evidence) != len(NOVELTY_AUDIT_REQUIRED_PROVIDERS):
+        return False, "eligible novelty audit must retain exactly three independent registry responses"
+
+    workspace_root = workspace.path.resolve()
+    providers = []
+    paths = set()
+    retrieval_ids = set()
+    for entry in evidence:
+        if not isinstance(entry, dict):
+            return False, "eligible novelty audit contains a malformed evidence entry"
+        provider = entry.get("provider")
+        source_uri = entry.get("source_uri")
+        response_path = entry.get("response_path")
+        if provider not in NOVELTY_AUDIT_REQUIRED_PROVIDERS:
+            return False, "eligible novelty audit contains an unsupported registry provider"
+        if not isinstance(source_uri, str) or not source_uri.startswith("https://"):
+            return False, "eligible novelty audit evidence must use an HTTPS source URI"
+        if not isinstance(response_path, str):
+            return False, "eligible novelty audit evidence has no candidate-local response path"
+        relative_path = Path(response_path)
+        if (
+            relative_path.is_absolute()
+            or len(relative_path.parts) != 5
+            or relative_path.parts[:3] != ("data", "external", "novelty")
+        ):
+            return False, "eligible novelty audit evidence path is outside the novelty evidence area"
+        resolved_path = (workspace_root / relative_path).resolve()
+        try:
+            resolved_path.relative_to(workspace_root)
+        except ValueError:
+            return False, "eligible novelty audit evidence path escapes the candidate workspace"
+        if not resolved_path.is_file():
+            return False, "eligible novelty audit evidence response is missing"
+        if entry.get("evidence_sha256") != _sha256_file(resolved_path):
+            return False, "eligible novelty audit evidence SHA-256 does not match the retained response"
+        providers.append(provider)
+        paths.add(resolved_path)
+        retrieval_ids.add(relative_path.parts[3])
+
+    if set(providers) != NOVELTY_AUDIT_REQUIRED_PROVIDERS:
+        return False, "eligible novelty audit is missing an independent registry provider"
+    if len(paths) != len(evidence) or len(retrieval_ids) != 1:
+        return False, "eligible novelty audit evidence must be distinct responses from one retrieval"
+    return True, "eligible novelty audit has hash-matched independent registry evidence"
+
+
 def _gate_novelty_audit(workspace: CandidateWorkspace) -> Tuple[bool, str]:
     """Require a current, schema-valid, eligible candidate novelty audit."""
     audit_path = workspace.path / NOVELTY_AUDIT_RELATIVE_PATH
@@ -196,6 +248,9 @@ def _gate_novelty_audit(workspace: CandidateWorkspace) -> Tuple[bool, str]:
         return False, "novelty audit candidate_id does not match the workspace"
     if audit.get("status") != NOVELTY_AUDIT_ELIGIBLE_STATUS:
         return False, "novelty audit status is not eligible: {0}".format(audit.get("status"))
+    evidence_ok, evidence_detail = _gate_novelty_evidence(workspace, audit)
+    if not evidence_ok:
+        return False, evidence_detail
 
     retrieved_at = _parse_utc_timestamp(audit.get("retrieved_at"))
     freshness = audit.get("freshness")

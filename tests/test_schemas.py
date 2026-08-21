@@ -406,6 +406,35 @@ def _valid_novelty_audit():
     }
 
 
+def _write_valid_v2_novelty_audit(repo):
+    workspace = repo / "candidate" / "candidate-alpha"
+    retrieval_id = "a" * 32
+    evidence_dir = workspace / "data" / "external" / "novelty" / retrieval_id
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    evidence = []
+    for index, provider in enumerate(("nasa-toi", "nasa-confirmed", "exofop")):
+        extension = "json" if provider == "exofop" else "csv"
+        response_path = evidence_dir / "{0}-{1}.{2}".format(index, provider, extension)
+        response_path.write_bytes(provider.encode("ascii"))
+        evidence.append(
+            {
+                "source_uri": "https://example.invalid/{0}".format(provider),
+                "retrieved_at": "2000-01-01T00:00:00Z",
+                "finding": "Synthetic {0} response.".format(provider),
+                "evidence_sha256": hashlib.sha256(response_path.read_bytes()).hexdigest(),
+                "provider": provider,
+                "response_path": response_path.relative_to(workspace).as_posix(),
+            }
+        )
+    audit = _valid_novelty_audit()
+    audit["schema_version"] = 2
+    audit["evidence"] = evidence
+    path = workspace / "decisions" / "novelty_audit.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(audit), encoding="utf-8")
+    return path, evidence_dir
+
+
 def _valid_engine_run():
     return {
         "schema_version": 1,
@@ -634,6 +663,27 @@ def test_invalid_novelty_audit_is_flagged(tmp_path):
     report = _audit(repo)
     assert not report.ok
     assert any(v.rule == "schema-violation" for v in report.violations)
+
+
+def test_valid_v2_novelty_audit_is_hash_bound(tmp_path):
+    repo = _make_repo(tmp_path)
+    _write_valid_v2_novelty_audit(repo)
+
+    assert _audit(repo).ok
+
+
+def test_v2_novelty_audit_rejects_a_tampered_retained_response(tmp_path):
+    repo = _make_repo(tmp_path)
+    audit_path, evidence_dir = _write_valid_v2_novelty_audit(repo)
+    (evidence_dir / "0-nasa-toi.csv").write_bytes(b"tampered")
+
+    report = _audit(repo)
+
+    assert any(
+        violation.path == audit_path.as_posix()
+        and violation.rule == "novelty-evidence-provenance-invalid"
+        for violation in report.violations
+    )
 
 
 def test_valid_engine_run_passes_schema_validation(tmp_path):

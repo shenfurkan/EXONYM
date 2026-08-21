@@ -244,10 +244,12 @@ def test_synthesize_archival_report(tmp_path):
     mock_gaia = {
         "target_ra_deg": 10.0,
         "target_dec_deg": 20.0,
-        "search_radius_arcsec": 10.0,
+        "search_radius_arcsec": 30.0,
         "ruwe": 1.62,
         "suspected_binary": True,
         "nearby_sources_count": 3,
+        "validated": True,
+        "query_status": "ok",
         "sources": [{"source_id": "1", "separation_arcsec": 0.0, "ruwe": 1.62}],
     }
     mock_exofop = {
@@ -264,7 +266,7 @@ def test_synthesize_archival_report(tmp_path):
     with patch.object(service, "query_gaia_astrometry", return_value=mock_gaia), patch.object(
         service, "query_exofop_metadata", return_value=mock_exofop
     ):
-        report = service.synthesize_archival_report(workspace, radius_arcsec=10.0)
+        report = service.synthesize_archival_report(workspace, radius_arcsec=30.0)
 
         assessment = report["scientific_assessment"]
         assert assessment["1_is_hidden_binary"]["answer"] is True
@@ -300,6 +302,43 @@ def test_synthesize_archival_report_fails_closed_without_coordinates(tmp_path):
     assert assessment["3_has_ground_based_followup"]["answer"] is None
 
 
+def test_synthesize_archival_report_keeps_missing_ruwe_and_narrow_crowding_unknown(tmp_path):
+    repo = _setup_repo(tmp_path)
+    root = ["--root", str(repo)]
+    assert main(root + ["init", "archive-unknown-metrics", "--tic", "123456789"]) == 0
+    workspace = load_candidate(repo, "archive-unknown-metrics")
+    service = ArchivalVettingService()
+    gaia = {
+        "target_ra_deg": 10.0,
+        "target_dec_deg": 20.0,
+        "search_radius_arcsec": 10.0,
+        "ruwe": None,
+        "suspected_binary": None,
+        "nearby_sources_count": 1,
+        "sources": [],
+        "validated": True,
+        "query_status": "ok",
+    }
+    exofop = {
+        "query_status": "ok",
+        "target_coordinates": {"ra_deg": 10.0, "dec_deg": 20.0},
+        "has_imaging": False,
+        "has_spectroscopy": False,
+        "imaging_types": [],
+        "spectroscopy_types": [],
+    }
+
+    with patch.object(service, "query_gaia_astrometry", return_value=gaia), patch.object(
+        service, "query_exofop_metadata", return_value=exofop
+    ):
+        report = service.synthesize_archival_report(workspace, radius_arcsec=10.0)
+
+    assessment = report["scientific_assessment"]
+    assert assessment["1_is_hidden_binary"]["answer"] is None
+    assert assessment["2_has_nearby_contaminants"]["answer"] is None
+    assert assessment["2_has_nearby_contaminants"]["search_radius_sufficient_for_crowding"] is False
+
+
 def test_cli_archive_command(tmp_path, capsys):
     repo = _setup_repo(tmp_path)
     root = ["--root", str(repo)]
@@ -310,11 +349,13 @@ def test_cli_archive_command(tmp_path, capsys):
     mock_gaia = {
         "target_ra_deg": 0.0,
         "target_dec_deg": 0.0,
-        "search_radius_arcsec": 10.0,
+        "search_radius_arcsec": 30.0,
         "ruwe": 1.0,
         "suspected_binary": False,
         "nearby_sources_count": 1,
         "sources": [],
+        "validated": True,
+        "query_status": "ok",
     }
     mock_exofop = {
         "tic_id": "11223344",
@@ -331,13 +372,13 @@ def test_cli_archive_command(tmp_path, capsys):
     ), patch(
         "exonym.archive.ArchivalVettingService.query_exofop_metadata", return_value=mock_exofop
     ):
-        output_file = run_archival_vetting(candidate, radius_arcsec=10.0)
+        output_file = run_archival_vetting(candidate, radius_arcsec=30.0)
         assert output_file.exists()
 
         output_data = json.loads(output_file.read_text(encoding="utf-8"))
         assert "scientific_assessment" in output_data
         assert output_data["candidate_id"] == "archive-candidate"
 
-        assert main(root + ["archive", "archive-candidate", "--radius-arcsec", "15.0"]) == 0
+        assert main(root + ["archive", "archive-candidate", "--radius-arcsec", "30.0"]) == 0
         captured = capsys.readouterr().out
         assert "archival_vetting_report.json" in captured

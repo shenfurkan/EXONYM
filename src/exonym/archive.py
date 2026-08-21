@@ -28,6 +28,10 @@ from .workspace import CandidateWorkspace
 ARCHIVAL_REPORT_RELATIVE_PATH = Path("outputs") / "archival_vetting_report.json"
 DEFAULT_HTTP_TIMEOUT_SECONDS = 8.0
 DEFAULT_HTTP_MAX_RETRIES = 2
+# One TESS detector pixel is about 21 arcsec. A smaller cone cannot support a
+# negative crowding assessment for a TESS photometric aperture.
+DEFAULT_ARCHIVE_SEARCH_RADIUS_ARCSEC = 60.0
+MINIMUM_CROWDING_SEARCH_RADIUS_ARCSEC = 21.0
 
 
 def _utc_timestamp() -> str:
@@ -345,7 +349,7 @@ class ArchivalVettingService:
         return sources
 
     def query_gaia_astrometry(
-        self, ra: float, dec: float, radius_arcsec: float = 10.0
+        self, ra: float, dec: float, radius_arcsec: float = DEFAULT_ARCHIVE_SEARCH_RADIUS_ARCSEC
     ) -> Dict[str, Any]:
         """Cone search Gaia DR3 for celestial sources around target coordinates.
 
@@ -372,7 +376,7 @@ class ArchivalVettingService:
             "target_match_method": None,
             "target_phot_g_mean_mag": None,
             "ruwe": None,
-            "suspected_binary": False,
+            "suspected_binary": None,
             "nearby_sources_count": 0,
             "sources": [],
             "source": "gaia-dr3",
@@ -467,10 +471,10 @@ class ArchivalVettingService:
             )
             results["target_match_method"] = target_source.get("target_match_method")
             results["target_phot_g_mean_mag"] = target_source["phot_g_mean_mag"]
-        target_ruwe = target_source["ruwe"] if target_source is not None else None
-        if target_ruwe is not None:
+        target_ruwe = _finite_float(target_source.get("ruwe")) if target_source is not None else None
+        if target_ruwe is not None and target_ruwe > 0.0:
             results["ruwe"] = target_ruwe
-            results["suspected_binary"] = bool(target_ruwe > 1.4)
+            results["suspected_binary"] = target_ruwe > 1.4
 
     def query_exofop_metadata(self, tic_id: str) -> Dict[str, Any]:
         """Query NASA ExoFOP JSON API for imaging and spectroscopy records for a target TIC.
@@ -582,13 +586,18 @@ class ArchivalVettingService:
         return results
 
     def synthesize_archival_report(
-        self, workspace: CandidateWorkspace, radius_arcsec: float = 10.0
+        self,
+        workspace: CandidateWorkspace,
+        radius_arcsec: float = DEFAULT_ARCHIVE_SEARCH_RADIUS_ARCSEC,
     ) -> Dict[str, Any]:
         """Synthesize Gaia astrometry and ExoFOP metadata for a candidate workspace."""
         identifiers = workspace.metadata.get("identifiers", {})
         tic_id = identifiers.get("tic")
         toi_id = identifiers.get("toi")
         candidate_id = workspace.candidate_id
+        radius_value = _finite_float(radius_arcsec)
+        if radius_value is None or radius_value <= 0.0:
+            raise ValueError("radius_arcsec must be positive and finite")
 
         exofop_data: Dict[str, Any] = {}
         if tic_id:
@@ -623,7 +632,7 @@ class ArchivalVettingService:
             gaia_data: Dict[str, Any] = {
                 "target_ra_deg": None,
                 "target_dec_deg": None,
-                "search_radius_arcsec": float(radius_arcsec),
+                "search_radius_arcsec": radius_value,
                 "ruwe": None,
                 "suspected_binary": None,
                 "nearby_sources_count": None,
@@ -636,21 +645,28 @@ class ArchivalVettingService:
             }
         else:
             gaia_data = self.query_gaia_astrometry(
-                ra_deg, dec_deg, radius_arcsec=radius_arcsec
+                ra_deg, dec_deg, radius_arcsec=radius_value
             )
 
         ruwe_val = gaia_data.get("ruwe")
         gaia_status = gaia_data.get("query_status", "ok")
         exofop_status = exofop_data.get("query_status", "ok") if exofop_data else "not_requested"
-        gaia_available = gaia_status == "ok"
+        gaia_available = gaia_status == "ok" and gaia_data.get("validated") is True
         exofop_available = exofop_status == "ok"
+        ruwe = _finite_float(ruwe_val)
         is_hidden_binary = (
-            bool(gaia_data.get("suspected_binary", False)) if gaia_available else None
+            gaia_data.get("suspected_binary")
+            if gaia_available
+            and ruwe is not None
+            and ruwe > 0.0
+            and isinstance(gaia_data.get("suspected_binary"), bool)
+            else None
         )
         nearby_count = gaia_data.get("nearby_sources_count")
+        crowding_radius_sufficient = radius_value >= MINIMUM_CROWDING_SEARCH_RADIUS_ARCSEC
         has_nearby_contaminants = (
             bool(nearby_count > 1)
-            if gaia_available and isinstance(nearby_count, int)
+            if gaia_available and crowding_radius_sufficient and isinstance(nearby_count, int)
             else None
         )
         has_imaging = exofop_data.get("has_imaging") if exofop_available else None
@@ -659,7 +675,7 @@ class ArchivalVettingService:
             bool(has_imaging or has_spectroscopy) if exofop_available else None
         )
 
-        ruwe_str = f"{ruwe_val:.4f}" if isinstance(ruwe_val, float) else "N/A"
+        ruwe_str = f"{ruwe:.4f}" if ruwe is not None else "N/A"
         if is_hidden_binary is None:
             evidence_binary = "Gaia astrometry unavailable or unvalidated; binarity status is unknown"
         elif is_hidden_binary:
@@ -671,15 +687,19 @@ class ArchivalVettingService:
                 f"Gaia RUWE ({ruwe_str}) does not exceed 1.4; this does not exclude companions"
             )
 
-        if has_nearby_contaminants is None:
+        if not crowding_radius_sufficient:
+            evidence_crowding = (
+                "Gaia search radius is below one TESS pixel; crowding status is unknown"
+            )
+        elif has_nearby_contaminants is None:
             evidence_crowding = "Gaia astrometry unavailable or unvalidated; crowding status is unknown"
         elif has_nearby_contaminants:
             evidence_crowding = (
-                f"{nearby_count} celestial sources detected within {radius_arcsec}\" radius"
+                f"{nearby_count} celestial sources detected within {radius_value}\" radius"
             )
         else:
             evidence_crowding = (
-                f"No additional Gaia sources were detected within {radius_arcsec}\" radius"
+                f"No additional Gaia sources were detected within {radius_value}\" radius"
             )
 
         imaging_types_str = ", ".join(exofop_data.get("imaging_types", [])) or "Registered"
@@ -709,14 +729,15 @@ class ArchivalVettingService:
             "scientific_assessment": {
                 "1_is_hidden_binary": {
                     "answer": is_hidden_binary,
-                    "ruwe": ruwe_val,
+                    "ruwe": ruwe,
                     "threshold": 1.4,
                     "availability": gaia_status,
                     "evidence": evidence_binary,
                 },
                 "2_has_nearby_contaminants": {
                     "answer": has_nearby_contaminants,
-                    "search_radius_arcsec": float(radius_arcsec),
+                    "search_radius_arcsec": radius_value,
+                    "search_radius_sufficient_for_crowding": crowding_radius_sufficient,
                     "nearby_sources_count": nearby_count,
                     "availability": gaia_status,
                     "evidence": evidence_crowding,
@@ -737,7 +758,7 @@ class ArchivalVettingService:
 
 def run_archival_vetting(
     workspace: CandidateWorkspace,
-    radius_arcsec: float = 10.0,
+    radius_arcsec: float = DEFAULT_ARCHIVE_SEARCH_RADIUS_ARCSEC,
     service: Optional[ArchivalVettingService] = None,
 ) -> Path:
     """Run multi-archive vetting on candidate workspace and write output report JSON.

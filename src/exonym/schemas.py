@@ -157,6 +157,56 @@ def _validate_artifacts(
             report.add(record_path, "artifact-hash-mismatch", "{0} artifact SHA-256 does not match its manifest".format(label))
 
 
+def _validate_novelty_audit_evidence(
+    report: IsolationReport,
+    audit_path: Path,
+    instance: object,
+    workspace_dir: Path,
+) -> None:
+    """Check v2 novelty response paths and digests without rewriting v1 history."""
+    if not isinstance(instance, dict) or instance.get("schema_version") != 2:
+        return
+    evidence = instance.get("evidence")
+    if not isinstance(evidence, list):
+        return
+    response_paths = set()
+    retrieval_ids = set()
+    for entry in evidence:
+        if not isinstance(entry, dict):
+            continue
+        response_path = entry.get("response_path")
+        resolved_path = _candidate_artifact_path(workspace_dir, response_path)
+        relative_path = Path(response_path) if isinstance(response_path, str) else None
+        if (
+            relative_path is None
+            or relative_path.is_absolute()
+            or len(relative_path.parts) != 5
+            or relative_path.parts[:3] != ("data", "external", "novelty")
+            or resolved_path is None
+            or not resolved_path.is_file()
+        ):
+            report.add(
+                audit_path,
+                "novelty-evidence-provenance-invalid",
+                "novelty evidence response path is missing or outside the candidate workspace",
+            )
+            continue
+        if entry.get("evidence_sha256") != _file_sha256(resolved_path):
+            report.add(
+                audit_path,
+                "novelty-evidence-provenance-invalid",
+                "novelty evidence response SHA-256 does not match",
+            )
+        response_paths.add(resolved_path)
+        retrieval_ids.add(relative_path.parts[3])
+    if len(response_paths) != len(evidence) or len(retrieval_ids) > 1:
+        report.add(
+            audit_path,
+            "novelty-evidence-provenance-invalid",
+            "novelty evidence responses must be distinct files from one retrieval",
+        )
+
+
 def _positive_finite_number(value: object) -> bool:
     """Return whether one JSON value is a positive finite real number."""
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
@@ -889,6 +939,7 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
                 report.add(novelty_audit_path, "schema-violation", "invalid JSON: {0}".format(exc))
             else:
                 _validate(report, novelty_audit_path, instance, novelty_audit_schema, validate_func)
+                _validate_novelty_audit_evidence(report, novelty_audit_path, instance, workspace_dir)
 
         if automated_triage_schema is not None:
             triage_path = workspace_dir / "decisions" / "automated_triage.json"

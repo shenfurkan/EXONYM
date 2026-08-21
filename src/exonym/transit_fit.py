@@ -153,12 +153,14 @@ def batman_transit_flux(
         params.w = omega_deg
         params.u = [u1, u2]
         params.limb_dark = "quadratic"
+
         model = batman.TransitModel(
             params,
             np.asarray(phase_days, dtype=float),
             supersample_factor=SUPERSAMPLE_FACTOR,
             exp_time=float(exposure_seconds) / 86400.0,
         )
+
         flux = np.asarray(model.light_curve(params), dtype=float)
         return baseline * flux
     except Exception:
@@ -216,6 +218,7 @@ def _native_transit_window_data(
         sectors = np.asarray(table["sector"], dtype=int)
         period_days = float(ephemeris["period_days"])
         epoch_btjd = float(ephemeris["epoch_btjd"])
+        duration_days = float(ephemeris["duration_days"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("candidate photometry or ephemeris is malformed") from exc
     if (
@@ -226,11 +229,14 @@ def _native_transit_window_data(
         or not math.isfinite(period_days)
         or period_days <= 0
         or not math.isfinite(epoch_btjd)
+        or not math.isfinite(duration_days)
+        or duration_days <= 0
         or not math.isfinite(window_half_hours)
         or window_half_hours <= 0
     ):
         raise ValueError("candidate photometry cannot define a native transit window")
 
+    effective_window = min(window_half_hours, max(2.5, duration_days * 24.0 * 2.5))
     phase_days = ((time - epoch_btjd + 0.5 * period_days) % period_days) - 0.5 * period_days
     valid = (
         np.isfinite(time)
@@ -238,7 +244,7 @@ def _native_transit_window_data(
         & np.isfinite(flux)
         & np.isfinite(flux_err)
         & (flux_err > 0)
-        & (np.abs(phase_days) <= window_half_hours / 24.0)
+        & (np.abs(phase_days) <= effective_window / 24.0)
     )
     if int(np.count_nonzero(valid)) < 100:
         raise ValueError("insufficient native-cadence transit-window coverage")
@@ -623,18 +629,11 @@ def _map_optimize(
     bounds.extend([(-12.0, -2.0), (0.01, 0.99), (0.01, 0.99)])
     if eccentric:
         bounds.extend([(-1.0, 1.0), (-1.0, 1.0)])
-    if eccentric:
-        offsets = [
-            np.zeros_like(start),
-            np.array([0.01, 0.2, -0.1, 0.0005, -0.5, 0.05, -0.05, 0.1, 0.1]),
-            np.array([-0.01, -0.2, 0.1, -0.0005, 0.5, -0.05, 0.05, -0.1, -0.1]),
-        ]
-    else:
-        offsets = [
-            np.zeros_like(start),
-            np.array([0.01, 0.2, -0.1, 0.0005, -0.5, 0.05, -0.05]),
-            np.array([-0.01, -0.2, 0.1, -0.0005, 0.5, -0.05, 0.05]),
-        ]
+    offsets = (
+        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        (0.01, 0.2, -0.1, 0.05, -0.05, 0.1),
+        (-0.01, -0.2, 0.1, -0.05, 0.05, -0.1),
+    )
     jitter_starts = np.array([0.0, -2.0, -4.0, -6.0, -8.0])
     best_objective = np.inf
     best_point = start
@@ -657,10 +656,19 @@ def _map_optimize(
         )
         return value if math.isfinite(value) else 1e100
 
-    for offset in offsets:
+    baseline_stop = 3 + n_sectors
+    for rp_delta, rho_delta, impact_delta, q1_delta, q2_delta, eccentric_delta in offsets:
         for jitter_delta in jitter_starts:
-            candidate = start + offset
-            candidate[4] = start[4] + jitter_delta
+            candidate = start.copy()
+            candidate[0] += rp_delta
+            candidate[1] += rho_delta
+            candidate[2] += impact_delta
+            candidate[baseline_stop] += jitter_delta
+            candidate[baseline_stop + 1] += q1_delta
+            candidate[baseline_stop + 2] += q2_delta
+            if eccentric:
+                candidate[baseline_stop + 3] += eccentric_delta
+                candidate[baseline_stop + 4] += eccentric_delta
             result = minimize(
                 optimizer_objective,
                 candidate,

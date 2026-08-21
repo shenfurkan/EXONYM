@@ -11,7 +11,7 @@ import importlib.metadata
 import json
 import math
 import os
-import tempfile
+import uuid
 import warnings
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -24,6 +24,18 @@ FPP_CLAIM_BLOCK_REASON = (
     "observed photometry and scene constraints."
 )
 DEFAULT_TRICERATOPS_SEED = 1729
+
+
+def _ensure_legacy_numpy_scalars(numpy_module: Any) -> None:
+    """Restore removed NumPy scalar aliases needed by legacy optional engines.
+
+    The aliases are installed only when NumPy no longer exposes them. This is a
+    compatibility bridge for third-party imports, not a replacement for their
+    own NumPy-2-compatible releases.
+    """
+    for type_name, builtin_type in (("int", int), ("float", float), ("bool", bool)):
+        if type_name not in numpy_module.__dict__:
+            setattr(numpy_module, type_name, builtin_type)
 
 
 
@@ -77,21 +89,6 @@ def extract_fpp(report: Dict[str, Any]) -> float:
     raise ValueError("no FPP value found in report")
 
 
-def _first_config_number(transit: Dict[str, Any], names: Tuple[str, ...]) -> Optional[float]:
-    """Return the first numeric transit-config value found under ``names``."""
-    for name in names:
-        value = transit.get(name)
-        if isinstance(value, dict):
-            value = value.get("value")
-        if value is None or isinstance(value, bool):
-            continue
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            continue
-    return None
-
-
 def _sha256(path: Path) -> str:
     """Return the SHA-256 digest for a candidate-local file."""
     digest = hashlib.sha256()
@@ -112,7 +109,7 @@ def _prepare_observed_transit_input(workspace: Any, signal: Optional[str]) -> Di
     """
     import numpy as np
 
-    from ..inputs import load_light_curve_table, load_transit_ephemeris
+    from ..inputs import BTJD_TIME_SYSTEM, load_light_curve_table, load_transit_ephemeris
 
     table = load_light_curve_table(workspace, max_points=None)
     if table is None:
@@ -121,10 +118,14 @@ def _prepare_observed_transit_input(workspace: Any, signal: Optional[str]) -> Di
     ephemeris = load_transit_ephemeris(workspace, signal=signal)
     field_sources = ephemeris.get("field_sources", {})
     required_fields = ("period_days", "epoch_btjd", "duration_days")
-    if any(field_sources.get(field) == "synthetic-demo" for field in required_fields):
+    if not isinstance(field_sources, dict) or any(
+        field_sources.get(field) in (None, "synthetic-demo") for field in required_fields
+    ):
         raise ValueError(
             "TRICERATOPS requires candidate-derived period, epoch, and duration values"
         )
+    if ephemeris.get("time_system") != BTJD_TIME_SYSTEM:
+        raise ValueError("TRICERATOPS requires a BTJD_TDB ephemeris")
 
     try:
         period_days = float(ephemeris["period_days"])
@@ -289,6 +290,10 @@ def run_triceratops_simulation(
         raise ValueError("random_seed must be an integer")
     if random_seed < 0 or random_seed > 2**32 - 1:
         raise ValueError("random_seed must be between 0 and 2**32 - 1")
+    if isinstance(n_draws, bool) or int(n_draws) < 1:
+        raise ValueError("n_draws must be at least one")
+    if isinstance(search_radius, bool) or int(search_radius) < 1:
+        raise ValueError("search_radius must be at least one")
     signal = validate_signal_suffix(signal)
     outputs_dir = workspace.path / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
@@ -312,51 +317,42 @@ def run_triceratops_simulation(
         depth_ppm = observed_input["depth_ppm"]
         duration_hrs = observed_input["duration_hours"]
         ephemeris_source = observed_input["provenance"]["ephemeris_source"]
-    elif signal is not None:
-        config_path = workspace.path / "config" / "signals" / "transit_config{0}.json".format(signal)
+    else:
+        # A fallback report may describe a candidate-owned ephemeris, but it
+        # must use the same provenance checks as the actual observed-data path.
         try:
-            payload = json.loads(config_path.read_text(encoding="utf-8"))
-            transit = payload.get("transit", payload)
-            if not isinstance(transit, dict):
-                raise ValueError("signal transit config must contain an object")
+            from ..inputs import load_transit_ephemeris
 
-            period_value = _first_config_number(transit, ("period_days", "period", "p"))
-            if period_value is None or period_value <= 0:
-                raise ValueError("signal transit config has no positive period")
-            period = period_value
-
-            depth_value = _first_config_number(transit, ("depth_ppm", "depth"))
-            if depth_value is not None and depth_value >= 0:
-                depth_ppm = depth_value
-
-            duration_hours_value = _first_config_number(
-                transit, ("duration_hours", "duration_hrs", "duration_h")
+            ephemeris = load_transit_ephemeris(workspace, signal=signal)
+            field_sources = ephemeris.get("field_sources", {})
+            required_fields = ("period_days", "duration_days", "depth_ppm")
+            if not isinstance(field_sources, dict) or any(
+                field_sources.get(field) == "synthetic-demo" for field in required_fields
+            ):
+                raise ValueError("ephemeris is incomplete or synthetic")
+            period = float(ephemeris["period_days"])
+            depth_ppm = float(ephemeris["depth_ppm"])
+            duration_hrs = float(ephemeris["duration_days"]) * 24.0
+            if (
+                not math.isfinite(period)
+                or not math.isfinite(depth_ppm)
+                or not math.isfinite(duration_hrs)
+                or period <= 0.0
+                or depth_ppm <= 0.0
+                or duration_hrs <= 0.0
+            ):
+                raise ValueError("ephemeris values are not physically usable")
+            ephemeris_source = str(ephemeris.get("source"))
+        except (KeyError, TypeError, ValueError) as exc:
+            detail = (
+                "could not read signal transit config transit_config{0}.json".format(signal)
+                if signal is not None
+                else "could not load candidate-derived transit ephemeris"
             )
-            duration_days_value = _first_config_number(transit, ("duration_days",))
-            if duration_hours_value is not None and duration_hours_value > 0:
-                duration_hrs = duration_hours_value
-            elif duration_days_value is not None and duration_days_value > 0:
-                duration_hrs = duration_days_value * 24.0
-            ephemeris_source = "candidate-config-signal"
-        except (json.JSONDecodeError, OSError, KeyError, ValueError, TypeError) as exc:
             warnings.warn(
-                "could not read signal transit config {0}: {1!r}".format(config_path.name, exc),
+                "{0}: {1!r}".format(detail, exc),
                 stacklevel=2,
             )
-    else:
-        bls_path = outputs_dir / "bls_search_results.json"
-        if bls_path.is_file():
-            try:
-                bls_data = json.loads(bls_path.read_text(encoding="utf-8"))
-                period = float(bls_data.get("best_period", period))
-                depth_ppm = float(bls_data.get("best_depth_ppm", depth_ppm))
-                duration_hrs = float(bls_data.get("best_duration_hours", duration_hrs))
-                ephemeris_source = "bls-search"
-            except (json.JSONDecodeError, OSError, KeyError, ValueError, TypeError) as exc:
-                warnings.warn(
-                    "could not read BLS results {0}: {1!r}".format(bls_path.name, exc),
-                    stacklevel=2,
-                )
 
     # fpp is initialized to NaN so any code path that does not successfully
     # run the Monte Carlo produces an explicit sentinel rather than a
@@ -367,10 +363,15 @@ def run_triceratops_simulation(
     source = "not-run"
     triceratops_error: Optional[str] = None
     backend: Optional[Dict[str, str]] = None
+    scene_artifacts = []
 
     if tic_id is not None:
         try:
             import numpy as np
+
+            # TRICERATOPS and pytransit releases in the supported optional
+            # stack can still import these aliases on NumPy 1.24+ / 2.x.
+            _ensure_legacy_numpy_scalars(np)
             import triceratops.triceratops as triceratops_module
 
             try:
@@ -386,49 +387,64 @@ def run_triceratops_simulation(
             if observed_input is None:
                 raise RuntimeError("TRICERATOPS observed input preparation did not complete")
             sectors = observed_input["sectors"]
-            # TRICERATOPS writes the TRILEGAL CSV (and other scratch files)
-            # to the process working directory; run the Monte Carlo from a
-            # temporary directory so no research payload leaks into the repo.
+            # TRICERATOPS writes scene inputs in its working directory. Retain
+            # them under the candidate workspace for inspection and replay.
             cwd_before = os.getcwd()
             rng_state = np.random.get_state()
-            with tempfile.TemporaryDirectory(prefix="exonym-trilegal-") as tmp_cwd:
-                os.chdir(tmp_cwd)
-                try:
-                    np.random.seed(random_seed)
-                    targ = target_cls(
-                        ID=tic_id,
-                        sectors=np.array(sectors, dtype=int),
-                        search_radius=search_radius,
-                        mission="TESS",
-                    )
-                    targ.calc_depths(depth_ppm * 1e-6)
+            scene_dir = workspace.path / "data" / "external" / "triceratops" / uuid.uuid4().hex
+            scene_dir.mkdir(parents=True, exist_ok=False)
+            try:
+                os.chdir(scene_dir)
+                np.random.seed(random_seed)
+                targ = target_cls(
+                    ID=tic_id,
+                    sectors=np.array(sectors, dtype=int),
+                    search_radius=search_radius,
+                    mission="TESS",
+                )
+                targ.calc_depths(depth_ppm * 1e-6)
 
-                    targ.calc_probs(
-                        time=observed_input["time_days"],
-                        flux_0=observed_input["flux"],
-                        flux_err_0=observed_input["flux_err"],
-                        P_orb=period,
-                        N=n_draws,
-                        parallel=False,
-                        verbose=0,
-                        exptime=observed_input["exposure_days"],
-                        nsamples=5,
-                    )
+                targ.calc_probs(
+                    time=observed_input["time_days"],
+                    flux_0=observed_input["flux"],
+                    flux_err_0=observed_input["flux_err"],
+                    P_orb=period,
+                    N=n_draws,
+                    parallel=False,
+                    verbose=0,
+                    exptime=observed_input["exposure_days"],
+                    nsamples=5,
+                )
 
-                    fpp = float(targ.FPP)
-                    nfpp = float(targ.NFPP)
-                    if hasattr(targ, "probs") and hasattr(targ.probs, "groupby"):
-                        scenarios = (
-                            targ.probs.groupby("scenario")["prob"]
-                            .sum()
-                            .sort_values(ascending=False)
-                            .to_dict()
+                fpp = float(targ.FPP)
+                nfpp = float(targ.NFPP)
+                if not (math.isfinite(fpp) and 0.0 <= fpp <= 1.0):
+                    raise RuntimeError("TRICERATOPS returned an invalid FPP")
+                if not (math.isfinite(nfpp) and 0.0 <= nfpp <= 1.0):
+                    raise RuntimeError("TRICERATOPS returned an invalid NFPP")
+                if hasattr(targ, "probs") and hasattr(targ.probs, "groupby"):
+                    scenarios = (
+                        targ.probs.groupby("scenario")["prob"]
+                        .sum()
+                        .sort_values(ascending=False)
+                        .to_dict()
                     )
-                    source = "triceratops-monte-carlo"
-                finally:
-                    np.random.set_state(rng_state)
-                    os.chdir(cwd_before)
+                source = "triceratops-monte-carlo"
+            finally:
+                np.random.set_state(rng_state)
+                os.chdir(cwd_before)
+                scene_artifacts = [
+                    {
+                        "path": path.relative_to(workspace.path).as_posix(),
+                        "sha256": _sha256(path),
+                    }
+                    for path in sorted(scene_dir.rglob("*"))
+                    if path.is_file()
+                ]
         except Exception as exc:
+            fpp = float("nan")
+            nfpp = float("nan")
+            scenarios = {}
             triceratops_error = "{0}: {1}".format(type(exc).__name__, exc)
             warnings.warn(
                 "TRICERATOPS Monte Carlo failed: {0!r}. "
@@ -468,7 +484,11 @@ def run_triceratops_simulation(
         "scenarios": scenarios,
         "source": source,
         "triceratops_error": triceratops_error,
-        "input_provenance": observed_input["provenance"] if observed_input is not None else None,
+        "input_provenance": (
+            {**observed_input["provenance"], "scene_artifacts": scene_artifacts}
+            if observed_input is not None
+            else None
+        ),
         "claim_eligible": False,
         "claim_block_reason": FPP_CLAIM_BLOCK_REASON,
     }

@@ -8,23 +8,23 @@ products into ``candidate/<id>/data/raw/`` and writes
 
 from __future__ import annotations
 
-import os
 import shutil
 import tempfile
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
+from urllib.parse import quote
 
 from .catalog import write_provenance_sidecar
 from .workspace import CandidateWorkspace
 
 Product = Tuple[Path, str]  # (local product path, source URI)
-_PROVIDERS = ("spoc", "tesscut")
+_PROVIDERS = ("spoc",)
 
 
 def _validate_provider(provider: str) -> str:
     if provider not in _PROVIDERS:
         raise ValueError(
-            "unsupported TESS data provider {0!r}; choose 'spoc' or 'tesscut'".format(provider)
+            "unsupported TESS data provider {0!r}; choose 'spoc'".format(provider)
         )
     return provider
 
@@ -36,12 +36,53 @@ def _sector_value(row: object) -> Optional[int]:
         return None
 
 
-def _mast_product_uri(row: object) -> str:
+def _mast_product_data_uri(row: object) -> str:
+    """Return the MAST data URI recorded by the product search result."""
     columns = getattr(row, "colnames", ())
-    obs_id = str(row["obs_id"]) if "obs_id" in columns else str(row["productFilename"])
-    return "https://mast.stsci.edu/api/v0.1/Download/file?uri=mast:TESS/product/{0}".format(
-        obs_id
+    if "dataURI" in columns:
+        data_uri = str(row["dataURI"]).strip()
+        if data_uri.startswith("mast:"):
+            return data_uri
+    filename = str(row["productFilename"]) if "productFilename" in columns else str(row["obs_id"])
+    filename = Path(filename).name
+    if not filename:
+        raise ValueError("MAST product row lacks a usable dataURI or product filename")
+    return "mast:TESS/product/{0}".format(filename)
+
+
+def _mast_product_filename(row: object) -> str:
+    columns = getattr(row, "colnames", ())
+    value = row["productFilename"] if "productFilename" in columns else row["obs_id"]
+    filename = Path(str(value)).name
+    if not filename:
+        raise ValueError("MAST product row lacks a usable product filename")
+    return filename
+
+
+def _mast_product_uri(row: object) -> str:
+    data_uri = _mast_product_data_uri(row)
+    return "https://mast.stsci.edu/api/v0.1/Download/file?uri={0}".format(
+        quote(data_uri, safe=":/")
     )
+
+
+def _download_spoc_product(row: object, staging: Path) -> Path:
+    """Download archive bytes directly instead of serializing a Lightkurve object."""
+    try:
+        from astroquery.mast import Observations
+    except ImportError as exc:  # pragma: no cover - declared discovery dependency
+        raise RuntimeError("astroquery is required for SPOC product ingestion") from exc
+
+    destination = staging / _mast_product_filename(row)
+    status, message, _ = Observations.download_file(
+        _mast_product_data_uri(row),
+        local_path=str(destination),
+        cache=False,
+        verbose=False,
+    )
+    if status != "COMPLETE" or not destination.is_file():
+        raise RuntimeError("MAST product download failed: {0}".format(message or status))
+    return destination
 
 
 def ingest_products(
@@ -82,10 +123,10 @@ def ingest_products(
             )
             staged_pairs.append((staged_product, staged_sidecar, destination, sidecar))
         for staged_product, staged_sidecar, destination, sidecar in staged_pairs:
-            os.link(staged_product, destination)
+            shutil.move(str(staged_product), str(destination))
             committed.append(destination)
             try:
-                os.link(staged_sidecar, sidecar)
+                shutil.move(str(staged_sidecar), str(sidecar))
                 committed.append(sidecar)
             except OSError:
                 destination.unlink(missing_ok=True)
@@ -109,9 +150,9 @@ def fetch_tess_products(
     """Download light curves from the selected MAST provider.
 
     Returns ``(local_path, source_uri)`` pairs staged in a temporary
-    directory. ``provider`` must be ``"spoc"`` or ``"tesscut"``; exposure
-    time selection applies only to SPOC. The caller passes products to
-    ``ingest_products``.
+    directory. ``provider`` is currently limited to official SPOC products,
+    whose archived bytes and MAST data URI can be retained together. The caller
+    passes products to ``ingest_products``.
     """
     provider = _validate_provider(provider)
     try:
@@ -124,32 +165,11 @@ def fetch_tess_products(
         raise ValueError("a TIC identifier is required for TESS ingestion")
     target = "TIC {0}".format(tic)
 
-    products: List[Product] = []
-    if provider == "tesscut":
-        staging = Path(tempfile.mkdtemp(prefix="exonym-ingest-"))
-        requested_sectors = tuple(dict.fromkeys(sectors)) if sectors is not None else (None,)
-        for requested_sector in requested_sectors:
-            search = lk.search_tesscut(target, sector=requested_sector)
-            if not search:
-                continue
-            for index in range(len(search)):
-                row = search.table[index]
-                sector_value = _sector_value(row)
-                if sectors is not None and sector_value is not None and sector_value not in sectors:
-                    continue
-
-                tpf = search[index].download()
-                light_curve = tpf.to_lightcurve()
-                filename_sector = sector_value if sector_value is not None else requested_sector
-                fits_path = staging / "s{0:04d}_lc.fits".format(filename_sector or index)
-                light_curve.to_fits(path=fits_path, overwrite=True)
-                products.append((fits_path, _mast_product_uri(row)))
-        return products
-
     search = lk.search_lightcurve(target, author="SPOC", exptime=exptime)
     if not search:
         return []
 
+    products: List[Product] = []
     staging = Path(tempfile.mkdtemp(prefix="exonym-ingest-"))
     for index in range(len(search)):
         row = search.table[index]
@@ -157,9 +177,7 @@ def fetch_tess_products(
         if sectors is not None and sector_value is not None and sector_value not in sectors:
             continue
 
-        light_curve = search[index].download()
-        fits_path = staging / "s{0:04d}_lc.fits".format(sector_value or index)
-        light_curve.to_fits(path=fits_path, overwrite=True)
+        fits_path = _download_spoc_product(row, staging)
         products.append((fits_path, _mast_product_uri(row)))
     return products
 
@@ -178,8 +196,6 @@ def fetch_tess_tpfs(
     ``inputs.load_tpf_cubes`` uses to distinguish TPFs from light curves.
     """
     provider = _validate_provider(provider)
-    if provider == "tesscut":
-        raise ValueError("TESSCut supports light-curve ingestion only; request TPFs from 'spoc'")
     try:
         import lightkurve as lk
     except ImportError as exc:  # pragma: no cover - optional dependency
@@ -202,8 +218,6 @@ def fetch_tess_tpfs(
         if sectors is not None and sector_value is not None and sector_value not in sectors:
             continue
 
-        tpf = search[index].download()
-        fits_path = staging / "s{0:04d}_tp.fits".format(sector_value or index)
-        tpf.to_fits(str(fits_path), overwrite=True)
+        fits_path = _download_spoc_product(row, staging)
         products.append((fits_path, _mast_product_uri(row)))
     return products
