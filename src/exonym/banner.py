@@ -9,7 +9,7 @@ Public surface
 --------------
 run_banner(skip=False) -> None
     Render the centered logo and 3D rotating exoplanet globe in space,
-    then wait for the user to press '1' or Enter before proceeding.
+    then wait for any keypress before proceeding.
 print_cli_overview() -> None
     Print the categorized command overview without argparse boilerplate.
 """
@@ -57,7 +57,12 @@ _LOGO_LINES: Tuple[str, ...] = (
     "███████╗██╔╝ ██╗╚██████╔╝██║ ╚████║   ██║   ██║ ╚═╝ ██║",
     "╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝   ╚═╝   ╚═╝     ╚═╝",
 )
-_PROMPT_MSG: str = "1 RESUME"
+
+# Frame geometry: one blank line above the logo, one between logo and globe,
+# and one below the globe.  The minimum terminal height keeps the trailing
+# newline from scrolling the frame on redraw.
+_FRAME_LINES: int = 1 + len(_LOGO_LINES) + 1 + SPACE_ROWS + 1
+_FRAME_MIN_ROWS: int = _FRAME_LINES + 1
 
 _ESC      = chr(27)
 _RESET    = _ESC + "[0m"
@@ -74,7 +79,6 @@ _GREY_LIGHT  = _fg(250)
 _GREY_MID    = _fg(244)
 _GREY_DARK   = _fg(238)
 _GREY        = _fg(240)
-_GREEN       = _fg(120)
 
 
 def _strip_ansi(text: str) -> str:
@@ -101,7 +105,7 @@ def _flush_input_buffer() -> None:
 
 
 def _check_user_key() -> bool:
-    """Non-blocking check if user pressed 1, Enter, Space, or any key."""
+    """Non-blocking check if user pressed any key."""
     if os.name == "nt":
         try:
             import msvcrt
@@ -205,15 +209,15 @@ def _compose_full_screen(angle: float, term_width: int) -> str:
         lines.append(_center_line(g_line, term_width) + _ESC + "[K")
     lines.append(_ESC + "[K")
 
-    # 3. Centered 1 RESUME Prompt
-    prompt = _GREEN + _BOLD + _PROMPT_MSG + _RESET
-    lines.append(_center_line(prompt, term_width) + _ESC + "[K")
-
-    return _ESC + "[H" + "\n".join(lines) + "\n"
+    return "\n".join(lines)
 
 
 def run_banner(skip: bool = False) -> None:
     """Run the high-definition 3D rotating exoplanet globe animation banner.
+
+    Frames are centered horizontally and vertically.  The animation needs a
+    terminal of at least ``SPACE_WIDTH`` columns by ``_FRAME_MIN_ROWS`` rows;
+    on smaller terminals it is skipped entirely so the frame never scrolls.
 
     Parameters
     ----------
@@ -225,10 +229,12 @@ def run_banner(skip: bool = False) -> None:
         return
 
     term_width = 80
+    term_rows = 0
     try:
         ts = os.get_terminal_size()
         term_width = max(60, ts.columns)
-        if ts.columns < 50 or ts.lines < 15:
+        term_rows = ts.lines
+        if ts.columns < SPACE_WIDTH or ts.lines < _FRAME_MIN_ROWS:
             return
     except OSError:
         pass
@@ -259,12 +265,17 @@ def run_banner(skip: bool = False) -> None:
                 break
 
             try:
-                term_width = os.get_terminal_size().columns
+                ts = os.get_terminal_size()
+                term_width = max(60, ts.columns)
+                term_rows = ts.lines
+                if ts.columns < SPACE_WIDTH or ts.lines < _FRAME_MIN_ROWS:
+                    break
             except OSError:
                 pass
 
+            v_pad = max(0, (term_rows - 1 - _FRAME_LINES) // 2)
             frame_str = _compose_full_screen(angle, term_width)
-            stdout.write(frame_str)
+            stdout.write(_ESC + "[H" + "\n" * v_pad + frame_str + "\n")
             stdout.flush()
 
             angle += 0.08

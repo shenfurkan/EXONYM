@@ -5,68 +5,11 @@
 
 EXONYM is a Python 3.9 command-line tool for working through TESS transit signals one candidate at a time. It creates an isolated workspace, downloads SPOC light curves and target-pixel files, and keeps the evidence, decisions, and outputs together. Shared code never contains a target identifier, sector choice, ephemeris, or research payload.
 
-The project is for screening and exploratory characterization. It cannot confirm or statistically validate a planet on its own. A planet claim still needs checks for systematics, contamination, false-positive scenarios, stellar properties, and, when needed, follow-up photometry, imaging, spectroscopy, or radial velocities.
-
-<p align="center">
-  <img src="images/showcase/banner_preview.svg" alt="Synthetic preview of the EXONYM terminal globe banner" width="880">
-</p>
-
-## Start here
-
-Read the [scientific architecture and how-to manual](docs/EXONYM_SCIENTIFIC_ARCHITECTURE_AND_HOW_TO.md) for the mathematical pipeline, uncertainty contracts, calibration boundary, and manuscript workflow. EXONYM separates candidate-owned evidence, target-neutral algorithms, and scientific claims.
-
-The current software produces traceable diagnostic evidence. It does not mark a candidate claim-eligible, validate a planet, or open the analysis gate.
-
-## Nine-phase processing map
-
-```mermaid
-flowchart LR
-  A[1. SPOC FITS and provenance] --> B[2. BLS or TLS detection]
-  B --> C[3. Photometric screening]
-  C --> D[4. Gaia and catalog evidence]
-  D --> E[5. TPF localization]
-  E --> F[6. Stellar characterization]
-  F --> G[7. Native-cadence transit fit]
-  G --> H[8. Triage and diagnostic FPP]
-  H --> I[9. Freeze, review, paper export]
-```
-
-## Diagnostic forms
-
-All figures below are synthetic illustrations. Candidate-derived figures remain inside the owning workspace under `candidate/<candidate-id>/figures/`.
-
-| Diagnostic | What to inspect |
-| --- | --- |
-| <img src="images/showcase/transit_diagnostic.svg" alt="Synthetic folded transit light curve" width="330"> | Folded flux, binned points, model residuals, aliases, and detrending choices. |
-| <img src="images/showcase/difference_prf.svg" alt="Synthetic difference image and PRF diagram" width="330"> | In-transit versus out-of-transit pixels, competing sources, centroid offset, and uncertainty ellipse. |
-| <img src="images/showcase/corner_posterior.svg" alt="Synthetic transit posterior corner plot" width="330"> | Posterior correlations for radius ratio, scaled separation, inclination, and limb darkening. |
-| <img src="images/showcase/sed_fit.svg" alt="Synthetic stellar SED fit" width="330"> | Broadband fluxes, model atmosphere assumptions, and posterior stellar parameters. |
-| <img src="images/showcase/fpp_breakdown.svg" alt="Synthetic false positive scenario diagnostic" width="330"> | Scenario weights and the scene-model calibration limit behind a diagnostic FPP. |
-| <img src="images/showcase/paper_preview.svg" alt="Synthetic candidate-local paper preview" width="330"> | Candidate-local TeX macros, figure references, and the manuscript evidence manifest. |
-
-## Quickstart
-
-Run these commands from the repository root in PowerShell. The placeholders are intentional and must remain generic in shared documentation.
-
-```powershell
-pip install -e ".[test]"
-exonym verify --source
-
-exonym init <candidate-id> --tic <tic> --mission tess
-exonym ingest <candidate-id> --products both --sectors <sector>
-exonym detrend <candidate-id> --method running-median --window-days <days>
-exonym search <candidate-id> --engine bls --detrending-method running-median
-exonym screen <candidate-id> --detrending-method running-median
-exonym fit <candidate-id> --detrending-method running-median
-exonym export-paper <candidate-id>
-
-# Candidate metadata, provenance, and artifacts only. Cache-aware after its first run.
-exonym verify --candidates
-```
-
-Use `exonym verify --candidates --fresh` for a full rehash when filesystem metadata cannot be trusted. Use `exonym verify --candidates --fix` only to repair safe derived-record drift; it never changes raw observations, scientific values, or claim eligibility.
-
 ## Scope and scientific status
+
+EXONYM runs each candidate through one ordered pipeline: SPOC ingestion with provenance sidecars, BLS or TLS detection, fixed-ephemeris photometric screening, Gaia and catalog context, pixel localization, stellar characterization (SED, asteroseismology, activity, dilution), native-cadence transit fitting, TTV and phase-curve timing, and a TRICERATOPS-based diagnostic false-positive probability. Every step writes schema-checked, hash-bound artifacts into the candidate workspace, so each result stays inspectable and reproducible.
+
+A statistical validation claim additionally needs inputs beyond the current package: a calibrated mission-PRF scene model (claim generation stays disabled until that integration exists) and, depending on the target, follow-up resources such as precision radial velocities, high-resolution imaging, or independent photometry. EXONYM organizes the diagnostic evidence those programs consume.
 
 EXONYM keeps two things separate:
 
@@ -88,7 +31,6 @@ Independent discovery starts with a TIC target that has no assigned TOI or cTOI.
 - `exonym rv fit` is a descriptive fixed-period comparison. It jointly fits per-instrument offsets and jitter, a linear trend, and an activity term only when every RV datum carries the same-unit activity index; it does not confirm a companion or model correlated stellar noise.
 - Workflow gates verify the existence, structure, and checklist state of evidence artifacts. They do not independently reproduce the scientific judgement written in a checklist or claim.
 - Diagnostic plots are derived from candidate artifacts. They do not establish a TPF-derived centroid measurement, so use calibrated difference-image or pixel-level analysis for centroid evidence.
-- A low false-positive probability, a clean odd-even statistic, or a small centroid offset is necessary evidence in some cases, but none alone proves a planetary companion.
 
 ## Design principles
 
@@ -108,44 +50,36 @@ In this framework, **EXONYM** serves as an architectural metaphor: the shared co
 
 ## Installation
 
-EXONYM requires Python `3.9` or later. CI also runs on Python 3.9.
+EXONYM requires Python 3.9 or later and runs on Linux, macOS, and Windows. Create and activate a virtual environment with your preferred tooling, then install from the repository root:
 
-### First-time setup
-
-Run these commands from the repository root in PowerShell:
-
-```powershell
-# Activate a Python 3.9 virtual environment using your local environment manager.
-pip install -e ".[test]"
-exonym --root . verify --source
+```
+pip install .
 ```
 
-Install optional analysis engines separately when they are needed:
+Optional analysis engines install separately when a workflow needs them:
 
-```powershell
-# Native-cadence Transit Least Squares discovery
-pip install -e ".[discovery]"
+```
+# Transit Least Squares search engine
+pip install ".[discovery]"
 
-# TRICERATOPS screening
-pip install -e ".[screening]"
+# TRICERATOPS vetting backend
+pip install ".[screening]"
 
 # Asteroseismology tools
-pip install -e ".[asteroseismology]"
+pip install ".[asteroseismology]"
 
-# Confirm the installed command
+# dynesty sampler for exonym fit --sampler dynesty
+pip install ".[inference]"
+
+# wotan detrending methods for exonym detrend --method wotan
+pip install ".[detrending]"
+```
+
+Confirm the installed command:
+
+```
 exonym --version
-```
-
-Use the command-line entry point:
-
-```powershell
 exonym --help
-```
-
-Place the optional repository-root argument before the subcommand when operating outside the repository root:
-
-```powershell
-exonym --root <repository-root> verify --source
 ```
 
 Networked operations need access to their upstream services. In particular, SPOC ingestion needs a catalog identifier and network access, Gaia and ExoFOP queries depend on remote services, and TRICERATOPS and TLS require their optional dependency groups.
@@ -154,7 +88,7 @@ Networked operations need access to their upstream services. In particular, SPOC
 
 The placeholders below are deliberately generic; do not place real catalog identifiers or target aliases in shared documentation, source code, or tests.
 
-```powershell
+```
 # Create a workspace for an independent-discovery target.
 exonym init <candidate-id> --tic <tic> --mission tess
 
@@ -176,7 +110,7 @@ exonym track <candidate-id>
 exonym advance <candidate-id>
 ```
 
-`exonym advance` only checks whether the required records and checklist items are present. It does not decide whether the science is sound. Check a box only after the candidate evidence supports it, and write caveats in the relevant candidate document.
+`exonym advance` checks whether the required records and checklist items are present, not whether the science is sound. Check a box only after the candidate evidence supports it, and write caveats in the relevant candidate document.
 
 ### Blind-discovery surveys
 
@@ -196,25 +130,23 @@ branch splits large intra-sector cadence gaps before filtering. An alert require
 the reference BLS, the normalized search, and the duration-grid search to all
 clear the threshold, both diagnostic periods to agree with the reference within
 one percent, every null-control SNR to stay below the threshold, and at least
-two of three injections to recover. The command does not set a scientific
-disposition, make a planet claim, or replace the required candidate-local
-screening sequence. These controls do not provide a population false-alarm
-calibration, a broad completeness map, source localization, or a statistical
-validation. Localization, fitting, follow-up, archive checks, and a final FPP
-run remain required before an independent-detection claim.
+two of three injections to recover. These controls provide neither a population
+false-alarm calibration nor a completeness map, source localization, or
+statistical validation; localization, fitting, follow-up, archive checks, and a
+final FPP run remain required before an independent-detection claim.
 
 Each fresh survey robustness artifact also preserves a fixed-ephemeris
 odd-even comparison, half-phase window, and doubled-period alternating-event
-diagnostic for the selected BLS ephemeris. These fields are explicitly for
-human review: an unresolved window neither clears nor establishes an alias,
-and no automatic eclipsing-binary or planet disposition is made.
+diagnostic for the selected BLS ephemeris. An unresolved window neither clears
+nor establishes an alias; eclipsing-binary versus planet dispositions belong to
+human review.
 
 Separately, `exonym survey sensitivity` runs a candidate-local grid of three
 periods, three durations, three depths, and four evenly spaced phase offsets
 through both preprocessing branches. Each grid cell reports its recovery
 fraction with a Wilson 95% interval so the limited phase-trial uncertainty is
-visible. This is still a fixed box-model diagnostic for one target: it is not
-a population selection function, detection-reliability calibration, or
+visible. It remains a fixed box-model diagnostic for one target, separate from
+any population selection function, detection-reliability calibration, or
 completeness estimate.
 
 Pass `--toi <toi>` only when a known TOI is deliberately being analyzed for validation, comparison, or follow-up rather than independent discovery.
@@ -243,7 +175,7 @@ The novelty-audit record must have a valid schema, match the workspace candidate
 
 Use lifecycle changes rather than direct JSON edits:
 
-```powershell
+```
 exonym set-state <candidate-id> --state paused --reason "Awaiting follow-up observations"
 ```
 
@@ -262,7 +194,7 @@ The central invariant is strict: no target-specific data, identifiers, aliases, 
 
 Run the audit whenever a change could affect the boundary:
 
-```powershell
+```
 exonym verify --source
 exonym verify --source --schemas-only
 exonym verify --candidates
@@ -296,17 +228,6 @@ templates/                    Files cloned into candidate workspaces created by 
 policy/                       Isolation policy and approved exceptions
 tests/                        Target-neutral automated test suite
 ```
-
-### Structured records
-
-| Record | Purpose | Important constraint |
-| --- | --- | --- |
-| `candidate.json` | Candidate identity, mission, lifecycle, workflow, disposition, publication state, and creation time. | Schema version is `2`; top-level objects reject undeclared properties. Use the CLI to change lifecycle state. |
-| `<stem>.provenance.json` | URI, acquisition time, fetcher, and SHA-256 digest for a downloaded product. | The acquisition gate requires a schema-valid, hash-matched sidecar for each raw FITS product. |
-| `claims/*.json` | A parameter, value, uncertainties, unit, and method for a scientific assertion. | Supported claim parameters include period, radius, mass, and false-positive probability. A claim is an assertion with provenance, not a publication-grade result by itself. |
-| `decisions/novelty_audit.json` | Evidence that the signal is eligible for the workflow's novelty criterion. | Requires timestamped evidence, a decision basis, and a valid expiry time. |
-
-The sidecar naming rule matters: a raw product named `s0001_lc.fits` must use `s0001_lc.provenance.json`, not `s0001_lc.fits.provenance.json`.
 
 ## Command reference
 
@@ -374,7 +295,7 @@ Candidate light-curve and TPF photometry are accepted only when their TESS secto
 
 The search grid is set from the observed time baseline and trial duration, so the `n_periods` setting requests at least that density but cannot make the grid coarser than the baseline-duration resolution criterion. A retained peak must contain at least two observed transit-event windows. The blind command uses a fixed three-hour duration unless a survey supplies its declared duration grid; `best_duration_hours` therefore describes the selected box-model duration, not a recovered physical transit duration.
 
-The fitted-depth SNR is a ranking and human-review statistic only. It is not a look-elsewhere-corrected false-alarm probability, a population detection reliability, a correlated-noise model, or an astrophysical validation result. Inspect aliases, phase-folded photometry, alternate detrending, null controls, and injection recovery before treating a peak as an astrophysical event.
+The fitted-depth SNR is a ranking statistic for human review; it carries no look-elsewhere correction, population detection-reliability calibration, or correlated-noise model. Inspect aliases, phase-folded photometry, alternate detrending, null controls, and injection recovery before treating a peak as an astrophysical event.
 
 `exonym search --engine tls` uses the optional Transit Least Squares engine on native-cadence photometry and per-cadence flux uncertainties. It reports TLS Signal Detection Efficiency alongside period, epoch, depth, and duration. TLS improves transit-shape matching but does not calibrate its own false-alarm rate; injection-recovery and null searches remain required before ranking alerts as a survey result.
 
@@ -386,7 +307,7 @@ The fitted-depth SNR is a ranking and human-review statistic only. It is not a l
 Z_odd-even = abs(d_odd - d_even) / sqrt(sigma_odd^2 + sigma_even^2)
 ```
 
-The nominal helper criterion is `Z_odd-even < 3`. Its uncertainty calculation uses median-depth approximations and does not model red noise, detrending choices, crowding, dilution uncertainty, or ephemeris uncertainty. A value below the threshold is evidence against a resolved odd-even difference under those assumptions; it is not proof that the signal is planetary.
+The nominal helper criterion is `Z_odd-even < 3`. Its uncertainty calculation uses median-depth approximations and does not model red noise, detrending choices, crowding, dilution uncertainty, or ephemeris uncertainty; within those assumptions, a value below the threshold indicates no resolved odd-even depth difference.
 
 The centroid helper computes angular displacement significance as:
 
@@ -394,13 +315,13 @@ The centroid helper computes angular displacement significance as:
 Z_centroid = sqrt((delta_RA * cos(dec))^2 + delta_Dec^2) / sigma
 ```
 
-`Z_centroid < 3` is likewise a screening convention. It is not an automatic gate condition and cannot replace a validated difference-image centroid analysis. The shared vetting utilities also include an ellipsoidal-amplitude estimate based on mass ratio, stellar radius, orbital separation, and inclination. Treat it as a plausibility diagnostic, especially for short-period stellar companions, rather than a complete binary model.
+`Z_centroid < 3` is likewise a screening convention, not a substitute for validated difference-image centroid analysis. The shared vetting utilities also include an ellipsoidal-amplitude estimate based on mass ratio, stellar radius, orbital separation, and inclination. Treat it as a plausibility diagnostic, especially for short-period stellar companions, rather than a complete binary model.
 
 ### False-positive probability and archival context
 
 `exonym vet` uses the optional [TRICERATOPS](https://github.com/stevengiacalone/triceratops) package for false-positive scenarios. It is guarded by the required candidate-local screening, archive, localization, activity, and dilution artifacts, then passes prepared observed photometry, per-cadence uncertainties, exposure time, sectors, and the declared ephemeris to the Monte Carlo backend. The report records the random seed, package versions, inputs, and any backend failure.
 
-The current localization and scene treatment are intentionally marked uncalibrated, so a completed Monte Carlo report is not claim-eligible and cannot write an FPP claim. It remains a documented statistical diagnostic. A calibrated mission PRF/scene model, validated contrast and contamination constraints, reproducibility across independent draws, and human review are still required before any scientific validation decision.
+The current localization and scene treatment are uncalibrated, so completed Monte Carlo reports are stored as documented diagnostics outside the claim workflow. A calibrated mission PRF/scene model, validated contrast and contamination constraints, reproducibility across independent draws, and human review are required before any validation decision.
 
 > [!IMPORTANT]
 > TRICERATOPS can keep a machine busy for a long time and may use significant CPU or memory. Dedicated or remote execution is suitable for a long exploratory run when data policy permits. Keep a candidate-local record of the command, package version, input hashes, and output, then rerun any result that supports a claim in the project's frozen environment.
@@ -417,7 +338,7 @@ The current localization and scene treatment are intentionally marked uncalibrat
 D = (F_out - F_in) / F_out
 ```
 
-It fits nonnegative amplitudes of isotropic Gaussian source templates using nonnegative least squares. This procedure is a depth-centroid and source-competition screen. It is not a calibrated fit to a mission PRF library, and a source should not be called target-dominated unless competing sources are modeled.
+It fits nonnegative amplitudes of isotropic Gaussian source templates using nonnegative least squares. This procedure is a depth-centroid and source-competition screen, not a calibrated fit to a mission PRF library; treat source dominance as provisional while competing sources remain unmodeled.
 
 `exonym dilution` reports a contamination ratio:
 
@@ -444,7 +365,7 @@ a_over_Rstar = (G * P^2 * rho_star / (3 * pi))^(1/3)
 
 The current fitter evaluates native-cadence transit-window data with sector-specific exposure integration, independent white errors, and a jitter term. It does not fit a Gaussian-process noise model or provide an adopted posterior. Inspect posterior correlations, prior sensitivity, dilution treatment, and cadence integration before converting a fitted radius ratio into a physical companion radius.
 
-`exonym sed` fits a reddened blackbody representation at catalog pivot wavelengths with `emcee`. It uses parallax information to infer radius and luminosity. It is useful for a transparent first-pass stellar context, but it is not a passband-integrated atmosphere analysis and should not replace a dedicated stellar-characterization study.
+`exonym sed` fits a reddened blackbody representation at catalog pivot wavelengths with `emcee`. It uses parallax information to infer radius and luminosity. It gives a transparent first-pass stellar context, not a passband-integrated atmosphere analysis.
 
 `exonym asteroseismology` estimates a power spectral density, whitens a median background, searches for a smoothed oscillation envelope, and estimates the large frequency separation from lag correlation. It applies standard solar-like scaling relations, including:
 
@@ -453,11 +374,11 @@ R_star / R_sun = (numax / numax_sun) * (Dnu / Dnu_sun)^(-2) * (Teff / Teff_sun)^
 M_star / M_sun = (numax / numax_sun)^3 * (Dnu / Dnu_sun)^(-4) * (Teff / Teff_sun)^(3/2)
 ```
 
-The output includes physical sanity checks. Scaling relations are empirical approximations with regime-dependent systematics; a plausible result is not a validated seismic solution.
+The output includes physical sanity checks. Scaling relations are empirical approximations with regime-dependent systematics.
 
 ### Variability, phase curves, and timing
 
-`exonym phasecurve` regresses sector offsets and slopes with reflection, Doppler-beaming, ellipsoidal, harmonic-control, and phase-0.5 eclipse terms. It uses block-clustered covariance over half-day blocks. A component at or above three standard deviations remains a follow-up prompt, not a physical detection without systematics tests and an independent model comparison.
+`exonym phasecurve` regresses sector offsets and slopes with reflection, Doppler-beaming, ellipsoidal, harmonic-control, and phase-0.5 eclipse terms. It uses block-clustered covariance over half-day blocks. A component at or above three standard deviations prompts systematics tests and an independent model comparison.
 
 `exonym ttv` fits fixed transit templates to expected events and reports observed-minus-calculated timing in minutes:
 
@@ -477,7 +398,7 @@ Low signal-to-noise timing estimates can be dominated by shape and baseline nois
 
 ## Methodological limits
 
-Use the framework to organize and test evidence. Do not treat it as an automatic planet-validation certificate.
+Use the framework to organize and test evidence.
 
 - Transit-like signals can arise from eclipsing binaries, background blends, instrumental artifacts, stellar variability, or detrending behavior.
 - BLS period aliases, sparse sampling, transit-duration assumptions, and time-correlated noise can bias detection statistics and ephemerides.
@@ -485,25 +406,16 @@ Use the framework to organize and test evidence. Do not treat it as an automatic
 - Catalog queries can be incomplete, stale, or unavailable. A clean query result is not proof of isolation from contaminants.
 - FPP estimates depend on the input light curve, stellar properties, contrast constraints, catalog completeness, and scenario priors. The current wrapper has the additional simplified-light-curve limitation described above.
 - SED, seismic, phase-curve, activity, TTV, localization, and dilution outputs are exploratory unless their candidate-local inputs, uncertainty model, and validation checks support a stronger claim.
-- A workflow phase and a publication lifecycle state record process completion. They do not elevate a screening product into a confirmed exoplanet.
 
-## Reproducibility, testing, and release records
+## Reproducibility releases
 
-`exonym freeze <candidate-id> --version <version>` creates a release directory below `candidate/<candidate-id>/releases/`. It copies the candidate workspace (including raw inputs, derived outputs, claims, and candidate-local documents) except recursive prior releases and `scratch/`; it also copies the package source, schemas, templates, exact-version dependency lock, and Docker/Apptainer definitions. `requirements-lock.txt` is a CPython 3.9/Windows resolved dependency closure and must be regenerated in a dedicated environment whenever `pyproject.toml` changes.
+`exonym freeze <candidate-id> --version <version>` creates a release directory below `candidate/<candidate-id>/releases/`. It copies the candidate workspace (including raw inputs, derived outputs, claims, and candidate-local documents) except recursive prior releases and `scratch/`; it also copies the package source, schemas, templates, an exact-version dependency lock resolved in a dedicated environment, and Docker/Apptainer definitions. Regenerate the dependency lock whenever `pyproject.toml` changes.
 
-`manifest.json` inventories every payload file by size and SHA-256. Its separate `manifest.sha256` file binds the manifest itself without a circular self-hash. Run `exonym verify-release <candidate-id> --version <version>` to validate both layers, validate the lock metadata, and launch a fresh Python 3.9 process that imports the frozen source and loads the frozen candidate workspace. This is an offline replay smoke test, not a rerun of scientific engines, network retrievals, or external services; before calling a release scientifically reproducible, record and retain those external inputs and execution conditions as well.
+`manifest.json` inventories every payload file by size and SHA-256. Its separate `manifest.sha256` file binds the manifest itself without a circular self-hash. Run `exonym verify-release <candidate-id> --version <version>` to validate both layers, validate the lock metadata, and launch a fresh Python interpreter that imports the frozen source and loads the frozen candidate workspace.
 
-Run focused tests while making an ordinary change, and run the full suite before a work-package integration:
+This offline replay check does not rerun scientific engines, network retrievals, or external services; record those execution conditions alongside a release when they matter for the result.
 
-```powershell
-pytest -q
-```
-
-Run `exonym verify --source` after shared-source changes. Run `exonym verify --candidates` for final integration, a candidate-layout migration, or an ownership/isolation investigation. Neither command replaces focused scientific and artifact-contract tests.
-
-For an editorial-only README change, the repository policy does not require the full Python test suite. A final isolation audit remains appropriate if target-neutral documentation may have acquired a target-specific identifier or alias.
-
-Continuous integration runs the test suite, the shared audit, and the full candidate audit on pushes and pull requests.
+Continuous integration runs the automated test suite and the isolation audits on pushes and pull requests.
 
 ## License
 

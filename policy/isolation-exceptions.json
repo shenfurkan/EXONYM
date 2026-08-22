@@ -6,55 +6,6 @@
       "rule": "research-payload-outside-candidate",
       "reason": "Repository logo asset for README documentation",
       "expires": "2028-01-01"
-    },
-    {
-      "path": "images/showcase/banner_preview.svg",
-      "line": null,
-      "rule": "research-payload-outside-candidate",
-      "reason": "Target-neutral synthetic terminal banner illustration for README documentation",
-      "expires": "2028-01-01"
-    },
-    {
-      "path": "images/showcase/transit_diagnostic.svg",
-      "line": null,
-      "rule": "research-payload-outside-candidate",
-      "reason": "Target-neutral synthetic transit diagnostic illustration for README documentation",
-      "expires": "2028-01-01"
-    },
-    {
-      "path": "images/showcase/difference_prf.svg",
-      "line": null,
-      "rule": "research-payload-outside-candidate",
-      "reason": "Target-neutral synthetic localization illustration for README documentation",
-      "expires": "2028-01-01"
-    },
-    {
-      "path": "images/showcase/corner_posterior.svg",
-      "line": null,
-      "rule": "research-payload-outside-candidate",
-      "reason": "Target-neutral synthetic posterior illustration for README documentation",
-      "expires": "2028-01-01"
-    },
-    {
-      "path": "images/showcase/sed_fit.svg",
-      "line": null,
-      "rule": "research-payload-outside-candidate",
-      "reason": "Target-neutral synthetic SED illustration for README documentation",
-      "expires": "2028-01-01"
-    },
-    {
-      "path": "images/showcase/fpp_breakdown.svg",
-      "line": null,
-      "rule": "research-payload-outside-candidate",
-      "reason": "Target-neutral synthetic FPP illustration for README documentation",
-      "expires": "2028-01-01"
-    },
-    {
-      "path": "images/showcase/paper_preview.svg",
-      "line": null,
-      "rule": "research-payload-outside-candidate",
-      "reason": "Target-neutral synthetic manuscript illustration for README documentation",
-      "expires": "2028-01-01"
     }
   ]
 }
