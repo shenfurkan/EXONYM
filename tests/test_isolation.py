@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 import exonym.isolation as isolation
-from exonym.isolation import check_repository, format_report
+from exonym.isolation import check_neutral_repository, check_repository, format_report
 from exonym.workspace import new_candidate_metadata
 
 
@@ -47,6 +47,19 @@ def test_clean_repository_passes(tmp_path):
 
     report = check_repository(repo)
     assert report.ok, format_report(report)
+
+
+def test_neutral_audit_does_not_traverse_candidate_workspaces(tmp_path, monkeypatch):
+    # A default shared-code audit must remain fast even when candidate data is large.
+    repo = _make_repo(tmp_path)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("candidate workspace was traversed")
+
+    monkeypatch.setattr(isolation, "_alias_tokens", fail_if_called)
+    monkeypatch.setattr(isolation, "_scan_candidate_reparse_points", fail_if_called)
+
+    assert check_neutral_repository(repo).ok
 
 
 def test_catalog_identifier_outside_candidate_fails(tmp_path):
@@ -140,6 +153,20 @@ def test_research_payload_inside_candidate_passes(tmp_path):
 
     report = check_repository(repo)
     assert report.ok, format_report(report)
+
+
+def test_only_the_exact_paper_template_is_allowed_outside_candidate(tmp_path):
+    repo = _make_repo(tmp_path)
+    _write(repo, "templates/paper/paper_template.tex", "% target-neutral template\n")
+    _write(repo, "templates/paper/supplement.tex", "% forbidden payload\n")
+
+    report = check_repository(repo)
+
+    assert any(
+        violation.path.endswith("templates/paper/supplement.tex")
+        and violation.rule == "research-payload-outside-candidate"
+        for violation in report.violations
+    )
 
 
 def test_top_level_archive_is_forbidden(tmp_path):

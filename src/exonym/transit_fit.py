@@ -987,6 +987,7 @@ def run_mcmc_transit_fit(
     signal: Optional[str] = None,
     use_ldtk_prior: bool = False,
     sampler: str = "emcee",
+    detrending_method: Optional[str] = None,
 ) -> Path:
     """Run an emcee or dynesty transit fit and write the historical output paths."""
     signal = validate_signal_suffix(signal)
@@ -998,6 +999,7 @@ def run_mcmc_transit_fit(
             seed=seed,
             signal=signal,
             use_ldtk_prior=use_ldtk_prior,
+            detrending_method=detrending_method,
         )
     if sampler != "emcee":
         raise ValueError("sampler must be one of: emcee, dynesty")
@@ -1018,7 +1020,12 @@ def run_mcmc_transit_fit(
     rho_prior_log10_sigma = density_prior["log10_sigma"]
     ldtk_prior = _load_ldtk_prior(workspace) if use_ldtk_prior else None
 
-    table = load_light_curve_table(workspace, max_points=None, require_raw_provenance=True)
+    table = load_light_curve_table(
+        workspace,
+        max_points=None,
+        require_raw_provenance=True,
+        detrending_method=detrending_method,
+    )
     if table is None:
         raise RuntimeError("transit fitting requires observed candidate photometry")
     source = "candidate-data"
@@ -1219,6 +1226,7 @@ def run_mcmc_transit_fit(
                 for index, label in enumerate(sector_labels)
             },
             "flux_err_sources": list(table.get("flux_err_sources", [])),
+            "preprocessing": table.get("detrending", {"kind": "pipeline-normalization"}),
         },
         "signal": signal,
         "caveat": (
@@ -1240,6 +1248,7 @@ def _run_dynesty_transit_fit(
     seed: int,
     signal: Optional[str],
     use_ldtk_prior: bool,
+    detrending_method: Optional[str],
 ) -> Path:
     """Run optional dynamic nested sampling with an explicit normalized prior transform."""
     signal = validate_signal_suffix(signal)
@@ -1265,7 +1274,12 @@ def _run_dynesty_transit_fit(
     rho_prior_solar = density_prior["rho_solar"]
     rho_prior_log10_sigma = density_prior["log10_sigma"]
     ldtk_prior = _load_ldtk_prior(workspace) if use_ldtk_prior else None
-    table = load_light_curve_table(workspace, max_points=None, require_raw_provenance=True)
+    table = load_light_curve_table(
+        workspace,
+        max_points=None,
+        require_raw_provenance=True,
+        detrending_method=detrending_method,
+    )
     if table is None:
         raise RuntimeError("transit fitting requires observed candidate photometry")
     source = "candidate-data"
@@ -1407,6 +1421,7 @@ def _run_dynesty_transit_fit(
                 for index, label in enumerate(sector_labels)
             },
             "flux_err_sources": list(table.get("flux_err_sources", [])),
+            "preprocessing": table.get("detrending", {"kind": "pipeline-normalization"}),
         },
         "signal": signal,
         "caveat": (

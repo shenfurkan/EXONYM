@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="360" viewBox="0 0 960 360" role="img" aria-label="Synthetic EXONYM terminal globe preview">
+  <defs><radialGradient id="globe" cx="35%" cy="28%"><stop stop-color="#d6f5ff"/><stop offset=".45" stop-color="#4b92c7"/><stop offset="1" stop-color="#10284b"/></radialGradient><linearGradient id="panel" x2="0" y2="1"><stop stop-color="#132133"/><stop offset="1" stop-color="#09111d"/></linearGradient></defs>
+  <rect width="960" height="360" fill="#07101d"/><rect x="34" y="30" width="892" height="300" rx="18" fill="url(#panel)" stroke="#2b5274" stroke-width="2"/>
+  <circle cx="80" cy="66" r="7" fill="#f66"/><circle cx="104" cy="66" r="7" fill="#f3c659"/><circle cx="128" cy="66" r="7" fill="#54d58a"/>
+  <text x="480" y="105" fill="#f4fbff" font-family="monospace" font-size="31" text-anchor="middle" letter-spacing="8">EXONYM</text>
+  <g fill="#9ac7e3"><circle cx="300" cy="134" r="2"/><circle cx="626" cy="142" r="2"/><circle cx="683" cy="212" r="1.5"/><circle cx="258" cy="237" r="1.5"/><circle cx="706" cy="251" r="2"/></g>
+  <circle cx="480" cy="205" r="82" fill="url(#globe)"/><path d="M402 205h156M414 166c41 21 92 21 132 0M414 244c41-21 92-21 132 0M480 123c-20 31-20 133 0 164" fill="none" stroke="#c1e4f8" stroke-opacity=".36" stroke-width="2"/>
+  <path d="M435 163c18-12 29 7 47 0s24 11 39 4 31 7 27 23-26 9-37 25-37 13-48 0-22 3-32-14 5-27 4-38z" fill="#204e6b" opacity=".78"/>
+  <text x="480" y="315" fill="#83e2b2" font-family="monospace" font-size="15" text-anchor="middle">3D terminal banner preview, synthetic and target-neutral</text>
+</svg>

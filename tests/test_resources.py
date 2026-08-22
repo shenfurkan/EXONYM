@@ -25,6 +25,7 @@ def test_cli_initializes_and_verifies_without_source_resource_directories(tmp_pa
     assert initialized == 0
     assert verified == 0
     assert workspace.joinpath("docs", "01_intake_manifest.md").is_file()
+    assert workspace.joinpath("paper", "paper_template.tex").is_file()
     assert "package-resource-test" in workspace.joinpath("docs", "01_intake_manifest.md").read_text(
         encoding="utf-8"
     )

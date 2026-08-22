@@ -17,11 +17,12 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.ndimage import median_filter
 
+from .remediation import numerical_npz_sha256
 from .workspace import CandidateWorkspace, validate_candidate_id
 
 
@@ -69,6 +70,54 @@ def _validated_inputs(
         if errors.ndim != 1 or errors.shape != values.shape:
             raise ValueError("flux_err must match flux when provided")
     return time, values, errors
+
+
+def _validated_sectors(sector: Optional[Sequence[int]], length: int) -> Optional[np.ndarray]:
+    """Validate per-cadence TESS sector ownership when supplied by the loader."""
+    if sector is None:
+        raise ValueError("detrending requires one positive TESS sector per cadence")
+    sectors = np.asarray(sector, dtype=int)
+    if sectors.ndim != 1 or sectors.size != length or np.any(sectors <= 0):
+        raise ValueError("sector must contain one positive TESS sector per cadence")
+    return sectors
+
+
+def _validated_input_products(
+    workspace: CandidateWorkspace,
+    workspace_path: Path,
+    input_products: Optional[Sequence[Mapping[str, str]]],
+) -> List[Dict[str, str]]:
+    """Retain hash-bound raw inputs so the derived array remains traceable."""
+    if input_products is None:
+        return []
+    from .gatekeeper import has_valid_raw_product_provenance
+
+    records: List[Dict[str, str]] = []
+    for product in input_products:
+        if not isinstance(product, Mapping):
+            raise ValueError("input_products entries must be path and sha256 records")
+        relative = product.get("path")
+        expected_digest = product.get("sha256")
+        if not isinstance(relative, str) or not isinstance(expected_digest, str):
+            raise ValueError("input_products entries require string path and sha256 values")
+        path = (workspace_path / relative).resolve()
+        try:
+            relative_path = path.relative_to(workspace_path).as_posix()
+        except ValueError as exc:
+            raise ValueError("input product must remain inside its candidate workspace") from exc
+        if (
+            not relative_path.startswith("data/raw/")
+            or not path.is_file()
+            or not has_valid_raw_product_provenance(workspace, path)
+        ):
+            raise ValueError("input product must be a provenance-valid file below data/raw/")
+        actual_digest = _file_sha256(path)
+        if actual_digest != expected_digest:
+            raise ValueError("input product digest changed before detrending")
+        records.append({"path": relative_path, "sha256": actual_digest})
+    if len({record["path"] for record in records}) != len(records):
+        raise ValueError("input_products must not repeat a raw product")
+    return sorted(records, key=lambda record: record["path"])
 
 
 def _finite_series(
@@ -203,6 +252,8 @@ def detrend_candidate(
     method: str = "running-median",
     window_days: float,
     flux_err: Optional[Sequence[float]] = None,
+    sector: Optional[Sequence[int]] = None,
+    input_products: Optional[Sequence[Mapping[str, str]]] = None,
 ) -> DetrendingArtifacts:
     """Detrend caller-supplied normalized flux and write candidate-local artifacts.
 
@@ -213,6 +264,8 @@ def detrend_candidate(
         method: ``running-median``, or explicit optional ``wotan``/``celerite``.
         window_days: Trend timescale in days; it must be positive and finite.
         flux_err: Optional normalized flux uncertainties for celerite.
+        sector: Candidate-owned TESS sector labels, one for each cadence.
+        input_products: Hash-bound raw light-curve records used for the input.
 
     Returns:
         Paths for a compressed processed array and its JSON provenance manifest.
@@ -232,6 +285,10 @@ def detrend_candidate(
         raise ValueError("window_days must be positive and finite")
 
     time, values, errors = _validated_inputs(time_btjd, flux, flux_err)
+    sectors = _validated_sectors(sector, values.size)
+    products = _validated_input_products(workspace, workspace_path, input_products)
+    if not products:
+        raise ValueError("detrending requires hash-bound raw input products")
     sorted_time, sorted_values, sorted_errors, sorted_indices = _finite_series(time, values, errors)
     runners: Dict[str, Callable[..., np.ndarray]] = {
         "running-median": _running_median_trend,
@@ -272,6 +329,7 @@ def detrend_candidate(
     if errors is not None:
         payload["flux_err"] = errors
         payload["detrended_flux_err"] = detrended_err
+    payload["sector"] = sectors
     np.savez_compressed(artifact_buffer, **payload)
 
     processed_dir.mkdir(parents=True, exist_ok=True)
@@ -292,8 +350,10 @@ def detrend_candidate(
         "artifact": {
             "path": artifact_path.relative_to(workspace_path).as_posix(),
             "sha256": _file_sha256(artifact_path),
+            "data_sha256": numerical_npz_sha256(artifact_path),
         },
     }
+    manifest["input_products"] = products
     _atomic_write(
         manifest_path, (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
     )

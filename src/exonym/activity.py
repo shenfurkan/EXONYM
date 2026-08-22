@@ -325,6 +325,72 @@ def weighted_period_summary(
     }
 
 
+def weighted_percentile_summary(
+    values: Sequence[float], weights: Sequence[float]
+) -> Dict[str, float]:
+    """Return weighted 16th, 50th, and 84th percentile summaries."""
+    samples = np.asarray(values, dtype=float)
+    sample_weights = np.asarray(weights, dtype=float)
+    valid = np.isfinite(samples) & np.isfinite(sample_weights) & (sample_weights >= 0)
+    samples, sample_weights = samples[valid], sample_weights[valid]
+    if samples.size == 0:
+        raise ValueError("no finite values are available for a weighted percentile summary")
+    if float(np.sum(sample_weights)) <= 0:
+        sample_weights = np.ones(samples.size, dtype=float)
+    order = np.argsort(samples)
+    samples, sample_weights = samples[order], sample_weights[order]
+    cumulative = np.cumsum(sample_weights) / float(np.sum(sample_weights))
+    quantiles = [float(np.interp(level, cumulative, samples)) for level in (0.16, 0.50, 0.84)]
+    return {
+        "p16": quantiles[0],
+        "median": quantiles[1],
+        "p84": quantiles[2],
+        "plus": quantiles[2] - quantiles[1],
+        "minus": quantiles[1] - quantiles[0],
+    }
+
+
+def sinusoid_amplitude_posterior(
+    time: Sequence[float],
+    flux: Sequence[float],
+    flux_err: Sequence[float],
+    period_days: float,
+) -> Dict[str, Any]:
+    """Propagate weighted sinusoid-fit covariance into an amplitude interval."""
+    time_arr = np.asarray(time, dtype=float)
+    flux_arr = np.asarray(flux, dtype=float)
+    error_arr = np.asarray(flux_err, dtype=float)
+    valid = np.isfinite(time_arr) & np.isfinite(flux_arr) & np.isfinite(error_arr) & (error_arr > 0)
+    if int(np.count_nonzero(valid)) < 4 or period_days <= 0:
+        raise ValueError("finite time, flux, and flux_err values are required for amplitude propagation")
+    angle = 2.0 * np.pi * time_arr[valid] / period_days
+    design = np.column_stack((np.cos(angle), np.sin(angle), np.ones(int(np.count_nonzero(valid)))))
+    weights = 1.0 / error_arr[valid] ** 2
+    normal = design.T @ (weights[:, None] * design)
+    try:
+        covariance = np.linalg.inv(normal)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError("sinusoid design matrix is singular") from exc
+    coefficients = covariance @ (design.T @ (weights * flux_arr[valid]))
+    residual = flux_arr[valid] - design @ coefficients
+    degrees_of_freedom = max(1, int(np.count_nonzero(valid)) - design.shape[1])
+    covariance *= float(np.sum(weights * residual**2) / degrees_of_freedom)
+    amplitude = math.hypot(float(coefficients[0]), float(coefficients[1]))
+    gradient = np.array([coefficients[0], coefficients[1], 0.0], dtype=float) / max(amplitude, 1e-15)
+    variance = float(gradient @ covariance @ gradient)
+    sigma = math.sqrt(max(variance, 0.0))
+    return {
+        "p16": (amplitude - sigma) * 1e6,
+        "median": amplitude * 1e6,
+        "p84": (amplitude + sigma) * 1e6,
+        "plus": sigma * 1e6,
+        "minus": sigma * 1e6,
+        "covariance_cos_sin_baseline": covariance.tolist(),
+        "covariance_parameter_order": ["cosine", "sine", "baseline"],
+        "method": "weighted-linear-sinusoid covariance with residual variance scaling",
+    }
+
+
 def _synthetic_rotation_table() -> Dict[str, np.ndarray]:
     """Deterministic demonstration light curve with an injected rotation signal."""
     rng = np.random.default_rng(seed=29)
@@ -426,7 +492,8 @@ def run_stellar_activity(workspace: CandidateWorkspace) -> Path:
 
     summary = weighted_period_summary(period_peaks, power_peaks)
     rotation_period = summary["weighted_mean_period_days"]
-    amplitude_ppm = sinusoid_amplitude_ppm(time, flux, rotation_period)
+    rotation_posterior = weighted_percentile_summary(period_peaks, power_peaks)
+    amplitude_posterior = sinusoid_amplitude_posterior(time, flux, flux_err, rotation_period)
     best_analytic_white_noise_fap = min(
         segment["analytic_white_noise_false_alarm_probability"]
         for segment in segment_results
@@ -445,7 +512,13 @@ def run_stellar_activity(workspace: CandidateWorkspace) -> Path:
         "period_search_range_days": [PERIOD_MIN_DAYS, PERIOD_MAX_DAYS],
         "rotation_period_days": round(rotation_period, 4),
         "rotation_period_std_days": summary["weighted_std_period_days"],
-        "modulation_amplitude_ppm": round(amplitude_ppm, 2),
+        "rotation_period_posterior_days": rotation_posterior,
+        "modulation_amplitude_ppm": round(amplitude_posterior["median"], 2),
+        "modulation_amplitude_posterior_ppm": amplitude_posterior,
+        "uncertainty_method": (
+            "Power-weighted segment peak percentiles for rotation and weighted linear "
+            "sinusoid covariance for amplitude; neither model includes evolving spots or red noise."
+        ),
         "best_analytic_white_noise_false_alarm_probability": best_analytic_white_noise_fap,
         "n_segments": summary["n_segments"],
         "segments": segment_results,

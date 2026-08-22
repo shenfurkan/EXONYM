@@ -215,6 +215,8 @@ def fit_weighted_linear_ephemeris(
         "period_days": float(coefficients[1]),
         "period_uncertainty_days": float(math.sqrt(covariance[1, 1])),
         "covariance_reference_epoch_period_days2": float(covariance[0, 1]),
+        "covariance_matrix_days2": covariance.tolist(),
+        "covariance_parameter_order": ["reference_epoch_btjd", "period_days"],
         "chi_square": chi_square,
         "degrees_of_freedom": degrees_of_freedom,
         "reduced_chi_square": (

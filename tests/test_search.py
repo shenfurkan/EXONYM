@@ -520,6 +520,88 @@ def test_bls_manifest_requires_candidate_photometry_inputs(tmp_path):
     assert load_transit_ephemeris(workspace)["source"] == "synthetic-demo"
 
 
+def test_bls_binding_rejects_a_changed_detrending_product(tmp_path):
+    from exonym.detrending import detrend_candidate
+    from exonym.inputs import is_manifest_bound_bls_result
+
+    workspace = create_candidate(tmp_path, "detrending-bound-search")
+    raw_path = workspace.path / "data" / "raw" / "source.fits"
+    raw_path.write_bytes(b"synthetic raw product")
+    _write_raw_provenance(raw_path)
+    raw_digest = hashlib.sha256(raw_path.read_bytes()).hexdigest()
+    time = np.linspace(0.0, 8.0, 101)
+    detrending = detrend_candidate(
+        workspace,
+        time,
+        1.0 + 0.001 * np.sin(time),
+        window_days=0.5,
+        sector=np.ones(time.size, dtype=int),
+        input_products=[{"path": "data/raw/source.fits", "sha256": raw_digest}],
+    )
+    detrending_manifest = json.loads(detrending.manifest_path.read_text(encoding="utf-8"))
+    preprocessing = {
+        "kind": "candidate-detrending",
+        "method": "running-median",
+        "manifest": {
+            "path": "outputs/detrending_manifest.running-median.json",
+            "sha256": hashlib.sha256(detrending.manifest_path.read_bytes()).hexdigest(),
+        },
+        "artifact": detrending_manifest["artifact"],
+    }
+    result_path = workspace.path / "outputs" / "bls_search_results.json"
+    result = {
+        "source": "candidate-data",
+        "detection_status": "detected",
+        "time_system": "BTJD_TDB",
+        "detection_threshold_snr": 7.1,
+        "best_period": 3.5,
+        "best_epoch": 1.0,
+        "best_duration_hours": 2.0,
+        "best_depth_ppm": 500.0,
+        "snr": 8.0,
+        "n_distinct_transit_events": 3,
+        "preprocessing": preprocessing,
+    }
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    manifest = {
+        "schema": "exonym-bls-search-manifest-1",
+        "candidate_id": workspace.candidate_id,
+        "result_path": "outputs/bls_search_results.json",
+        "result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
+        "source": "candidate-data",
+        "detection_status": "detected",
+        "inputs": [
+            {
+                "path": "data/raw/source.fits",
+                "sha256": raw_digest,
+                "provenance_path": "data/raw/source.provenance.json",
+                "provenance_sha256": hashlib.sha256(
+                    raw_path.with_name("source.provenance.json").read_bytes()
+                ).hexdigest(),
+            }
+        ],
+        "configuration": {
+            "engine": "bls",
+            "signal": None,
+            "time_system": "BTJD_TDB",
+            "detection_threshold_snr": 7.1,
+            "preprocessing": preprocessing,
+        },
+    }
+    manifest_path = workspace.path / "outputs" / "bls_search_manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert is_manifest_bound_bls_result(workspace, result_path, result, None)
+
+    with np.load(detrending.artifact_path, allow_pickle=False) as archive:
+        artifact_payload = {name: archive[name] for name in archive.files}
+    artifact_payload["detrended_flux"] = artifact_payload["detrended_flux"].copy()
+    artifact_payload["detrended_flux"][0] -= 0.01
+    np.savez_compressed(detrending.artifact_path, **artifact_payload)
+
+    assert not is_manifest_bound_bls_result(workspace, result_path, result, None)
+
+
 def test_run_bls_on_candidate_with_real_data(tmp_path):
     import lightkurve as lk
 

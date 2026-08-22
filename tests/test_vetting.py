@@ -1695,6 +1695,8 @@ def test_ttv_refits_a_weighted_linear_ephemeris():
     assert fit["period_days"] == pytest.approx(2.5)
     assert fit["period_uncertainty_days"] > 0
     assert fit["chi_square"] == pytest.approx(0.0)
+    assert np.asarray(fit["covariance_matrix_days2"]).shape == (2, 2)
+    assert fit["covariance_parameter_order"] == ["reference_epoch_btjd", "period_days"]
 
 
 def test_ttv_injected_signal_has_nonzero_refit_residuals():
@@ -1727,7 +1729,9 @@ def test_activity_recovers_rotation_period():
         sampling_window_diagnostics,
         segment_harmonic_persistence,
         sinusoid_amplitude_ppm,
+        sinusoid_amplitude_posterior,
         weighted_period_summary,
+        weighted_percentile_summary,
     )
 
     table = _synthetic_rotation_table()
@@ -1741,6 +1745,13 @@ def test_activity_recovers_rotation_period():
 
     summary = weighted_period_summary([5.0, 5.1], [1.0, 1.0])
     assert summary["weighted_mean_period_days"] == pytest.approx(5.05)
+    period_posterior = weighted_percentile_summary([5.0, 5.1], [1.0, 1.0])
+    assert period_posterior["p16"] <= period_posterior["median"] <= period_posterior["p84"]
+    amplitude_posterior = sinusoid_amplitude_posterior(
+        table["time"], table["flux"], table["flux_err"], best_period
+    )
+    assert amplitude_posterior["p16"] <= amplitude_posterior["median"] <= amplitude_posterior["p84"]
+    assert np.asarray(amplitude_posterior["covariance_cos_sin_baseline"]).shape == (3, 3)
 
     sampling = sampling_window_diagnostics(
         table["time"], 1.0 / periods, 1.0 / best_period

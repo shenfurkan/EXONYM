@@ -243,7 +243,9 @@ def _rounded_payload(value: object, digits: int = 6) -> object:
 
 
 def run_fixed_ephemeris_screen(
-    workspace: CandidateWorkspace, signal: Optional[str] = None
+    workspace: CandidateWorkspace,
+    signal: Optional[str] = None,
+    detrending_method: Optional[str] = None,
 ) -> Path:
     """Write a candidate-local fixed-ephemeris screening artifact.
 
@@ -270,6 +272,7 @@ def run_fixed_ephemeris_screen(
         workspace,
         max_points=SCREENING_MAX_POINTS_PER_PRODUCT,
         require_raw_provenance=True,
+        detrending_method=detrending_method,
     )
     if table is None:
         raise ValueError("fixed-ephemeris screening requires a readable candidate light curve")
@@ -293,6 +296,7 @@ def run_fixed_ephemeris_screen(
         "candidate_id": workspace.candidate_id,
         "signal": signal,
         "source": "candidate-data",
+        "preprocessing": table.get("detrending", {"kind": "pipeline-normalization"}),
         "n_points": int(np.asarray(table["time"]).size),
         "sectors": sorted({int(value) for value in sectors if int(value) > 0}),
         "ephemeris": {

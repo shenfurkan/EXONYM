@@ -8,15 +8,16 @@ Checks implemented here:
 
 1. Path ownership: no top-level ``archive/`` or ``data/``; no research payload
    formats (FITS/CSV/NPY/NPZ/PDF/TeX/ZIP/TAR/GZ/IPYNB/...) outside
-   ``candidate/``.
+   ``candidate/`` except the target-neutral source manuscript template.
 2. Registered alias scan: TOI/TIC and alias tokens derived from every
    ``candidate.json`` must not appear in neutral-zone text.
 3. Python AST scan (``src/`` only): no numeric literals bound to
    sector/ephemeris names or ephemeris call keywords.
 4. Symlink/junction/reparse-point rejection across the whole tree.
 
-The module ships with a test suite and a CLI:
-``exonym verify`` or ``python -m exonym.isolation --root .``
+The module ships with a test suite and a CLI: ``exonym verify --source`` for
+the neutral-zone audit, or ``exonym verify --candidates`` for candidate data
+integrity. The legacy ``verify candidate`` spelling remains supported.
 """
 
 from __future__ import annotations
@@ -416,6 +417,16 @@ def _is_excluded_neutral_directory(relative: Path) -> bool:
     )
 
 
+def _allowed_neutral_file(relative: Path, path: Path) -> bool:
+    """Allow ordinary neutral text plus the exact target-neutral paper template."""
+    if path.suffix.lower() in NEUTRAL_EXTENSIONS:
+        return True
+    return relative.as_posix() in {
+        "templates/paper/paper_template.tex",
+        "src/exonym/_resources/templates/paper/paper_template.tex",
+    }
+
+
 def _iter_neutral_entries(root: Path) -> Iterable[Path]:
     """Yield every auditable entry outside candidate/ without following links."""
     for current, directory_names, file_names in os.walk(
@@ -472,8 +483,8 @@ def _scan_candidate_reparse_points(report: IsolationReport, candidate_root: Path
                 report.add(path, "symlink-or-reparse-point", "not permitted in candidate workspaces")
 
 
-def check_repository(root: Path) -> IsolationReport:
-    """Run the full isolation check over a repository tree."""
+def _check_repository(root: Path, include_candidates: bool) -> IsolationReport:
+    """Run the repository isolation check, optionally including candidate workspaces."""
     requested_root = Path(root)
     report = IsolationReport()
     if is_reparse_point(requested_root):
@@ -484,7 +495,7 @@ def check_repository(root: Path) -> IsolationReport:
         )
     root = requested_root.resolve()
     exception_paths = _load_exceptions(root, report)
-    alias_tokens = _alias_tokens(root / CANDIDATE_DIRECTORY)
+    alias_tokens = _alias_tokens(root / CANDIDATE_DIRECTORY) if include_candidates else {}
 
     archive_root = root / "archive"
     if archive_root.exists() or archive_root.is_symlink():
@@ -515,7 +526,7 @@ def check_repository(root: Path) -> IsolationReport:
             )
             continue
         relative = path.relative_to(root)
-        if path.suffix.lower() not in NEUTRAL_EXTENSIONS:
+        if not _allowed_neutral_file(relative, path):
             report.add(
                 path,
                 "research-payload-outside-candidate",
@@ -543,8 +554,8 @@ def check_repository(root: Path) -> IsolationReport:
         if path.suffix.lower() == ".py" and relative.parts and relative.parts[0] == "src":
             _scan_ast(report, path)
 
-    candidate_root = root / CANDIDATE_DIRECTORY
-    _scan_candidate_reparse_points(report, candidate_root)
+    if include_candidates:
+        _scan_candidate_reparse_points(report, root / CANDIDATE_DIRECTORY)
 
     if exception_paths:
         kept: List[Violation] = []
@@ -561,24 +572,68 @@ def check_repository(root: Path) -> IsolationReport:
     return report
 
 
-def run_audit(root: Path) -> IsolationReport:
+def check_neutral_repository(root: Path) -> IsolationReport:
+    """Audit shared code and repository files without traversing candidate data."""
+    return _check_repository(root, include_candidates=False)
+
+
+def check_repository(root: Path) -> IsolationReport:
+    """Run the full isolation check, including candidate metadata and workspaces."""
+    return _check_repository(root, include_candidates=True)
+
+
+def run_audit(root: Path, *, use_cache: bool = True) -> IsolationReport:
     """Run the full repository audit: isolation checks plus JSON schema
     validation of candidate records, provenance sidecars, and claims."""
     report = check_repository(root)
     try:
         from .schemas import validate_schemas
+        from .verification_cache import candidate_verification_cache
 
-        validate_schemas(root, report)
+        with candidate_verification_cache(root, enabled=use_cache) as cache:
+            validate_schemas(root, report)
+        report.cache_statistics = cache.statistics()
     except Exception as exc:  # pragma: no cover - defensive
         report.add(Path(root), "schema-validation-error", str(exc))
     return report
 
 
+def _remediation_hint(rule: str) -> str:
+    """Return the shortest safe command that addresses a violation category."""
+    if rule in {
+        "artifact-hash-mismatch",
+        "provenance-hash-mismatch",
+        "triage-provenance-invalid",
+    }:
+        return "exonym verify --candidates --fix"
+    if rule.startswith("schema") or rule.endswith("-invalid"):
+        return "exonym verify --candidates --fresh"
+    if rule in {"target-id-in-neutral-zone", "registered-alias-leak", "hardcoded-target-literal", "hardcoded-ephemeris-keyword"}:
+        return "move the target-specific value under candidate/<candidate-id>/, then run exonym verify --source"
+    return "inspect the cited path, correct the record, then run exonym verify --candidates"
+
+
 def format_report(report: IsolationReport) -> str:
     if report.ok:
-        return "ISOLATION: PASS (no violations)"
+        lines = ["ISOLATION: PASS (no violations)"]
+        statistics = getattr(report, "cache_statistics", None)
+        if isinstance(statistics, dict):
+            lines.append(
+                "CACHE: {0} hash hit(s), {1} hash miss(es), {2} candidate JSON hit(s)".format(
+                    statistics.get("hash_cache_hits", 0),
+                    statistics.get("hash_cache_misses", 0),
+                    statistics.get("candidate_json_cache_hits", 0),
+                )
+            )
+        return "\n".join(lines)
     lines = [f"ISOLATION: FAIL ({len(report.violations)} violation(s))"]
-    lines.extend(str(violation) for violation in report.violations)
+    by_rule: Dict[str, List[Violation]] = {}
+    for violation in report.violations:
+        by_rule.setdefault(violation.rule, []).append(violation)
+    for rule in sorted(by_rule):
+        violations = by_rule[rule]
+        lines.append("[{0}] {1} violation(s); remediation: {2}".format(rule, len(violations), _remediation_hint(rule)))
+        lines.extend("  " + str(violation) for violation in violations)
     return "\n".join(lines)
 
 
@@ -587,23 +642,44 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         description="Enforce candidate/ research isolation and schema integrity."
     )
     parser.add_argument("--root", type=Path, default=Path.cwd(), help="Repository root.")
+    parser.add_argument("scope", nargs="?", choices=("candidate",), help=argparse.SUPPRESS)
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument("--source", action="store_true", help="Audit target-neutral source and resources only.")
+    scope.add_argument("--candidates", action="store_true", help="Audit candidate data, records, and provenance.")
     parser.add_argument(
         "--schemas-only",
         action="store_true",
-        help="Validate JSON schemas only (skip the isolation scan).",
+        help="Validate schema definitions only; combine with --candidates for candidate records.",
     )
+    parser.add_argument("--fix", "--remediate", action="store_true", dest="fix", help="Repair safe manifest and triage drift in candidate workspaces.")
+    parser.add_argument("--fresh", action="store_true", help="Bypass candidate hash and metadata caches.")
     args = parser.parse_args(argv)
     root = args.root.resolve()
+    candidate_scope = bool(args.candidates or args.scope == "candidate")
+    if args.fix and not candidate_scope:
+        parser.error("--fix requires --candidates")
+    if args.fix:
+        from .remediation import remediate_candidate_drift
+
+        print(json.dumps({"remediated": remediate_candidate_drift(root)}, indent=2, sort_keys=True))
     if args.schemas_only:
         report = IsolationReport()
         try:
-            from .schemas import validate_schemas
+            from .schemas import validate_schema_definitions, validate_schemas
 
-            validate_schemas(root, report)
+            if candidate_scope:
+                validate_schemas(root, report)
+            else:
+                validate_schema_definitions(root, report)
         except Exception as exc:  # pragma: no cover - defensive
             report.add(Path(root), "schema-validation-error", str(exc))
+    elif candidate_scope:
+        report = run_audit(root, use_cache=not args.fresh)
     else:
-        report = run_audit(root)
+        from .schemas import validate_schema_definitions
+
+        report = check_neutral_repository(root)
+        validate_schema_definitions(root, report)
     print(format_report(report))
     return 0 if report.ok else 1
 

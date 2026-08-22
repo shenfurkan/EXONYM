@@ -14,6 +14,7 @@ import math
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from zipfile import BadZipFile
 
 import numpy as np
 
@@ -37,6 +38,7 @@ BTJD_REFERENCE_BJD = 2457000.0
 BTJD_TIME_SYSTEM = "BTJD_TDB"
 # This is a candidate-selection threshold, not a calibrated false-alarm rate.
 MINIMUM_BLS_CANDIDATE_SNR = 7.1
+PIPELINE_NORMALIZATION = {"kind": "pipeline-normalization"}
 
 EPHEMERIS_CONFIG_NAMES = (
     "transit_config.json",
@@ -158,6 +160,44 @@ def _is_candidate_photometry_input(
     return has_valid_raw_product_provenance(workspace, product_path)
 
 
+def _is_bound_preprocessing(workspace: CandidateWorkspace, record: object) -> bool:
+    """Confirm the preprocessing record still names the derived product it used."""
+    if record == PIPELINE_NORMALIZATION:
+        return True
+    if not isinstance(record, dict) or record.get("kind") != "candidate-detrending":
+        return False
+    method = record.get("method")
+    if method not in ("running-median", "wotan", "celerite"):
+        return False
+    manifest_record = record.get("manifest")
+    artifact_record = record.get("artifact")
+    if not isinstance(manifest_record, dict) or not isinstance(artifact_record, dict):
+        return False
+    manifest_path = workspace.path / "outputs" / "detrending_manifest.{0}.json".format(method)
+    artifact_path = workspace.path / "data" / "processed" / "detrended-{0}.npz".format(method)
+    expected_manifest_path = manifest_path.relative_to(workspace.path).as_posix()
+    expected_artifact_path = artifact_path.relative_to(workspace.path).as_posix()
+    if (
+        manifest_record.get("path") != expected_manifest_path
+        or artifact_record.get("path") != expected_artifact_path
+        or not manifest_path.is_file()
+        or not artifact_path.is_file()
+        or manifest_record.get("sha256") != _sha256(manifest_path)
+        or artifact_record.get("sha256") != _sha256(artifact_path)
+    ):
+        return False
+    manifest = _read_json(manifest_path)
+    artifact = manifest.get("artifact") if isinstance(manifest, dict) else None
+    return bool(
+        isinstance(artifact, dict)
+        and manifest.get("candidate_id") == workspace.candidate_id
+        and manifest.get("method") == method
+        and artifact.get("path") == expected_artifact_path
+        and artifact.get("sha256") == artifact_record.get("sha256")
+        and artifact.get("data_sha256") == artifact_record.get("data_sha256")
+    )
+
+
 def is_manifest_bound_bls_result(
     workspace: CandidateWorkspace,
     result_path: Path,
@@ -209,6 +249,13 @@ def is_manifest_bound_bls_result(
         or isinstance(event_count, bool)
         or not isinstance(event_count, int)
         or event_count < 2
+    ):
+        return False
+    manifest_preprocessing = configuration.get("preprocessing", PIPELINE_NORMALIZATION)
+    result_preprocessing = payload.get("preprocessing", PIPELINE_NORMALIZATION)
+    if (
+        manifest_preprocessing != result_preprocessing
+        or not _is_bound_preprocessing(workspace, manifest_preprocessing)
     ):
         return False
     inputs = manifest.get("inputs")
@@ -502,6 +549,9 @@ def load_stellar_parameters(workspace: CandidateWorkspace) -> Dict[str, Any]:
         "ra_deg": _first_number(payload, ("ra_deg", "ra", "right_ascension")),
         "dec_deg": _first_number(payload, ("dec_deg", "dec", "declination")),
         "teff_k": _first_number(payload, ("teff_k", "teff", "temperature_k")),
+        "teff_k_err": _first_number(
+            payload, ("teff_k_err", "teff_err_k", "teff_error_k", "teff_uncertainty_k")
+        ),
         "logg_cgs": _first_number(payload, ("logg_cgs", "logg", "log_g")),
         "feh": _first_number(payload, ("feh", "metallicity")),
         "mass_solar": _first_number(payload, ("mass_solar", "mass_msun", "mass")),
@@ -675,12 +725,161 @@ def _time_values_to_btjd_tdb(
     raise ValueError("time origin is not declared as BTJD or BJD_TDB")
 
 
+def _load_detrended_light_curve_table(
+    workspace: CandidateWorkspace,
+    method: str,
+    max_points: Optional[int],
+    sectors: Optional[Sequence[int]],
+    require_raw_provenance: bool,
+) -> Optional[Dict[str, Any]]:
+    """Load one hash-bound candidate detrending product without FITS conversion."""
+    normalized_method = method.strip().lower()
+    if normalized_method not in ("running-median", "wotan", "celerite"):
+        raise ValueError("detrending_method must be running-median, wotan, or celerite")
+    manifest_path = workspace.path / "outputs" / "detrending_manifest.{0}.json".format(normalized_method)
+    manifest = _read_json(manifest_path)
+    if not isinstance(manifest, dict):
+        raise ValueError("detrended input requires a readable detrending manifest")
+    artifact = manifest.get("artifact")
+    expected_path = "data/processed/detrended-{0}.npz".format(normalized_method)
+    if (
+        manifest.get("candidate_id") != workspace.candidate_id
+        or manifest.get("method") != normalized_method
+        or not isinstance(artifact, dict)
+        or artifact.get("path") != expected_path
+    ):
+        raise ValueError("detrending manifest does not match its candidate, method, or artifact path")
+    artifact_path = workspace.path / expected_path
+    if not artifact_path.is_file() or artifact.get("sha256") != _sha256(artifact_path):
+        raise ValueError("detrended input artifact is missing or does not match its manifest digest")
+    data_sha256 = artifact.get("data_sha256")
+    if not isinstance(data_sha256, str):
+        raise ValueError("detrended input artifact has no numerical content digest")
+    from .remediation import numerical_npz_sha256
+
+    try:
+        numerical_digest = numerical_npz_sha256(artifact_path)
+    except (BadZipFile, EOFError, OSError, ValueError) as exc:
+        raise ValueError("detrended input artifact is unreadable") from exc
+    if numerical_digest != data_sha256:
+        raise ValueError("detrended input artifact numerical content does not match its manifest")
+
+    product_records = manifest.get("input_products")
+    input_files: List[Path] = []
+    input_sha256s: List[str] = []
+    if require_raw_provenance:
+        from .gatekeeper import has_valid_raw_product_provenance
+
+        if not isinstance(product_records, list) or not product_records:
+            raise ValueError("detrended input requires hash-bound raw input products")
+        for record in product_records:
+            if not isinstance(record, dict):
+                raise ValueError("detrending manifest has a malformed raw input record")
+            relative = record.get("path")
+            expected_digest = record.get("sha256")
+            if not isinstance(relative, str) or not isinstance(expected_digest, str):
+                raise ValueError("detrending manifest raw input record is incomplete")
+            product_path = (workspace.path / relative).resolve()
+            try:
+                product_path.relative_to((workspace.path / "data" / "raw").resolve())
+            except ValueError as exc:
+                raise ValueError("detrending manifest references a non-raw input product") from exc
+            if (
+                not product_path.is_file()
+                or _sha256(product_path) != expected_digest
+                or not has_valid_raw_product_provenance(workspace, product_path)
+            ):
+                raise ValueError("detrended input raw provenance is missing, stale, or mismatched")
+            input_files.append(product_path)
+            input_sha256s.append(expected_digest)
+
+    try:
+        with np.load(artifact_path, allow_pickle=False) as archive:
+            required = {"time_btjd", "detrended_flux", "sector"}
+            if not required.issubset(archive.files):
+                raise ValueError("detrended artifact must retain time_btjd, detrended_flux, and sector arrays")
+            time = np.asarray(archive["time_btjd"], dtype=float)
+            flux = np.asarray(archive["detrended_flux"], dtype=float)
+            sector_values = np.asarray(archive["sector"], dtype=int)
+            flux_err = (
+                np.asarray(archive["detrended_flux_err"], dtype=float)
+                if "detrended_flux_err" in archive.files
+                else None
+            )
+    except (OSError, ValueError, KeyError) as exc:
+        raise ValueError("detrended artifact is unreadable") from exc
+    if (
+        time.ndim != 1
+        or flux.ndim != 1
+        or sector_values.ndim != 1
+        or time.shape != flux.shape
+        or time.shape != sector_values.shape
+        or np.any(sector_values <= 0)
+    ):
+        raise ValueError("detrended artifact arrays have incompatible shapes or invalid sectors")
+    if flux_err is not None and (flux_err.ndim != 1 or flux_err.shape != flux.shape):
+        raise ValueError("detrended artifact uncertainty array does not match its flux")
+    valid = np.isfinite(time) & np.isfinite(flux)
+    if flux_err is not None:
+        valid &= np.isfinite(flux_err) & (flux_err > 0)
+    time, flux, sector_values = time[valid], flux[valid], sector_values[valid]
+    if flux_err is None:
+        flux_err = np.full_like(flux, _mad_flux_error(flux))
+        flux_err_source = "detrended-mad-estimate"
+    else:
+        flux_err = flux_err[valid]
+        flux_err_source = "detrended-reported"
+    if sectors is not None:
+        selected = np.isin(sector_values, np.asarray(sectors, dtype=int))
+        time, flux, flux_err, sector_values = (
+            time[selected], flux[selected], flux_err[selected], sector_values[selected]
+        )
+    if time.size < 50:
+        return None
+    tables: List[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
+    for sector_value in sorted(int(value) for value in np.unique(sector_values)):
+        mask = sector_values == sector_value
+        binned = (
+            _median_bin(time[mask], flux[mask], flux_err[mask], sector_values[mask], n_bins=max_points)
+            if max_points is not None
+            else (time[mask], flux[mask], flux_err[mask], sector_values[mask])
+        )
+        if binned[0].size:
+            tables.append(binned)
+    if not tables:
+        return None
+    return {
+        "time": np.concatenate([table[0] for table in tables]),
+        "flux": np.concatenate([table[1] for table in tables]),
+        "flux_err": np.concatenate([table[2] for table in tables]),
+        "flux_err_sources": [flux_err_source],
+        "sector": np.concatenate([table[3] for table in tables]).astype(int),
+        "input_files": input_files,
+        "input_sha256s": input_sha256s,
+        "time_system": BTJD_TIME_SYSTEM,
+        "detrending": {
+            "kind": "candidate-detrending",
+            "method": normalized_method,
+            "manifest": {
+                "path": manifest_path.relative_to(workspace.path).as_posix(),
+                "sha256": _sha256(manifest_path),
+            },
+            "artifact": {
+                "path": expected_path,
+                "sha256": artifact["sha256"],
+                "data_sha256": data_sha256,
+            },
+        },
+    }
+
+
 def load_light_curve_table(
     workspace: CandidateWorkspace,
     max_points: Optional[int] = 4000,
     sectors: Optional[Sequence[int]] = None,
     raw_only: bool = False,
     require_raw_provenance: bool = False,
+    detrending_method: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Return a light curve table from candidate FITS products, or None.
 
@@ -693,8 +892,16 @@ def load_light_curve_table(
     ``max_points`` is a per-product cap; accepted sectors are not globally
     re-binned after concatenation because that would make effective cadence
     depend on the number of observed sectors. Returns None when no readable
-    light curve exists after filtering.
+    light curve exists after filtering. Set ``detrending_method`` to consume a
+    hash-bound `exonym detrend` product directly; it retains raw product
+    provenance and per-cadence sector labels without a FITS round trip.
     """
+    if detrending_method is not None:
+        if raw_only:
+            raise ValueError("raw_only cannot be combined with a detrending_method")
+        return _load_detrended_light_curve_table(
+            workspace, detrending_method, max_points, sectors, require_raw_provenance
+        )
     if require_raw_provenance:
         raw_only = True
         from .gatekeeper import has_valid_raw_product_provenance

@@ -1,11 +1,13 @@
 import sys
 import types
 import json
+import hashlib
 
 import numpy as np
 import pytest
 
 from exonym.inputs import _time_values_to_btjd_tdb, load_light_curve_table, load_transit_ephemeris
+from exonym.detrending import detrend_candidate
 from exonym.workspace import create_candidate
 
 
@@ -80,3 +82,51 @@ def test_explicit_btjd_field_rejects_a_conflicting_time_system(tmp_path):
     assert ephemeris["source"] == "partial-candidate-config"
     assert ephemeris["field_sources"]["epoch_btjd"] == "synthetic-demo"
     assert ephemeris["time_system"] == "synthetic-demo"
+
+
+def test_detrended_loader_requires_hash_bound_raw_provenance(tmp_path):
+    workspace = create_candidate(tmp_path, "detrended-loader")
+    raw_path = workspace.path / "data" / "raw" / "source.fits"
+    raw_path.write_bytes(b"synthetic raw product")
+    raw_digest = hashlib.sha256(raw_path.read_bytes()).hexdigest()
+    raw_path.with_name("source.provenance.json").write_text(
+        json.dumps(
+            {
+                "source_uri": "https://example.invalid/source",
+                "download_timestamp_utc": "2026-01-01T00:00:00Z",
+                "sha256": raw_digest,
+                "fetched_by": "test",
+            }
+        ),
+        encoding="utf-8",
+    )
+    time = np.linspace(0.0, 8.0, 101)
+    flux = 1.0 + 0.001 * np.sin(time)
+    detrend_candidate(
+        workspace,
+        time,
+        flux,
+        window_days=0.5,
+        sector=np.full(time.size, 1, dtype=int),
+        input_products=[{"path": "data/raw/source.fits", "sha256": raw_digest}],
+    )
+
+    table = load_light_curve_table(
+        workspace,
+        max_points=None,
+        require_raw_provenance=True,
+        detrending_method="running-median",
+    )
+
+    assert table is not None
+    assert table["input_files"] == [raw_path]
+    assert np.all(table["sector"] == 1)
+    assert table["detrending"]["artifact"]["path"] == "data/processed/detrended-running-median.npz"
+
+    raw_path.write_bytes(b"tampered raw product")
+    with pytest.raises(ValueError, match="raw provenance"):
+        load_light_curve_table(
+            workspace,
+            require_raw_provenance=True,
+            detrending_method="running-median",
+        )

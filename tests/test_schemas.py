@@ -7,7 +7,7 @@ import pytest
 
 from exonym.isolation import IsolationReport
 from exonym.freeze import freeze
-from exonym.schemas import validate_schemas
+from exonym.schemas import validate_schema_definitions, validate_schemas
 from exonym.survey import (
     _run_survey_robustness,
     create_survey,
@@ -84,6 +84,16 @@ def _prepare_freeze_source(repo):
 def test_clean_repository_passes_schema_validation(tmp_path):
     report = _audit(_make_repo(tmp_path))
     assert report.ok
+
+
+def test_schema_definition_validation_rejects_invalid_shared_schema(tmp_path):
+    repo = _make_repo(tmp_path)
+    (repo / "schemas" / "candidate.schema.json").write_text('{"type": 42}\n', encoding="utf-8")
+    report = IsolationReport()
+
+    validate_schema_definitions(repo, report)
+
+    assert any(violation.rule == "schema-definition-invalid" for violation in report.violations)
 
 
 def test_release_snapshot_is_checked_for_inventory_and_hash_integrity(tmp_path):
@@ -845,12 +855,32 @@ def test_detrending_manifest_schema_and_artifact_hash_are_verified(tmp_path):
 
     repo = _make_repo(tmp_path)
     candidate = load_candidate(repo, "candidate-alpha")
+    raw_path = candidate.path / "data" / "raw" / "source.fits"
+    raw_path.write_bytes(b"synthetic source")
+    raw_path.with_name("source.provenance.json").write_text(
+        json.dumps(
+            {
+                "source_uri": "https://example.invalid/source",
+                "download_timestamp_utc": "2026-01-01T00:00:00Z",
+                "sha256": hashlib.sha256(raw_path.read_bytes()).hexdigest(),
+                "fetched_by": "synthetic-test",
+            }
+        ),
+        encoding="utf-8",
+    )
     result = detrend_candidate(
         candidate,
         time_btjd=[0.0, 1.0, 2.0, 3.0, 4.0],
         flux=[1.0, 1.001, 0.999, 1.0, 1.0],
         method="running-median",
         window_days=0.5,
+        sector=[1, 1, 1, 1, 1],
+        input_products=[
+            {
+                "path": "data/raw/source.fits",
+                "sha256": hashlib.sha256(raw_path.read_bytes()).hexdigest(),
+            }
+        ],
     )
 
     assert _audit(repo).ok

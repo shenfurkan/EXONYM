@@ -21,9 +21,9 @@ jobs:
       - name: Python security scan
         run: bandit -r src -lll
       - name: Isolation audit
-        run: python -m exonym --root . verify
+        run: python -m exonym --root . verify --source
       - name: JSON schema validation
-        run: python -m exonym --root . verify --schemas-only
+        run: python -m exonym --root . verify --candidates
       # Semgrep 1.136.0 publishes wheels through Python 3.11 and its
       # OpenTelemetry dependency imports pkg_resources from setuptools.
       - name: Set up Semgrep runtime

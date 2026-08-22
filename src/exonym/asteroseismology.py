@@ -219,6 +219,60 @@ def seismic_mass_radius(
     }
 
 
+def _percentile_summary(samples: np.ndarray) -> Dict[str, float]:
+    quantiles = np.quantile(np.asarray(samples, dtype=float), [0.16, 0.50, 0.84])
+    return {
+        "p16": float(quantiles[0]),
+        "median": float(quantiles[1]),
+        "p84": float(quantiles[2]),
+        "plus": float(quantiles[2] - quantiles[1]),
+        "minus": float(quantiles[1] - quantiles[0]),
+    }
+
+
+def seismic_uncertainty_summary(
+    envelope: Dict[str, Any], stellar: Dict[str, Any], draws: int = 2048
+) -> Dict[str, Any]:
+    """Propagate frequency-resolution and stellar-temperature errors by Monte Carlo."""
+    try:
+        numax = float(envelope["numax_candidate_uhz"])
+        dnu = float(envelope["dnu_candidate_uhz"])
+        rayleigh = float(envelope["rayleigh_uhz"])
+        teff = float(stellar["teff_k"])
+        teff_error = float(stellar["teff_k_err"])
+    except (KeyError, TypeError, ValueError):
+        return {
+            "status": "unavailable-missing-input-uncertainty",
+            "reason": "Requires finite numax, dnu, Rayleigh resolution, teff_k, and teff_k_err.",
+        }
+    if not all(math.isfinite(value) and value > 0 for value in (numax, dnu, rayleigh, teff, teff_error)):
+        return {
+            "status": "unavailable-invalid-input-uncertainty",
+            "reason": "Frequency resolution and stellar-temperature uncertainty must be positive and finite.",
+        }
+    rng = np.random.default_rng(seed=41)
+    numax_draws = np.clip(rng.normal(numax, rayleigh, draws), np.finfo(float).eps, None)
+    dnu_draws = np.clip(rng.normal(dnu, rayleigh, draws), np.finfo(float).eps, None)
+    teff_draws = np.clip(rng.normal(teff, teff_error, draws), np.finfo(float).eps, None)
+    numax_ratio = numax_draws / NUMAX_SUN_UHZ
+    dnu_ratio = dnu_draws / DNU_SUN_UHZ
+    teff_ratio = teff_draws / TEFF_SUN_K
+    radius_draws = numax_ratio * np.sqrt(teff_ratio) / dnu_ratio**2
+    mass_draws = radius_draws**3 * dnu_ratio**2
+    return {
+        "status": "resolution-and-temperature-monte-carlo",
+        "draws": int(draws),
+        "numax_uhz": _percentile_summary(numax_draws),
+        "dnu_uhz": _percentile_summary(dnu_draws),
+        "mass_solar": _percentile_summary(mass_draws),
+        "radius_solar": _percentile_summary(radius_draws),
+        "assumptions": (
+            "Independent Gaussian Rayleigh-resolution errors for numax and dnu, and a "
+            "candidate-supplied Gaussian teff error; systematic scaling-relation error is excluded."
+        ),
+    }
+
+
 SEISMIC_MASS_BOUNDS_SOLAR = (0.05, 20.0)
 SEISMIC_RADIUS_BOUNDS_SOLAR = (0.05, 20.0)
 SEISMIC_PRIOR_RATIO_TOLERANCE = 2.0
@@ -605,6 +659,7 @@ def run_asteroseismology(
         radius_prior_solar=stellar_params["radius_solar"],
         prior_is_catalog=stellar_params.get("source") == "candidate-data",
     )
+    uncertainty = seismic_uncertainty_summary(envelope, stellar_params)
 
     pysyd_adapter = _run_pysyd_adapter(
         workspace, detrended_time, detrended_flux, numax_min_uhz, numax_max_uhz
@@ -652,6 +707,7 @@ def run_asteroseismology(
             "radius_prior_solar": stellar_params["radius_solar"],
             "validity": sanity,
         },
+        "uncertainty": uncertainty,
         "pysyd_crosscheck": pysyd_result,
         "external_adapters": {
             "pysyd": {

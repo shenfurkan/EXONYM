@@ -11,7 +11,8 @@
     "method",
     "configuration",
     "input",
-    "artifact"
+    "artifact",
+    "input_products"
   ],
   "properties": {
     "schema_version": { "const": 1 },
@@ -39,11 +40,24 @@
     },
     "artifact": {
       "type": "object",
-      "required": ["path", "sha256"],
+        "required": ["path", "sha256", "data_sha256"],
       "additionalProperties": false,
       "properties": {
         "path": { "type": "string", "minLength": 1 },
-        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "data_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "input_products": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "sha256"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string", "pattern": "^data/raw/" },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        }
       }
     }
   }

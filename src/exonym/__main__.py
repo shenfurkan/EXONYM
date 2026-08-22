@@ -13,7 +13,7 @@ Commands:
   screen   Run fixed-ephemeris photometric consistency checks
   plot     Generate diagnostic vetting figures for a candidate
   fetch-priors Fetch catalog parameters from ExoFOP and save to transit config
-  verify   Run the repository isolation audit
+  verify   Audit source or candidate integrity with scoped cache-aware checks
 
 Scientific analysis commands:
   asteroseismology  Oscillation envelope, Delta-nu, and seismic M*/R*
@@ -38,7 +38,7 @@ from typing import Optional, Sequence
 from . import __version__
 from .freeze import freeze, verify_release
 from .gatekeeper import GateError, advance
-from .isolation import format_report, run_audit
+from .isolation import check_neutral_repository, format_report, run_audit
 from .tagging import add_tags, filter_candidates
 from .tracking import candidate_telemetry, format_dashboard
 from .workspace import (
@@ -363,11 +363,30 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ds9_parser.add_argument("candidate_id")
 
-    verify_parser = commands.add_parser("verify", help="Run the repository audit.")
+    verify_parser = commands.add_parser("verify", help="Audit source isolation or candidate integrity.")
+    verify_parser.add_argument(
+        "scope",
+        nargs="?",
+        choices=("candidate",),
+        help=argparse.SUPPRESS,
+    )
+    verify_scope = verify_parser.add_mutually_exclusive_group()
+    verify_scope.add_argument("--source", action="store_true", help="Audit target-neutral source and resources only.")
+    verify_scope.add_argument("--candidates", action="store_true", help="Audit candidate data, records, and provenance.")
     verify_parser.add_argument(
         "--schemas-only",
         action="store_true",
-        help="Validate JSON schemas only (skip the isolation scan).",
+        help="Validate schema definitions only; combine with --candidates for candidate records.",
+    )
+    verify_parser.add_argument("--fix", "--remediate", action="store_true", dest="fix", help="Repair safe manifest and triage drift in candidate workspaces.")
+    verify_parser.add_argument("--fresh", action="store_true", help="Bypass candidate hash and metadata caches.")
+
+    export_paper_parser = commands.add_parser(
+        "export-paper", help="Export candidate evidence into a candidate-local manuscript macro bundle."
+    )
+    export_paper_parser.add_argument("candidate_id", help="Target candidate identifier.")
+    export_paper_parser.add_argument(
+        "--signal", default=None, help="Optional per-signal fit and vetting artifact suffix."
     )
 
     search_parser = commands.add_parser("search", help="Run a transit search on candidate data.")
@@ -385,6 +404,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Targeted search using prior from config/signals/transit_config<signal>.json",
     )
+    search_parser.add_argument(
+        "--detrending-method",
+        choices=("running-median", "wotan", "celerite"),
+        default=None,
+        help="Use a hash-bound candidate-local detrending product instead of direct FITS flux.",
+    )
 
     screen_parser = commands.add_parser(
         "screen", help="Run fixed-ephemeris primary, odd-even, and half-phase screening."
@@ -394,6 +419,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--signal",
         default=None,
         help="Per-signal transit config name (e.g. .01 -> config/signals/transit_config.01.json).",
+    )
+    screen_parser.add_argument(
+        "--detrending-method",
+        choices=("running-median", "wotan", "celerite"),
+        default=None,
+        help="Use a hash-bound candidate-local detrending product instead of direct FITS flux.",
     )
 
     plot_parser = commands.add_parser("plot", help="Generate diagnostic vetting plots.")
@@ -459,6 +490,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=5000,
         help="Emcee production steps per walker or dynesty maximum likelihood calls.",
+    )
+    fit_parser.add_argument(
+        "--detrending-method",
+        choices=("running-median", "wotan", "celerite"),
+        default=None,
+        help="Use a hash-bound candidate-local detrending product instead of direct FITS flux.",
     )
     fit_parser.add_argument(
         "--sampler",
@@ -589,17 +626,40 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     try:
         if args.command == "verify":
+            candidate_scope = bool(args.candidates or args.scope == "candidate")
+            if args.fix and not candidate_scope:
+                raise ValueError("--fix requires --candidates")
+            if args.fix:
+                from .remediation import remediate_candidate_drift
+
+                _print_json({"remediated": remediate_candidate_drift(repository_root)})
             if args.schemas_only:
                 from .isolation import IsolationReport
 
-                from .schemas import validate_schemas
+                from .schemas import validate_schema_definitions, validate_schemas
 
                 report = IsolationReport()
-                validate_schemas(repository_root, report)
+                if candidate_scope:
+                    validate_schemas(repository_root, report)
+                else:
+                    validate_schema_definitions(repository_root, report)
+            elif candidate_scope:
+                report = run_audit(repository_root, use_cache=not args.fresh)
             else:
-                report = run_audit(repository_root)
+                from .schemas import validate_schema_definitions
+
+                report = check_neutral_repository(repository_root)
+                validate_schema_definitions(repository_root, report)
             print(format_report(report))
             return 0 if report.ok else 1
+
+        if args.command == "export-paper":
+            from .paper_export import export_paper
+
+            candidate = load_candidate(repository_root, args.candidate_id)
+            output = export_paper(candidate, signal=args.signal)
+            print(output.relative_to(repository_root).as_posix())
+            return 0
 
         if args.command == "init":
             candidate = create_candidate(
@@ -941,6 +1001,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 flux_err=table["flux_err"],
                 method=args.method,
                 window_days=args.window_days,
+                sector=table["sector"],
+                input_products=[
+                    {
+                        "path": Path(path).relative_to(candidate.path).as_posix(),
+                        "sha256": digest,
+                    }
+                    for path, digest in zip(table["input_files"], table["input_sha256s"])
+                ],
             )
             _print_json(
                 {
@@ -973,6 +1041,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 period_max=args.period_max,
                 signal=args.signal,
                 engine=args.engine,
+                detrending_method=args.detrending_method,
             )
             print(output.relative_to(repository_root).as_posix())
             return 0
@@ -980,7 +1049,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "screen":
             from .screening import run_fixed_ephemeris_screen
 
-            output = run_fixed_ephemeris_screen(candidate, signal=args.signal)
+            output = run_fixed_ephemeris_screen(
+                candidate, signal=args.signal, detrending_method=args.detrending_method
+            )
             print(output.relative_to(repository_root).as_posix())
             return 0
 
@@ -1035,6 +1106,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 signal=args.signal,
                 use_ldtk_prior=args.ldtk_prior,
                 sampler=args.sampler,
+                detrending_method=args.detrending_method,
             )
             print(output.relative_to(repository_root).as_posix())
             return 0

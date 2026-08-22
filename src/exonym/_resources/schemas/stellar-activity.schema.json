@@ -17,7 +17,10 @@
     "period_search_range_days": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number", "exclusiveMinimum": 0}},
     "rotation_period_days": {"type": "number", "exclusiveMinimum": 0},
     "rotation_period_std_days": {"type": "number", "minimum": 0},
+    "rotation_period_posterior_days": {"$ref": "#/$defs/percentile_summary"},
     "modulation_amplitude_ppm": {"type": "number", "minimum": 0},
+    "modulation_amplitude_posterior_ppm": {"$ref": "#/$defs/amplitude_posterior"},
+    "uncertainty_method": {"type": "string", "minLength": 1},
     "best_false_alarm_probability": {"type": "number", "minimum": 0, "maximum": 1},
     "best_analytic_white_noise_false_alarm_probability": {"type": "number", "minimum": 0, "maximum": 1},
     "n_segments": {"type": "integer", "minimum": 1},
@@ -30,6 +33,45 @@
     {"required": ["best_analytic_white_noise_false_alarm_probability", "scientific_status", "harmonic_persistence", "validation_eligible", "transit_mask_status"]}
   ],
   "$defs": {
+    "percentile_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["p16", "median", "p84", "plus", "minus"],
+      "properties": {
+        "p16": {"type": "number"},
+        "median": {"type": "number"},
+        "p84": {"type": "number"},
+        "plus": {"type": "number", "minimum": 0},
+        "minus": {"type": "number", "minimum": 0}
+      }
+    },
+    "amplitude_posterior": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["p16", "median", "p84", "plus", "minus", "covariance_cos_sin_baseline", "covariance_parameter_order", "method"],
+      "properties": {
+        "p16": {"type": "number"},
+        "median": {"type": "number"},
+        "p84": {"type": "number"},
+        "plus": {"type": "number", "minimum": 0},
+        "minus": {"type": "number", "minimum": 0},
+        "covariance_cos_sin_baseline": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": {"type": "number"}
+          }
+        },
+        "covariance_parameter_order": {
+          "const": ["cosine", "sine", "baseline"]
+        },
+        "method": {"type": "string", "minLength": 1}
+      }
+    },
     "segment": {
       "type": "object",
       "additionalProperties": false,

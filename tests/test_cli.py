@@ -91,6 +91,16 @@ def test_cli_full_lifecycle(tmp_path, capsys):
     assert "ISOLATION: PASS" in output
 
 
+def test_cli_verify_candidate_isolated_from_default_shared_audit(tmp_path):
+    repo = _repo(tmp_path)
+    root = ["--root", str(repo)]
+    assert main(root + ["init", "candidate-alpha"]) == 0
+    (repo / "candidate" / "candidate-alpha" / "candidate.json").write_text("{\n", encoding="utf-8")
+
+    assert main(root + ["verify"]) == 0
+    assert main(root + ["verify", "candidate"]) == 1
+
+
 def test_cli_survey_sensitivity_dispatches_without_changing_candidate_state(
     tmp_path, capsys, monkeypatch
 ):
@@ -247,7 +257,7 @@ def test_cli_search_forwards_tls_engine(tmp_path, capsys, monkeypatch):
     main(root + ["init", "candidate-alpha"])
     calls = []
 
-    def fake_search(candidate, period_min, period_max, signal, engine):
+    def fake_search(candidate, period_min, period_max, signal, engine, detrending_method):
         calls.append(
             {
                 "candidate": candidate.candidate_id,
@@ -255,6 +265,7 @@ def test_cli_search_forwards_tls_engine(tmp_path, capsys, monkeypatch):
                 "period_max": period_max,
                 "signal": signal,
                 "engine": engine,
+                "detrending_method": detrending_method,
             }
         )
         output = candidate.path / "outputs" / "tls_search_results.json"
@@ -272,6 +283,7 @@ def test_cli_search_forwards_tls_engine(tmp_path, capsys, monkeypatch):
             "period_max": 15.0,
             "signal": None,
             "engine": "tls",
+            "detrending_method": None,
         }
     ]
     assert "tls_search_results.json" in capsys.readouterr().out

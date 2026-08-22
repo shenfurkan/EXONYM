@@ -19,9 +19,11 @@ from functools import partial
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from zipfile import BadZipFile
 
 from .isolation import IsolationReport
 from .resources import ResourceUnavailableError, read_schema_text
+from .verification_cache import cached_candidate_json, cached_sha256
 
 SCHEMA_DIRECTORY = "schemas"
 CANDIDATE_SCHEMA = "candidate.schema.json"
@@ -96,7 +98,7 @@ def _parse_json(content: str) -> object:
 
 def _read_json(path: Path) -> object:
     """Read one UTF-8 JSON file with strict finite-number parsing."""
-    return _parse_json(path.read_text(encoding="utf-8"))
+    return cached_candidate_json(path, _parse_json)
 
 
 def _parse_utc_timestamp(value: object) -> Optional[datetime]:
@@ -113,14 +115,7 @@ def _parse_utc_timestamp(value: object) -> Optional[datetime]:
 
 def _file_sha256(path: Path) -> str:
     """Return the SHA-256 digest for one regular candidate-local file."""
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while True:
-            chunk = handle.read(65536)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
+    return cached_sha256(path)
 
 
 def _candidate_artifact_path(workspace_dir: Path, relative_path: object) -> Optional[Path]:
@@ -642,6 +637,29 @@ def _load_schemas(root: Path, report: IsolationReport) -> Dict[str, object]:
     return loaded
 
 
+def validate_schema_definitions(root: Path, report: IsolationReport) -> Dict[str, object]:
+    """Load and validate shared JSON Schema definitions without reading candidates."""
+    root = Path(root).resolve()
+    try:
+        import jsonschema
+    except ImportError as exc:
+        report.add(root, "schema-validation-unavailable", "jsonschema not installed: {0}".format(exc))
+        return {}
+
+    schemas = _load_schemas(root, report)
+    for name, schema in schemas.items():
+        try:
+            jsonschema.Draft202012Validator.check_schema(schema)
+        except jsonschema.SchemaError as exc:
+            detail = str(exc).splitlines()
+            report.add(
+                root / SCHEMA_DIRECTORY / name,
+                "schema-definition-invalid",
+                detail[0][:300] if detail else str(exc),
+            )
+    return schemas
+
+
 def _validate(
     report: IsolationReport,
     path: Path,
@@ -907,15 +925,11 @@ def _validate_exofop_prior_retrieval(
 def validate_schemas(root: Path, report: IsolationReport) -> None:
     """Append schema violations for every candidate record in the tree."""
     root = Path(root).resolve()
-    try:
-        import jsonschema
-    except ImportError as exc:
-        report.add(root, "schema-validation-unavailable", "jsonschema not installed: {0}".format(exc))
-        return
-
-    schemas = _load_schemas(root, report)
+    schemas = validate_schema_definitions(root, report)
     if CANDIDATE_SCHEMA not in schemas or PROVENANCE_SCHEMA not in schemas:
         return
+    import jsonschema
+
     format_checker = jsonschema.FormatChecker()
     validate_func = partial(jsonschema.validate, format_checker=format_checker)
 
@@ -1193,6 +1207,29 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
                     [instance.get("artifact")],
                     "detrending",
                 )
+                _validate_artifacts(
+                    report,
+                    manifest_path,
+                    workspace_dir,
+                    instance.get("input_products"),
+                    "detrending raw input",
+                )
+                artifact = instance.get("artifact")
+                if isinstance(artifact, dict):
+                    artifact_path = _candidate_artifact_path(workspace_dir, artifact.get("path"))
+                    if artifact_path is not None and artifact_path.is_file():
+                        try:
+                            from .remediation import numerical_npz_sha256
+
+                            numerical_digest = numerical_npz_sha256(artifact_path)
+                        except (BadZipFile, EOFError, OSError, ValueError):
+                            numerical_digest = None
+                        if artifact.get("data_sha256") != numerical_digest:
+                            report.add(
+                                manifest_path,
+                                "detrending-content-hash-mismatch",
+                                "detrending artifact numerical digest does not match its manifest",
+                            )
 
         if ldtk_prior_schema is not None:
             prior_path = workspace_dir / "outputs" / "ldtk_quadratic_limb_darkening_prior.json"

@@ -18,6 +18,7 @@ workspace records a separate contribution.
 | `protocols/radial_velocity.md` | analysis | Keplerian orbit fitting protocol |
 | `decisions/review_gate.md` | review | Peer-review and scientific disposition gate |
 | `tracking/pipeline_status.md` | all | Local checkpoint telemetry summary |
+| `paper/paper_template.tex` | review | Candidate-local discovery manuscript scaffold |
 
 Mandatory gate items are marked `[MANDATORY]`; `exonym advance` refuses to
 promote a phase until every mandatory item is checked (`- [x]`) and all

@@ -34,7 +34,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .inputs import MINIMUM_BLS_CANDIDATE_SNR
+from .inputs import MINIMUM_BLS_CANDIDATE_SNR, PIPELINE_NORMALIZATION
 from .lightcurve import phase_hours
 from .workspace import CandidateWorkspace, validate_signal_suffix
 
@@ -506,6 +506,7 @@ def run_bls_on_candidate(
     sectors: Optional[Sequence[int]] = None,
     result_suffix: Optional[str] = None,
     duration_grid_hours: Optional[Sequence[float]] = None,
+    detrending_method: Optional[str] = None,
 ) -> Path:
     """Run BLS transit search on candidate data and save JSON summary to outputs/.
 
@@ -595,6 +596,7 @@ def run_bls_on_candidate(
     input_records: List[Dict[str, Any]] = []
     input_files: List[Path] = []
     input_sha256s: List[str] = []
+    preprocessing: Dict[str, Any] = dict(PIPELINE_NORMALIZATION)
     if engine == "tls":
         from .inputs import load_light_curve_table
 
@@ -603,6 +605,7 @@ def run_bls_on_candidate(
             max_points=None,
             sectors=sectors,
             require_raw_provenance=True,
+            detrending_method=detrending_method,
         )
         loaded = None
         if native_table is not None:
@@ -620,14 +623,18 @@ def run_bls_on_candidate(
                 np.asarray(native_table["flux"], dtype=float),
             )
             tls_errors = np.asarray(native_table["flux_err"], dtype=float)
+            preprocessing = dict(native_table.get("detrending", PIPELINE_NORMALIZATION))
     else:
         from .inputs import load_light_curve_table
 
-        # Vettable BLS evidence is intentionally limited to raw FITS products
-        # with validated acquisition sidecars. Processed products currently
-        # have no recursive derivation-manifest contract.
+        # A requested detrending method has a candidate-local derivation
+        # manifest that retains raw input hashes and acquisition sidecars.
         bls_table = load_light_curve_table(
-            workspace, sectors=sectors, raw_only=True, require_raw_provenance=True
+            workspace,
+            sectors=sectors,
+            raw_only=detrending_method is None,
+            require_raw_provenance=True,
+            detrending_method=detrending_method,
         )
         loaded = None
         if bls_table is not None:
@@ -646,6 +653,7 @@ def run_bls_on_candidate(
             )
             bls_errors = np.asarray(bls_table["flux_err"], dtype=float)
             bls_error_sources = list(bls_table.get("flux_err_sources", []))
+            preprocessing = dict(bls_table.get("detrending", PIPELINE_NORMALIZATION))
     if loaded is None:
         raise ValueError("no readable candidate light-curve photometry available for BLS transit search")
     time, flux = loaded
@@ -688,6 +696,7 @@ def run_bls_on_candidate(
     payload["source"] = source
     payload["time_system"] = BTJD_TIME_SYSTEM
     payload["n_points"] = int(time.size)
+    payload["preprocessing"] = preprocessing
     payload["statistic"] = {
         "name": (
             "weighted BLS fitted-depth signal-to-noise"
@@ -726,6 +735,7 @@ def run_bls_on_candidate(
         "candidate_id": workspace.candidate_id,
         "result_path": output_path.relative_to(workspace.path).as_posix(),
         "result_sha256": _sha256(output_path),
+        "result_semantic_sha256": None,
         "source": source,
         "detection_status": payload.get("detection_status"),
         "inputs": input_records,
@@ -757,10 +767,15 @@ def run_bls_on_candidate(
             "detection_threshold_snr": MINIMUM_BLS_CANDIDATE_SNR if engine == "bls" else None,
             "sectors": list(sectors) if sectors is not None else None,
             "time_system": BTJD_TIME_SYSTEM,
+            "detrending_method": detrending_method,
+            "preprocessing": preprocessing,
         },
         "search_statistic": payload["statistic"],
         "runtime": _bls_runtime_provenance() if engine == "bls" else None,
     }
+    from .remediation import semantic_json_sha256
+
+    manifest["result_semantic_sha256"] = semantic_json_sha256(output_path)
     if signal_provenance is not None:
         prior_path = workspace.path / signal_provenance["prior_path"]
         manifest["targeted_prior"] = {

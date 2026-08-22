@@ -1,0 +1,72 @@
+% EXONYM candidate-local discovery manuscript template.
+% Compile from candidate/<candidate-id>/paper after running exonym export-paper.
+\documentclass[twocolumn]{aastex631}
+\usepackage{booktabs}
+\newcommand{\ExonymCandidateId}{Candidate identifier unavailable}
+\newcommand{\ExonymExportedUtc}{Not available}
+\newcommand{\ExonymPeriodDays}{Not available}
+\newcommand{\ExonymEpochBtjd}{Not available}
+\newcommand{\ExonymRadiusRatio}{Not available}
+\newcommand{\ExonymScaledSemimajorAxis}{Not available}
+\newcommand{\ExonymInclinationDeg}{Not available}
+\newcommand{\ExonymImpactParameter}{Not available}
+\newcommand{\ExonymLimbDarkeningOne}{Not available}
+\newcommand{\ExonymLimbDarkeningTwo}{Not available}
+\newcommand{\ExonymStellarTeff}{Not available}
+\newcommand{\ExonymStellarRadius}{Not available}
+\newcommand{\ExonymFpp}{Not available}
+\newcommand{\ExonymNfpp}{Not available}
+\newcommand{\ExonymClaimEligibility}{false}
+\newcommand{\ExonymFigureTransit}{../figures/phase_folded_lc.png}
+\newcommand{\ExonymFigureCorner}{../figures/corner_plot.png}
+\newcommand{\ExonymFigureLocalization}{../figures/localization.png}
+\newcommand{\ExonymFigureSed}{../figures/sed_fit.png}
+\newcommand{\ExonymFigureFpp}{../figures/triceratops_fpp.png}
+\input{generated/exonym_macros.tex}
+
+\begin{document}
+\title{A candidate-local photometric analysis of \ExonymCandidateId}
+\author{Author name}
+\affiliation{Institution and address}
+\keywords{exoplanets --- transit photometry --- stellar characterization}
+
+\begin{abstract}
+State the observational result, the evidence limits, and the follow-up status. The exporter supplies only values present in candidate-owned artifacts. Do not describe this draft as a confirmation or validation when \ExonymClaimEligibility{} is false.
+\end{abstract}
+
+\section{Introduction}
+Describe the mission context, discovery history, novelty review, and the question addressed by this analysis. Cite the mission, catalogs, and prior work from retained candidate-local evidence.
+
+\section{Observations and space photometry}
+Describe the TESS sectors, SPOC cadence, aperture treatment, quality filtering, BTJD\_TDB timing, and provenance records. Report data exclusions and detrending choices.
+
+\section{Stellar characterization}
+Describe Gaia astrometry, the broadband SED fit, atmospheric priors, extinction assumptions, and rotational activity. The exported SED values are $T_{\rm eff}=\ExonymStellarTeff$ and $R_\star=\ExonymStellarRadius$ in the source artifact's stated units.
+
+\section{Photometric detection and screening}
+Describe the BLS or TLS trial grid, aliases, primary depth, odd-even test, secondary-eclipse control, and null tests. A search ranking statistic is not a calibrated false-alarm probability.
+
+\section{Difference imaging and source localization}
+Describe in-transit and out-of-transit pixel images, difference-image construction, PRF source competition, centroid uncertainty, and nearby-source exclusions. State the calibration limit of the localization method.
+\IfFileExists{\ExonymFigureLocalization}{\begin{figure}\includegraphics[width=\columnwidth]{\ExonymFigureLocalization}\caption{Candidate-local localization diagnostic.}\end{figure}}{}
+
+\section{Global transit modeling}
+State the cadence integration, noise model, stellar-density prior, and limb-darkening treatment. The exported posterior summaries are $R_p/R_\star=\ExonymRadiusRatio$, $a/R_\star=\ExonymScaledSemimajorAxis$, $i=\ExonymInclinationDeg$, $b=\ExonymImpactParameter$, $u_1=\ExonymLimbDarkeningOne$, and $u_2=\ExonymLimbDarkeningTwo$. The ephemeris values are $P=\ExonymPeriodDays$ d and $T_0=\ExonymEpochBtjd$ BTJD\_TDB.
+\IfFileExists{\ExonymFigureTransit}{\begin{figure}\includegraphics[width=\columnwidth]{\ExonymFigureTransit}\caption{Phase-folded candidate-local light curve.}\end{figure}}{}
+\IfFileExists{\ExonymFigureCorner}{\begin{figure}\includegraphics[width=\columnwidth]{\ExonymFigureCorner}\caption{Candidate-local posterior diagnostic.}\end{figure}}{}
+
+\section{Statistical vetting and false-positive assessment}
+Describe the scenario model, scene inputs, contrast constraints, and provenance. The exported diagnostic values are FPP $=\ExonymFpp$ and NFPP $=\ExonymNfpp$. They remain claim-ineligible in the current EXONYM workflow.
+\IfFileExists{\ExonymFigureFpp}{\begin{figure}\includegraphics[width=\columnwidth]{\ExonymFigureFpp}\caption{Candidate-local false-positive scenario diagnostic.}\end{figure}}{}
+
+\section{Discussion and follow-up feasibility}
+Discuss physical interpretation, unresolved alternatives, atmospheric metrics, predicted RV semi-amplitude, and the imaging, photometric, or spectroscopic observations needed to resolve the remaining uncertainty.
+
+\section{Data availability}
+State where the frozen candidate workspace, raw-product provenance sidecars, derived artifacts, and source version are available. Do not publish restricted data without the relevant permission.
+
+\section{Acknowledgments}
+Record mission, archive, software, and follow-up acknowledgments required by the retained sources.
+
+\bibliography{references}
+\end{document}
