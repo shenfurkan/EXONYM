@@ -27,26 +27,28 @@ from typing import List, Tuple
 # ---------------------------------------------------------------------------
 # 3D Sphere Raytracing & Space Geometry Constants
 # ---------------------------------------------------------------------------
-GLOBE_RADIUS_X: float = 13.0
-GLOBE_RADIUS_Y: float = 5.8
-SPACE_WIDTH: int = 50
-SPACE_ROWS: int = 13
+# Terminal cells are roughly twice as tall as they are wide, so a circular
+# globe needs GLOBE_RADIUS_Y == GLOBE_RADIUS_X / 2.
+GLOBE_RADIUS_X: float = 15.0
+GLOBE_RADIUS_Y: float = 7.5
+SPACE_WIDTH: int = 64
+SPACE_ROWS: int = 19
 CENTER_X: int = SPACE_WIDTH // 2
 CENTER_Y: int = SPACE_ROWS // 2
 
 # Background space stars (x, y, glyph)
 SPACE_STARS: Tuple[Tuple[int, int, str], ...] = (
     (3, 1, "."),
-    (6, 10, "*"),
-    (43, 2, "+"),
-    (46, 9, "."),
-    (8, 11, "·"),
-    (40, 11, "·"),
-    (2, 6, "·"),
-    (47, 6, "*"),
+    (7, 15, "*"),
+    (56, 2, "+"),
+    (60, 11, "."),
+    (13, 17, "·"),
+    (51, 16, "·"),
+    (2, 9, "·"),
+    (61, 6, "*"),
 )
 
-SHADES: str = " ░▒▓███"
+SHADES: str = " .:-=+*#%@"
 
 # Branding -- block font spelling EXONYM (trimmed)
 _LOGO_LINES: Tuple[str, ...] = (
@@ -58,10 +60,12 @@ _LOGO_LINES: Tuple[str, ...] = (
     "╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝   ╚═╝   ╚═╝     ╚═╝",
 )
 
-# Frame geometry: one blank line above the logo, one between logo and globe,
-# and one below the globe.  The minimum terminal height keeps the trailing
-# newline from scrolling the frame on redraw.
-_FRAME_LINES: int = 1 + len(_LOGO_LINES) + 1 + SPACE_ROWS + 1
+_TAGLINE: str = "A Framework for Exoplanet Science"
+
+# Frame geometry: one blank line above the logo, the tagline beneath it, one
+# gap line before the globe.  The minimum terminal height keeps every frame
+# from scrolling on redraw.
+_FRAME_LINES: int = 1 + len(_LOGO_LINES) + 1 + 1 + SPACE_ROWS
 _FRAME_MIN_ROWS: int = _FRAME_LINES + 1
 
 _ESC      = chr(27)
@@ -148,10 +152,12 @@ def _render_planet_globe(angle: float) -> List[str]:
     norm_l = math.sqrt(lx * lx + ly * ly + lz * lz)
     lx, ly, lz = lx / norm_l, ly / norm_l, lz / norm_l
 
-    # Raytrace each cell in the sphere
-    for y_idx in range(-6, 7):
+    # Raytrace each cell in the sphere; loop bounds cover the atmosphere glow.
+    x_span = int(math.ceil(GLOBE_RADIUS_X * 1.15)) + 1
+    y_span = int(math.ceil(GLOBE_RADIUS_Y * 1.15)) + 1
+    for y_idx in range(-y_span, y_span + 1):
         r_row = CENTER_Y + y_idx
-        for x_idx in range(-15, 16):
+        for x_idx in range(-x_span, x_span + 1):
             r_col = CENTER_X + x_idx
             if 0 <= r_row < SPACE_ROWS and 0 <= r_col < SPACE_WIDTH:
                 nx = x_idx / GLOBE_RADIUS_X
@@ -169,45 +175,60 @@ def _render_planet_globe(angle: float) -> List[str]:
                     lon = math.atan2(rx_rot, rz_rot)
                     lat = math.asin(max(-1.0, min(1.0, ry_rot)))
 
-                    # Surface continents & cloud swirl pattern
+                    # Smooth continents & cloud swirl pattern on [0, 1]
                     pattern = math.sin(3.0 * lon + math.sin(2.5 * lat)) * math.cos(2.0 * lat)
+                    continents = 0.5 + 0.5 * pattern
 
-                    # Diffuse lighting
+                    # Diffuse lighting with limb darkening via nz
                     diffuse = max(0.0, nx * lx - ny * ly + nz * lz)
-                    intensity = diffuse * 0.75 + (pattern > 0.0) * 0.25
+                    intensity = diffuse * (0.55 + 0.45 * continents)
 
-                    char_idx = int(intensity * (len(SHADES) - 1))
-                    char_idx = max(0, min(len(SHADES) - 1, char_idx))
+                    char_idx = int(intensity * (len(SHADES) - 1) + 0.5)
+                    char_idx = max(1 if intensity > 0.0 else 0, min(len(SHADES) - 1, char_idx))
                     ch = SHADES[char_idx]
 
-                    if intensity > 0.6:
+                    if intensity > 0.72:
                         grid[r_row][r_col] = _WHITE + _BOLD + ch + _RESET
-                    elif intensity > 0.3:
+                    elif intensity > 0.42:
                         grid[r_row][r_col] = _GREY_LIGHT + ch + _RESET
+                    elif intensity > 0.18:
+                        grid[r_row][r_col] = _GREY_MID + ch + _RESET
                     else:
                         grid[r_row][r_col] = _GREY_DARK + ch + _RESET
-                elif dist <= 1.15:
+                elif dist <= 1.12:
                     # Atmosphere glow ring
                     grid[r_row][r_col] = _GREY_MID + "·" + _RESET
 
     return ["".join(r) for r in grid]
 
 
+def _tagline_line() -> str:
+    """Compose the version + tagline bridge rendered beneath the logo."""
+    text = _TAGLINE
+    try:
+        import importlib.metadata
+
+        text = "v" + importlib.metadata.version("exonym") + "  ·  " + _TAGLINE
+    except Exception:  # noqa: BLE001 - version metadata is optional decoration
+        pass
+    return _DIM + _GREY_MID + text + _RESET
+
+
 def _compose_full_screen(angle: float, term_width: int) -> str:
     """Compose the full dynamically centered banner frame."""
     lines: List[str] = []
 
-    # 1. Centered Logo
+    # 1. Centered Logo with version tagline bridge
     lines.append("")
     for logo_line in _LOGO_LINES:
         formatted = _WHITE + _BOLD + logo_line + _RESET
         lines.append(_center_line(formatted, term_width) + _ESC + "[K")
+    lines.append(_center_line(_tagline_line(), term_width) + _ESC + "[K")
 
     # 2. Centered High-Definition Rotating Exoplanet Globe
     lines.append(_ESC + "[K")
     for g_line in _render_planet_globe(angle):
         lines.append(_center_line(g_line, term_width) + _ESC + "[K")
-    lines.append(_ESC + "[K")
 
     return "\n".join(lines)
 
