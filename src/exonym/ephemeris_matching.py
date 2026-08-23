@@ -482,12 +482,29 @@ def _compare_record(
     period_harmonic_match = period_difference <= PERIOD_RELATIVE_TOLERANCE
     epoch_btjd = epoch_bjd - 2457000.0 if epoch_bjd is not None else None
     epoch_tolerance = max(candidate_duration, duration_hours or 0.0) * EPOCH_TOLERANCE_DURATION_MULTIPLIER / 24.0
+    # For non-unity harmonic ratios the epoch folding must happen on the
+    # shorter period so that offset epochs (e.g. odd/even aliases) still
+    # register an epoch match. Without this an EB at P/2 of the candidate
+    # period would always fail the epoch check and fall through to
+    # "no-ephemeris-match".
+    phase_period = candidate_period
+    if harmonic != 1.0 and period_harmonic_match:
+        phase_period = min(period, candidate_period)
     epoch_delta = (
-        _phase_delta_days(epoch_btjd, candidate_epoch, candidate_period)
+        _phase_delta_days(epoch_btjd, candidate_epoch, phase_period)
         if epoch_btjd is not None
         else None
     )
-    epoch_match = epoch_delta <= epoch_tolerance if epoch_delta is not None else None
+    epoch_match_raw = epoch_delta <= epoch_tolerance if epoch_delta is not None else None
+    # Harmonic-parity ambiguity: candidate period matches a harmonic but the
+    # epoch does not fold correctly → route to human review rather than
+    # silently falling through to "no-ephemeris-match".
+    harmonic_parity_ambiguous = bool(
+        period_harmonic_match and epoch_match_raw is False and harmonic != 1.0
+    )
+    epoch_match: Any = epoch_match_raw
+    if harmonic_parity_ambiguous:
+        epoch_match = "harmonic-parity-ambiguous"
     duration_ratio = duration_hours / candidate_duration if duration_hours is not None and candidate_duration > 0 else None
     duration_compatible = (
         abs(duration_ratio - 1.0) <= DURATION_RELATIVE_TOLERANCE
@@ -516,7 +533,10 @@ def _compare_record(
         "epoch_match": epoch_match,
         "duration_ratio_known_over_candidate": duration_ratio,
         "duration_compatible": duration_compatible,
-        "review_required": bool(period_harmonic_match and (epoch_match is True or epoch_match is None)),
+        "review_required": bool(
+            period_harmonic_match
+            and (epoch_match is True or epoch_match is None or epoch_match == "harmonic-parity-ambiguous")
+        ),
     }
 
 
@@ -545,8 +565,18 @@ def match_known_signal_ephemerides(
             comparison = _compare_record(candidate, record, index, snapshot)
             if comparison is not None:
                 comparisons.append(comparison)
-    full_matches = [entry for entry in comparisons if entry["period_harmonic_match"] and entry["epoch_match"] is True]
-    unresolved = [entry for entry in comparisons if entry["period_harmonic_match"] and entry["epoch_match"] is None]
+    full_matches = [
+        entry
+        for entry in comparisons
+        if entry["period_harmonic_match"]
+        and entry["epoch_match"] is True
+    ]
+    unresolved = [
+        entry
+        for entry in comparisons
+        if entry["period_harmonic_match"]
+        and (entry["epoch_match"] is None or entry["epoch_match"] == "harmonic-parity-ambiguous")
+    ]
     if full_matches:
         status = "review-required-known-signal-match"
     elif unresolved:

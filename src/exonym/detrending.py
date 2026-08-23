@@ -137,19 +137,43 @@ def _finite_series(
     return sorted_time, values[sorted_indices], sorted_errors, sorted_indices
 
 
-def _running_median_trend(time: np.ndarray, values: np.ndarray, window_days: float) -> np.ndarray:
-    """Estimate a deterministic median trend over ``window_days`` in days."""
+def _running_median_trend(
+    time: np.ndarray, values: np.ndarray, window_days: float,
+    transit_mask: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Estimate a deterministic median trend over ``window_days`` in days.
+
+    When ``transit_mask`` is provided, masked cadences are linearly
+    interpolated before the median filter runs.
+    """
     cadence_days = float(np.median(np.diff(time)))
     if not np.isfinite(cadence_days) or cadence_days <= 0:
         raise ValueError("observation times must have positive finite cadence")
     width = max(3, int(round(window_days / cadence_days)))
     if width % 2 == 0:
         width += 1
-    return median_filter(values, size=width, mode="nearest")
+    working = values.copy()
+    if transit_mask is not None:
+        mask = np.asarray(transit_mask, dtype=bool)
+        if mask.shape != values.shape:
+            raise ValueError("transit_mask must match values shape")
+        if mask.any():
+            indices = np.arange(values.size)
+            working[mask] = np.interp(
+                indices[mask], indices[~mask], values[~mask]
+            )
+    return median_filter(working, size=width, mode="nearest")
 
 
-def _wotan_trend(time: np.ndarray, values: np.ndarray, window_days: float) -> np.ndarray:
-    """Estimate a trend with the optional Wotan package."""
+def _wotan_trend(
+    time: np.ndarray, values: np.ndarray, window_days: float,
+    transit_mask: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Estimate a trend with the optional Wotan package.
+
+    When ``transit_mask`` is provided, masked cadences are passed to
+    wotan as ``mask`` (inverted boolean) so they are excluded from the fit.
+    """
     try:
         wotan = importlib.import_module("wotan")
     except ImportError as exc:
@@ -157,9 +181,17 @@ def _wotan_trend(time: np.ndarray, values: np.ndarray, window_days: float) -> np
             "Wotan detrending was requested but the optional 'wotan' package is not installed"
         ) from exc
     try:
-        _, trend = wotan.flatten(
-            time, values, window_length=window_days, method="biweight", return_trend=True
-        )
+        wotan_kwargs: Dict[str, Any] = {
+            "window_length": window_days,
+            "method": "biweight",
+            "return_trend": True,
+        }
+        if transit_mask is not None:
+            mask = np.asarray(transit_mask, dtype=bool)
+            if mask.shape != values.shape:
+                raise ValueError("transit_mask must match values shape")
+            wotan_kwargs["mask"] = ~mask
+        _, trend = wotan.flatten(time, values, **wotan_kwargs)
     except Exception as exc:
         raise RuntimeError("Wotan detrending failed") from exc
     return np.asarray(trend, dtype=float)
@@ -178,9 +210,15 @@ def _resolved_errors(values: np.ndarray, errors: Optional[np.ndarray]) -> np.nda
 
 
 def _celerite_trend(
-    time: np.ndarray, values: np.ndarray, errors: Optional[np.ndarray], window_days: float
+    time: np.ndarray, values: np.ndarray, errors: Optional[np.ndarray], window_days: float,
+    transit_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Estimate a Matern-3/2 GP trend with the optional celerite package."""
+    """Estimate a Matern-3/2 GP trend with the optional celerite package.
+
+    When ``transit_mask`` is provided, masked cadences are excluded from
+    the amplitude estimate and the GP fit; the resulting prediction is
+    linearly interpolated across the masked gaps before being subtracted.
+    """
     try:
         celerite = importlib.import_module("celerite")
     except ImportError as exc:
@@ -188,9 +226,17 @@ def _celerite_trend(
             "Celerite detrending was requested but the optional 'celerite' package is not installed"
         ) from exc
 
-    baseline = float(np.median(values))
+    unmasked = np.ones(values.size, dtype=bool)
+    if transit_mask is not None:
+        mask = np.asarray(transit_mask, dtype=bool)
+        if mask.shape != values.shape:
+            raise ValueError("transit_mask must match values shape")
+        unmasked = ~mask
+
+    baseline = float(np.median(values[unmasked])) if unmasked.any() else float(np.median(values))
     residuals = values - baseline
-    amplitude = max(float(np.std(residuals)), np.finfo(float).eps)
+    unmasked_residuals = residuals[unmasked]
+    amplitude = max(float(np.std(unmasked_residuals)), np.finfo(float).eps)
     try:
         kernel = celerite.terms.Matern32Term(
             log_sigma=float(np.log(amplitude)), log_rho=float(np.log(window_days))
@@ -200,6 +246,14 @@ def _celerite_trend(
         prediction = np.asarray(gp.predict(residuals, time, return_cov=False), dtype=float)
     except Exception as exc:
         raise RuntimeError("Celerite detrending failed") from exc
+
+    # Interpolate trend across masked cadences so the final subtraction
+    # does not inject the GP prediction through transit windows.
+    if transit_mask is not None and mask.any():
+        indices = np.arange(values.size)
+        prediction[mask] = np.interp(
+            indices[mask], indices[unmasked], prediction[unmasked]
+        )
     return baseline + prediction
 
 
@@ -254,6 +308,7 @@ def detrend_candidate(
     flux_err: Optional[Sequence[float]] = None,
     sector: Optional[Sequence[int]] = None,
     input_products: Optional[Sequence[Mapping[str, str]]] = None,
+    transit_mask: Optional[np.ndarray] = None,
 ) -> DetrendingArtifacts:
     """Detrend caller-supplied normalized flux and write candidate-local artifacts.
 
@@ -266,6 +321,9 @@ def detrend_candidate(
         flux_err: Optional normalized flux uncertainties for celerite.
         sector: Candidate-owned TESS sector labels, one for each cadence.
         input_products: Hash-bound raw light-curve records used for the input.
+        transit_mask: Boolean mask of in-transit cadences to protect from
+            detrending bias. Cadences where ``transit_mask`` is True are
+            excluded from the trend estimate and interpolated over.
 
     Returns:
         Paths for a compressed processed array and its JSON provenance manifest.
@@ -290,6 +348,21 @@ def detrend_candidate(
     if not products:
         raise ValueError("detrending requires hash-bound raw input products")
     sorted_time, sorted_values, sorted_errors, sorted_indices = _finite_series(time, values, errors)
+
+    # Validate and sort the transit mask alongside the flux arrays.
+    sorted_transit_mask: Optional[np.ndarray] = None
+    if transit_mask is not None:
+        mask_arr = np.asarray(transit_mask, dtype=bool)
+        if mask_arr.shape != values.shape:
+            raise ValueError("transit_mask must be a boolean array matching flux shape")
+        sorted_transit_mask = mask_arr[sorted_indices]
+
+    masked_fraction: float = 0.0
+    transit_mask_applied: bool = False
+    if sorted_transit_mask is not None:
+        transit_mask_applied = True
+        masked_fraction = float(np.count_nonzero(sorted_transit_mask)) / float(sorted_values.size)
+
     runners: Dict[str, Callable[..., np.ndarray]] = {
         "running-median": _running_median_trend,
         "wotan": _wotan_trend,
@@ -297,10 +370,14 @@ def detrend_candidate(
     }
     if normalized_method == "celerite":
         sorted_trend = runners[normalized_method](
-            sorted_time, sorted_values, sorted_errors, float(window_days)
+            sorted_time, sorted_values, sorted_errors, float(window_days),
+            transit_mask=sorted_transit_mask,
         )
     else:
-        sorted_trend = runners[normalized_method](sorted_time, sorted_values, float(window_days))
+        sorted_trend = runners[normalized_method](
+            sorted_time, sorted_values, float(window_days),
+            transit_mask=sorted_transit_mask,
+        )
     if sorted_trend.shape != sorted_values.shape:
         raise ValueError("detrending backend returned a trend with the wrong shape")
     if not np.all(np.isfinite(sorted_trend)) or np.any(np.abs(sorted_trend) <= np.finfo(float).eps):
@@ -341,7 +418,11 @@ def detrend_candidate(
         "generated_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "method": normalized_method,
         "backend_version": _method_version(normalized_method),
-        "configuration": {"window_days": float(window_days)},
+        "configuration": {
+            "window_days": float(window_days),
+            "transit_mask_applied": transit_mask_applied,
+            "masked_fraction": masked_fraction,
+        },
         "input": {
             "cadences": int(values.size),
             "finite_cadences": int(sorted_indices.size),

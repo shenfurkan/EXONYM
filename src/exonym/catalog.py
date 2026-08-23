@@ -137,7 +137,7 @@ def calculate_radial_velocity_semi_amplitude(
         0.0895
         * (m_planet_earth * sin_i)
         * (m_star_solar ** (-2.0 / 3.0))
-        * (period_days ** (-1.0 / 3.0))
+        * ((period_days / 365.25) ** (-1.0 / 3.0))
         / math.sqrt(1.0 - eccentricity**2)
     )
 

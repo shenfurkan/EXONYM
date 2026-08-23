@@ -572,7 +572,7 @@ def test_catalog_record_ephemeris_cli_writes_candidate_local_evidence(tmp_path, 
             "--raw-artifact", "literature/reviewed-row.txt",
             "--period-days", "3.0",
             "--epoch-bjd-tdb", "2457001.0",
-            "--duration-hours", "2.0",
+"--duration-hours", "2.0",
             "--retrieved-at", "2026-08-01T00:00:00Z",
             "--expires-at", "2026-09-01T00:00:00Z",
         ]
@@ -580,6 +580,51 @@ def test_catalog_record_ephemeris_cli_writes_candidate_local_evidence(tmp_path, 
 
     assert result == 0
     assert "decisions/known_signal_ephemerides.json" in capsys.readouterr().out
+
+
+def test_ephemeris_half_period_alias_review_required(tmp_path):
+    """Candidate at P_cand = 2 × P_eb must route to review, not no-match."""
+    from exonym.ephemeris_matching import _compare_record
+
+    candidate = {"period_days": 4.0, "epoch_btjd": 2000.0, "duration_hours": 2.0}
+    source = {
+        "pl_orbper": 2.0,
+        "pl_tranmid": 2459000.0,
+        "pl_trandur": 2.0,
+        "pl_tranmid_systemref": "BJD_TDB",
+        "pl_name": "EB-Half",
+    }
+    snapshot = {"provider": "nasa-exoplanet-archive", "retrieval_id": "a" * 32, "snapshot": {"path": "test", "sha256": "b" * 64}}
+
+    result = _compare_record(candidate, source, 0, snapshot)
+    assert result is not None
+    assert result["period_harmonic_match"] is True
+    assert result["nearest_harmonic_factor"] == 0.5
+    # Must NOT be "no-ephemeris-match" — epoch match is at least "harmonic-parity-ambiguous"
+    assert result["epoch_match"] is not False or result["epoch_match"] == "harmonic-parity-ambiguous"
+    assert result["review_required"] is True
+
+
+def test_ephemeris_double_period_alias_review_required(tmp_path):
+    """Candidate at P_cand = 0.5 × P_eb must route to review, not no-match."""
+    from exonym.ephemeris_matching import _compare_record
+
+    candidate = {"period_days": 1.0, "epoch_btjd": 2000.0, "duration_hours": 2.0}
+    source = {
+        "pl_orbper": 2.0,
+        "pl_tranmid": 2459000.0,
+        "pl_trandur": 2.0,
+        "pl_tranmid_systemref": "BJD_TDB",
+        "pl_name": "EB-Double",
+    }
+    snapshot = {"provider": "nasa-exoplanet-archive", "retrieval_id": "a" * 32, "snapshot": {"path": "test", "sha256": "b" * 64}}
+
+    result = _compare_record(candidate, source, 0, snapshot)
+    assert result is not None
+    assert result["period_harmonic_match"] is True
+    assert result["nearest_harmonic_factor"] == 2.0
+    assert result["epoch_match"] is not False or result["epoch_match"] == "harmonic-parity-ambiguous"
+    assert result["review_required"] is True
 
 
 def test_catalog_cli_dispatches_only_allowlisted_provider_names(tmp_path, monkeypatch, capsys):

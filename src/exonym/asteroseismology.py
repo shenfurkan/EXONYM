@@ -50,7 +50,7 @@ TEFF_SUN_K = 5772.0         # Solar effective temperature (Kelvin)
 PSD_MIN_UHZ = 100.0         # Default minimum frequency for stellar PSD search (microHz)
 PSD_MAX_UHZ = 2000.0        # Default maximum frequency for stellar PSD search (microHz)
 DNU_MIN_UHZ = 30.0          # Minimum trial Delta-nu lag (microHz)
-DNU_MAX_UHZ = 70.0          # Maximum trial Delta-nu lag (microHz)
+DNU_MAX_UHZ = 200.0         # Maximum trial Delta-nu lag (microHz) — Solar Δν☉ ≈ 135.1 µHz; must exceed it — Chaplin & Miglio 2013
 MICROHZ_PER_CPD = 0.0864    # Unit conversion factor: cycles per day to microHz (1 c/d = 11.574 microHz)
 
 
@@ -142,8 +142,26 @@ def estimate_oscillation_envelope(
     numax_max_uhz: float,
 ) -> Dict[str, Any]:
     """Return numax/dnu candidate estimates from a whitened PSD envelope."""
-    search_low = max(PSD_MIN_UHZ, float(numax_min_uhz))
-    search_high = min(PSD_MAX_UHZ, float(numax_max_uhz))
+    import warnings
+
+    numax_min_used = float(numax_min_uhz)
+    numax_max_used = float(numax_max_uhz)
+    if numax_min_used < PSD_MIN_UHZ:
+        warnings.warn(
+            "numax_min_uhz {0:.1f} uHz clamped to search floor {1:.1f} uHz".format(
+                numax_min_used, PSD_MIN_UHZ
+            )
+        )
+        numax_min_used = PSD_MIN_UHZ
+    if numax_max_used > PSD_MAX_UHZ:
+        warnings.warn(
+            "numax_max_uhz {0:.1f} uHz clamped to search ceiling {1:.1f} uHz".format(
+                numax_max_used, PSD_MAX_UHZ
+            )
+        )
+        numax_max_used = PSD_MAX_UHZ
+    search_low = numax_min_used
+    search_high = numax_max_used
     if search_high <= search_low:
         raise ValueError("invalid numax search bounds")
     frequency, power, whitened, envelope = compute_power_spectrum(
@@ -159,6 +177,8 @@ def estimate_oscillation_envelope(
         "n_points": int(len(time)),
         "baseline_days": float(np.max(time) - np.min(time)),
         "rayleigh_uhz": float(1e6 / ((np.max(time) - np.min(time)) * 86400.0)),
+        "numax_min_used": numax_min_used,
+        "numax_max_used": numax_max_used,
         "numax_candidate_uhz": numax_candidate,
         "envelope_peak_ratio": float(envelope[peak_index]),
         "dnu_candidate_uhz": dnu_candidate,
@@ -405,7 +425,7 @@ def _write_adapter_manifest(
     if failure is not None:
         manifest["failure"] = failure
     manifest_path = run_dir / "engine-run.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    manifest_path.write_text(json.dumps(manifest, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     return manifest_path
 
 
@@ -537,6 +557,7 @@ def _record_tess_atl_adapter(workspace: CandidateWorkspace) -> Dict[str, Any]:
                 "network_requests": "not-attempted",
             },
             indent=2,
+            allow_nan=False,
         ) + "\n",
         encoding="utf-8",
     )
@@ -727,5 +748,5 @@ def run_asteroseismology(
         ),
     }
     output_path = outputs_dir / "asteroseismic_results.json"
-    output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    output_path.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     return output_path

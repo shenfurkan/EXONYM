@@ -26,6 +26,7 @@ loaded dynamically from candidate-local workspace files.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from datetime import datetime, timezone
 from pathlib import Path
@@ -108,7 +109,11 @@ def fit_difference_image_prf(
     differences = difference_image[valid_mask]
     try:
         amplitudes, residual = nnls(design, differences, maxiter=5000)
-    except Exception:
+    except (ValueError, RuntimeError) as exc:
+        logging.warning("NNLS convergence failure in PRF fit: %s", exc)
+        return None, None, 0
+    except Exception as exc:
+        logging.warning("unexpected PRF fit failure: %s", exc)
         return None, None, 0
     return amplitudes, float(residual), int(valid_mask.sum())
 
@@ -260,7 +265,17 @@ def extract_tpf_difference_image(
             pipeline = (aperture & 2) != 0
             wcs = WCS(ap_hdu.header)
             header = dict(hdul[0].header)
-    except Exception:
+    except (OSError, ValueError, KeyError, IndexError) as exc:
+        logging.warning(
+            "WCS/TPF load failed for %s (sector %s): %s",
+            path.name, cube.get("sector", "unknown"), exc,
+        )
+        return None, None, None, None, 0, 0
+    except Exception as exc:
+        logging.warning(
+            "unexpected TPF failure for %s (sector %s): %s",
+            path.name, cube.get("sector", "unknown"), exc,
+        )
         return None, None, None, None, 0, 0
 
     time = cube["time"]
@@ -557,7 +572,17 @@ def run_prf_localization(
 
                     with fits.open(cube["path"], memmap=False) as hdul:
                         wcs = WCS(hdul[2].header)
-                except Exception:
+                except (OSError, ValueError, KeyError, IndexError) as exc:
+                    logging.warning(
+                        "WCS load failed for %s (sector %s): %s",
+                        cube["path"], cube.get("sector", "unknown"), exc,
+                    )
+                    wcs = None
+                except Exception as exc:
+                    logging.warning(
+                        "unexpected WCS failure for %s (sector %s): %s",
+                        cube["path"], cube.get("sector", "unknown"), exc,
+                    )
                     wcs = None
             if wcs is None:
                 sources = [

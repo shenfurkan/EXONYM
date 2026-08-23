@@ -348,10 +348,19 @@ def test_perryman_spectroscopic_and_atmospheric_calculations():
         ellipsoidal_variation_amplitude_ppm,
     )
 
-    k = calculate_radial_velocity_semi_amplitude(
+    k_one_year = calculate_radial_velocity_semi_amplitude(
+        m_planet_earth=1.0, m_star_solar=1.0, period_days=365.25, inclination_deg=90.0
+    )
+    assert k_one_year == pytest.approx(0.0895, rel=1e-2), (
+        "K at P=1 yr should equal the canonical constant 0.0895 m/s"
+    )
+
+    k_one_day = calculate_radial_velocity_semi_amplitude(
         m_planet_earth=1.0, m_star_solar=1.0, period_days=1.0, inclination_deg=90.0
     )
-    assert k == pytest.approx(0.0895, rel=1e-3)
+    assert k_one_day == pytest.approx(0.640, rel=1e-2), (
+        "K at P=1 d should be 0.0895 * 365.25^(1/3) ≈ 0.640 m/s"
+    )
 
     wobble = calculate_astrometric_wobble_microarcsec(
         m_planet_earth=317.83, m_star_solar=1.0, semi_major_axis_au=5.2, distance_pc=10.0
@@ -388,10 +397,12 @@ def test_perryman_spectroscopic_and_atmospheric_calculations():
     )
     assert p_ttv > 0
 
-    residuals = compute_linear_ephemeris_residuals(
+    result = compute_linear_ephemeris_residuals(
         transit_times_btjd=[10.0, 20.001, 30.0], period_days=10.0, epoch_btjd=10.0
     )
+    residuals = result["residuals_minutes"]
     assert len(residuals) == 3
+    assert result["n_nonfinite_midtimes"] == 0
 
     p_val = centroid_offset_pvalue(2.0)
     assert p_val == pytest.approx(np.exp(-2.0), rel=1e-4)

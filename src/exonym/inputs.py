@@ -971,6 +971,13 @@ def load_light_curve_table(
                         stacklevel=2,
                     )
                     continue
+            else:
+                _warnings.warn(
+                    "Product {0} has no QUALITY column; skipping to avoid unmasked cadences "
+                    "entering science path.".format(path.name),
+                    stacklevel=2,
+                )
+                continue
             light_curve = _lc.remove_nans().normalize()
             flux = np.asarray(light_curve.flux.value, dtype=float)
             sector_value = None

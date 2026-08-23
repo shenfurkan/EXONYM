@@ -50,3 +50,19 @@ def test_export_paper_uses_safe_macro_overrides_and_available_posteriors(tmp_pat
         "outputs/mcmc_transit_fit.json",
         "outputs/sed_fit_results.json",
     ]
+def test_paper_export_tiny_value_formatting():
+    """_number() must not render small values as literal '0'."""
+    from exonym.paper_export import _number
+
+    tiny = _number(3.2e-7, digits=6)
+    assert tiny is not None
+    assert tiny != "0", "3.2e-7 must not render as '0'"
+    assert "e" in tiny.lower() or tiny.replace(".", "").strip("0") != "", (
+        "tiny value must retain nonzero digits: got {0!r}".format(tiny)
+    )
+
+    moderate = _number(0.00123, digits=6)
+    assert moderate is not None
+    assert "0.00123" in moderate, (
+        "0.00123 must be preserved: got {0!r}".format(moderate)
+    )

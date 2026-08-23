@@ -22,7 +22,12 @@ class _UnscopedLightCurve:
         self.time = _Quantity(np.linspace(0.0, 2.0, count))
         self.flux = _Quantity(np.ones(count))
         self.flux_err = _Quantity(np.full(count, 1e-4))
+        self.quality = _Quantity(np.zeros(count, dtype=int))
         self.meta = {}
+
+    def __getitem__(self, key):
+        # Minimal subscriptability for quality-mask indexing
+        return self
 
     def remove_nans(self):
         return self
@@ -49,6 +54,36 @@ def test_light_curve_loader_rejects_products_without_a_verified_sector(tmp_path,
     # Assert
     assert table is None
 
+def test_inputs_missing_quality_column_rejected(tmp_path, monkeypatch):
+    """Products without a QUALITY column must be skipped with a warning."""
+    workspace = create_candidate(tmp_path, "no-quality-lc")
+    product = workspace.path / "data" / "raw" / "no_quality_lc.fits"
+    product.write_bytes(b"synthetic")
+
+    class _NoQualityLC:
+        def __init__(self):
+            count = 64
+            self.time = _Quantity(np.linspace(0.0, 2.0, count))
+            self.flux = _Quantity(np.ones(count))
+            self.flux_err = _Quantity(np.full(count, 1e-4))
+            self.meta = {}
+
+        def remove_nans(self):
+            return self
+
+        def normalize(self):
+            return self
+
+    monkeypatch.setitem(
+        sys.modules,
+        "lightkurve",
+        types.SimpleNamespace(read=lambda _path: _NoQualityLC()),
+    )
+
+    with pytest.warns(UserWarning, match="no QUALITY column"):
+        table = load_light_curve_table(workspace)
+
+    assert table is None
 
 @pytest.mark.parametrize(
     "header",

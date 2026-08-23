@@ -65,7 +65,7 @@ def _number(value: object, digits: int = 5) -> Optional[str]:
         return None
     if not math.isfinite(numeric):
         return None
-    return format(numeric, ".{0}f".format(digits)).rstrip("0").rstrip(".")
+    return f"{numeric:.{digits}g}"
 
 
 def _posterior_latex(summary: object, digits: int = 5) -> str:

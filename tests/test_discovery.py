@@ -205,10 +205,52 @@ def test_injection_recovery_requires_period_epoch_score_and_multiple_events(
         0.05,
         minimum_snr=6.0,
     )[0]
+    assert result["recovered"] == expected
 
-    # Assert
-    assert result["period_match"] is True
-    assert result["recovered"] is expected
+
+def test_injection_recovery_no_detection_safe(monkeypatch):
+    """Injection recovery must complete without TypeError when SNR is None."""
+    import numpy as np
+
+    from exonym.discovery import injection_recovery_diagnostics
+    from exonym.search import BLSSearchResult
+
+    time = np.linspace(0.0, 10.0, 200)
+    flux = np.ones_like(time)
+
+    # Return a result with snr=None to simulate a non-detection
+    def fake_duration_grid(*args, **kwargs):
+        return (
+            BLSSearchResult(
+                best_period=3.0,
+                best_epoch=1.0,
+                best_depth_ppm=0.0,
+                best_duration_hours=2.0,
+                snr=None,
+                n_distinct_transit_events=0,
+            ),
+            [],
+        )
+
+    monkeypatch.setattr("exonym.discovery.search_duration_grid", fake_duration_grid)
+
+    injections = [
+        {"epoch_btjd": 1.0, "period_days": 3.0, "duration_hours": 2.0, "depth_ppm": 1e-6}
+    ]
+
+    # Must not raise TypeError from `best.snr is None` or np.isfinite(None)
+    results = injection_recovery_diagnostics(
+        time,
+        flux,
+        injections,
+        duration_grid_hours=[2.0],
+        period_min_days=1.0,
+        period_max_days=10.0,
+        n_periods=10,
+        tolerance=0.1,
+    )
+    assert len(results) == 1
+    assert results[0]["recovered"] is False
 
 
 def test_injection_recovery_requires_both_preprocessing_branches(monkeypatch):

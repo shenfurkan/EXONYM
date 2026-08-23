@@ -138,6 +138,144 @@ def test_unavailable_optional_backend_writes_no_science_output(tmp_path, monkeyp
     assert not (workspace.path / "data" / "processed" / ("detrended-" + method + ".npz")).exists()
     assert not (workspace.path / "outputs" / ("detrending_manifest." + method + ".json")).exists()
 
+def _synthetic_transit_light_curve():
+    """Return time, flux, and transit_mask with an injected box transit (depth 0.01)."""
+    import numpy as np
+
+    time = np.linspace(0.0, 8.0, 401)
+    trend = 1.0 + 0.015 * np.sin(2.0 * np.pi * time / 8.0)
+    depth = 0.01
+    transit_mask = np.abs(time - 4.0) < 0.06
+    flux = trend * np.where(transit_mask, 1.0 - depth, 1.0)
+    return time, flux, transit_mask
+
+
+def test_detrending_depth_preservation_running_median(tmp_path):
+    """Running-median backend must preserve injected transit depth with a correct mask."""
+    import numpy as np
+
+    from exonym.detrending import detrend_candidate
+
+    workspace = create_candidate(tmp_path, "depth-running-median")
+    raw_product = _raw_input_product(workspace)
+    time, flux, transit_mask = _synthetic_transit_light_curve()
+
+    result = detrend_candidate(
+        workspace,
+        time,
+        flux,
+        method="running-median",
+        window_days=0.5,
+        sector=np.ones(time.size, dtype=int),
+        input_products=[raw_product],
+        transit_mask=transit_mask,
+    )
+
+    data = np.load(result.artifact_path)
+    detrended = data["detrended_flux"]
+    in_transit = detrended[transit_mask]
+    measured_depth = 1.0 - float(np.median(in_transit[np.isfinite(in_transit)]))
+    assert 0.008 <= measured_depth <= 0.012, (
+        "running-median depth {0:.6f} outside [0.008, 0.012]".format(measured_depth)
+    )
+
+
+def test_detrending_depth_preservation_wotan(tmp_path, monkeypatch):
+    """Wotan backend must preserve injected transit depth with a correct mask."""
+    import sys
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from exonym.detrending import detrend_candidate
+
+    # Mock wotan to return a simple running-median trend so the test is self-contained.
+    def _mock_flatten(time, values, **kwargs):
+        from scipy.ndimage import median_filter
+        width = max(3, int(round(0.5 / float(np.median(np.diff(time))))))
+        if width % 2 == 0:
+            width += 1
+        return None, median_filter(values, size=width, mode="nearest")
+
+    fake_wotan = SimpleNamespace(flatten=_mock_flatten)
+    monkeypatch.setitem(sys.modules, "wotan", fake_wotan)
+
+    workspace = create_candidate(tmp_path, "depth-wotan")
+    raw_product = _raw_input_product(workspace)
+    time, flux, transit_mask = _synthetic_transit_light_curve()
+
+    result = detrend_candidate(
+        workspace,
+        time,
+        flux,
+        method="wotan",
+        window_days=0.5,
+        sector=np.ones(time.size, dtype=int),
+        input_products=[raw_product],
+        transit_mask=transit_mask,
+    )
+
+    data = np.load(result.artifact_path)
+    detrended = data["detrended_flux"]
+    in_transit = detrended[transit_mask]
+    measured_depth = 1.0 - float(np.median(in_transit[np.isfinite(in_transit)]))
+    assert 0.008 <= measured_depth <= 0.012, (
+        "wotan depth {0:.6f} outside [0.008, 0.012]".format(measured_depth)
+    )
+
+
+def test_detrending_depth_preservation_celerite(tmp_path, monkeypatch):
+    """Celerite GP backend must preserve injected transit depth with a correct mask."""
+    import sys
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from exonym.detrending import detrend_candidate
+
+    class _MockTerm:
+        def __init__(self, log_sigma, log_rho):
+            pass
+
+    class _MockGP:
+        def __init__(self, kernel, mean):
+            pass
+
+        def compute(self, time, yerr):
+            pass
+
+        def predict(self, y, t, return_cov=False):
+            from scipy.ndimage import median_filter
+            width = max(3, int(round(0.5 / float(np.median(np.diff(t))))))
+            if width % 2 == 0:
+                width += 1
+            return median_filter(y, size=width, mode="nearest")
+
+    fake_celerite = SimpleNamespace(terms=SimpleNamespace(Matern32Term=_MockTerm), GP=_MockGP)
+    monkeypatch.setitem(sys.modules, "celerite", fake_celerite)
+
+    workspace = create_candidate(tmp_path, "depth-celerite")
+    raw_product = _raw_input_product(workspace)
+    time, flux, transit_mask = _synthetic_transit_light_curve()
+
+    result = detrend_candidate(
+        workspace,
+        time,
+        flux,
+        method="celerite",
+        window_days=0.5,
+        sector=np.ones(time.size, dtype=int),
+        input_products=[raw_product],
+        transit_mask=transit_mask,
+    )
+
+    data = np.load(result.artifact_path)
+    detrended = data["detrended_flux"]
+    in_transit = detrended[transit_mask]
+    measured_depth = 1.0 - float(np.median(in_transit[np.isfinite(in_transit)]))
+    assert 0.008 <= measured_depth <= 0.012, (
+        "celerite depth {0:.6f} outside [0.008, 0.012]".format(measured_depth)
+    )
 
 def test_rejects_invalid_inputs_before_creating_outputs(tmp_path):
     # Arrange

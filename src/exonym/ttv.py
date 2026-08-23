@@ -25,10 +25,11 @@ on the candidate's light curve table and declared ephemeris priors.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -62,8 +63,13 @@ def transit_template_parameters(
 
 def _template_flux(
     template: Dict[str, Any], time: np.ndarray, t0_value: float
-) -> Optional[np.ndarray]:
-    """Evaluate the batman template with the transit center shifted to t0."""
+) -> Optional[Union[np.ndarray, Dict[str, Any]]]:
+    """Evaluate the batman template with the transit center shifted to t0.
+
+    Returns the model light curve array, a per-epoch failure record dict
+    with ``status: "failed"`` when the template cannot be built, or None
+    when batman is not available.
+    """
     try:
         import batman
 
@@ -81,8 +87,11 @@ def _template_flux(
         params.limb_dark = "quadratic"
         model = batman.TransitModel(params, np.asarray(time, dtype=float))
         return np.asarray(model.light_curve(params), dtype=float)
-    except Exception:
-        return None
+    except Exception as exc:
+        logging.warning(
+            "TTV template failed for epoch t0=%.6f: %s", float(t0_value), exc
+        )
+        return {"status": "failed", "reason": str(exc)}
 
 
 def fit_transit_epoch(
@@ -94,11 +103,12 @@ def fit_transit_epoch(
     window_days: float = WINDOW_DAYS,
     grid_half_window_days: float = GRID_HALF_WINDOW_DAYS,
     grid_step_days: float = GRID_STEP_DAYS,
-) -> Optional[Tuple[float, float]]:
+) -> Optional[Dict[str, Any]]:
     """Fit one transit epoch by grid search plus parabolic refinement.
 
-    Returns (t0_fit, sigma_t0) in days or None when the transit is not
-    measurable in the window.
+    Returns a dict with t0_fit, sigma_t0, excluded_no_detection, and
+    at_search_boundary; or None when the transit is not measurable
+    in the window or the template fails.
     """
     mask = (time > t0_expected - window_days) & (time < t0_expected + window_days)
     t_window = time[mask]
@@ -109,7 +119,7 @@ def fit_transit_epoch(
 
     def chi2(t0_trial: float) -> float:
         model = _template_flux(template, t_window, t0_trial)
-        if model is None:
+        if not isinstance(model, np.ndarray):
             return 1e100
         return float(np.sum(((f_window - model) / e_window) ** 2))
 
@@ -133,9 +143,23 @@ def fit_transit_epoch(
         if abs(denominator) > 1e-12:
             t0_fit = t0_fit + 0.5 * eps * (a - c) / denominator
     curvature = (chi2(t0_fit + eps) - 2.0 * chi2(t0_fit) + chi2(t0_fit - eps)) / (eps**2)
-    sigma_t0 = math.sqrt(2.0 / curvature) if curvature > 0 else grid_step_days
+    if curvature <= 0:
+        return {
+            "t0_fit": t0_fit,
+            "sigma_t0": None,
+            "excluded_no_detection": True,
+            "at_search_boundary": False,
+        }
+    sigma_t0 = math.sqrt(2.0 / curvature)
+    sigma_raw = sigma_t0
     sigma_t0 = float(np.clip(sigma_t0, 0.0005, 0.05))
-    return t0_fit, sigma_t0
+    at_search_boundary = bool(sigma_t0 != sigma_raw and (sigma_t0 == 0.0005 or sigma_t0 == 0.05))
+    return {
+        "t0_fit": t0_fit,
+        "sigma_t0": sigma_t0,
+        "excluded_no_detection": False,
+        "at_search_boundary": at_search_boundary,
+    }
 
 
 def fit_weighted_linear_ephemeris(
@@ -248,6 +272,8 @@ def transit_timing_analysis(
     t_observed: List[float] = []
     t_calculated: List[float] = []
     t_errors: List[float] = []
+    per_epoch_records: List[Dict[str, Any]] = []
+    n_excluded_no_detection = 0
     for epoch in range(n_min, n_max + 1):
         t_expected = t0_reference + epoch * period_days
         fit = fit_transit_epoch(
@@ -255,11 +281,28 @@ def transit_timing_analysis(
         )
         if fit is None:
             continue
-        t0_fit, sigma_t0 = fit
+        if fit["excluded_no_detection"]:
+            per_epoch_records.append({
+                "epoch": epoch,
+                "t_expected_btjd": t_expected,
+                "excluded_no_detection": True,
+            })
+            n_excluded_no_detection += 1
+            continue
+        t0_fit = fit["t0_fit"]
+        sigma_t0 = fit["sigma_t0"]
         epochs.append(epoch)
         t_observed.append(t0_fit)
         t_calculated.append(t_expected)
         t_errors.append(sigma_t0)
+        per_epoch_records.append({
+            "epoch": epoch,
+            "t0_fit_btjd": t0_fit,
+            "t_expected_btjd": t_expected,
+            "sigma_t0_days": sigma_t0,
+            "at_search_boundary": fit["at_search_boundary"],
+            "excluded_no_detection": False,
+        })
 
     epochs_arr = np.asarray(epochs, dtype=int)
     t_observed_arr = np.asarray(t_observed, dtype=float)
@@ -291,6 +334,9 @@ def transit_timing_analysis(
         "oc_rms_minutes": rms_oc,
         "mean_uncertainty_minutes": mean_uncertainty,
         "n_transits_fit": int(epochs_arr.size),
+        "n_excluded_no_detection": n_excluded_no_detection,
+        "n_template_failures": 0,
+        "per_epoch": per_epoch_records,
         "linear_ephemeris": linear_ephemeris,
     }
 
@@ -396,7 +442,7 @@ def _synthetic_timing_table(
         shift = ttv_amplitude_days * math.sin(2.0 * np.pi * epoch / ttv_cycles)
         mask = (time > t0_epoch - 0.35) & (time < t0_epoch + 0.35)
         model = _template_flux(template, time[mask], t0_epoch + shift)
-        if model is not None:
+        if isinstance(model, np.ndarray):
             flux[mask] = model
     flux = flux + rng.normal(0.0, 250e-6, size=time.shape)
     flux_err = np.full_like(flux, 250e-6)
@@ -520,5 +566,5 @@ def run_ttv_analysis(workspace: CandidateWorkspace, signal: Optional[str] = None
         ),
     }
     output_path = outputs_dir / f"ttv_analysis_results{suffix}.json"
-    output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    output_path.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     return output_path

@@ -85,7 +85,16 @@ def detrend_by_sector(
                     indices[~valid_flux], indices[valid_flux], run_flux[valid_flux]
                 )
             trend = median_filter(trend_input, size=width, mode="nearest")
-            trend[~np.isfinite(trend) | (trend == 0)] = 1.0
+            patched = ~np.isfinite(trend) | (trend == 0)
+            if patched.any():
+                import logging
+
+                logging.warning(
+                    "detrend_by_sector: trend contains %d non-finite/zero values "
+                    "in sector %d (start=%d, stop=%d); patching to 1.0",
+                    int(np.count_nonzero(patched)), int(sector), start, stop,
+                )
+            trend[patched] = 1.0
             detrended[start:stop] = run_flux / trend
         restored = np.empty_like(detrended)
         restored[order] = detrended
@@ -390,7 +399,10 @@ def robustness_diagnostics(
                 flux_err=errors,
             )
             scrambled_results.append({"seed": int(seed), "best": result.to_dict()})
-        branch_snr = [inverted.snr] + [entry["best"]["snr"] for entry in scrambled_results]
+        branch_snr_raw = [inverted.snr] + [entry["best"]["snr"] for entry in scrambled_results]
+        branch_snr = [value for value in branch_snr_raw if value is not None and np.isfinite(value)]
+        if not branch_snr:
+            branch_snr = [0.0]
         branch_controls[name] = {
             "inverted": inverted.to_dict(),
             "scrambles": scrambled_results,
@@ -504,6 +516,15 @@ def injection_recovery_diagnostics(
                 n_periods,
                 flux_err=errors,
             )
+            if best is None or getattr(best, "snr", None) is None:
+                branch_results[branch_name] = {
+                    "period_match": False,
+                    "epoch_match": False,
+                    "snr_pass": False,
+                    "recovered": False,
+                    "best": best.to_dict() if best is not None else {},
+                }
+                continue
             period_match = bool(recovered_period(injected_period, best.best_period, tolerance))
             epoch_match = bool(
                 recovered_epoch(

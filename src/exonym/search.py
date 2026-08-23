@@ -25,6 +25,7 @@ time-series without hardcoded candidate designations or ephemerides:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import hashlib
 import importlib.metadata
@@ -812,14 +813,22 @@ def compute_linear_ephemeris_residuals(
     transit_times_btjd: Sequence[float],
     period_days: float,
     epoch_btjd: float,
-) -> List[float]:
-    """Return list of (O - C) TTV timing residuals in minutes."""
+) -> Dict[str, Any]:
+    """Return dict with ``residuals_minutes`` (list of O−C) and ``n_nonfinite_midtimes``."""
     if period_days <= 0:
         raise ValueError("period_days must be positive")
     residuals_min = []
+    n_nonfinite_midtimes = 0
     for t_obs in transit_times_btjd:
-        n_epoch = round((float(t_obs) - float(epoch_btjd)) / float(period_days))
+        t_obs_float = float(t_obs)
+        if not np.isfinite(t_obs_float):
+            logging.warning(
+                "Skipping non-finite mid-time %.6f in O-C residual computation", t_obs_float
+            )
+            n_nonfinite_midtimes += 1
+            continue
+        n_epoch = round((t_obs_float - float(epoch_btjd)) / float(period_days))
         t_calc = float(epoch_btjd) + n_epoch * float(period_days)
-        omc_days = float(t_obs) - t_calc
+        omc_days = t_obs_float - t_calc
         residuals_min.append(round(omc_days * 1440.0, 4))
-    return residuals_min
+    return {"residuals_minutes": residuals_min, "n_nonfinite_midtimes": n_nonfinite_midtimes}

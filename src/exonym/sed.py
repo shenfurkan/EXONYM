@@ -22,6 +22,7 @@ parallaxes are loaded dynamically from the candidate workspace.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from datetime import datetime, timezone
 from pathlib import Path
@@ -119,7 +120,11 @@ def load_atmosphere_grid_model(
         from scipy.interpolate import griddata
 
         frame = pd.read_csv(path)
-    except Exception:
+    except (ImportError, OSError, ValueError, pd.errors.ParserError) as exc:
+        logging.warning("atmosphere grid load failed for %s: %s", path.name, exc)
+        return None
+    except Exception as exc:
+        logging.warning("atmosphere grid load failed for %s: %s", path.name, exc)
         return None
     required = ("teff_k", "logg_cgs", "feh")
     if not all(column in frame.columns for column in required):
@@ -403,6 +408,7 @@ def run_sed_fit(workspace: CandidateWorkspace) -> Path:
     )
     if grid_model is not None:
         grid_used = True
+    grid_load_failed = not grid_used and (workspace.path / "data" / "external" / "atmosphere_grid.csv").is_file()
 
     fit = (
         _fit_grid(observations, grid_model, stellar)  # type: ignore[arg-type]
@@ -419,6 +425,7 @@ def run_sed_fit(workspace: CandidateWorkspace) -> Path:
         "scientific_status": "exploratory-color-fit",
         "validation_eligible": False,
         "grid_used": grid_used,
+        "grid_load_failed": grid_load_failed,
         "grid_source": (
             "candidate-data/external/atmosphere_grid.csv" if grid_used else "blackbody-fallback"
         ),
@@ -438,7 +445,7 @@ def run_sed_fit(workspace: CandidateWorkspace) -> Path:
         ],
     }
     output_path = outputs_dir / "sed_fit_results.json"
-    output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    output_path.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     if samples is not None:
         np.save(str(outputs_dir / "sed_fit_chain.npy"), samples)
     return output_path

@@ -531,5 +531,5 @@ def run_stellar_activity(workspace: CandidateWorkspace) -> Path:
         ),
     }
     output_path = outputs_dir / "stellar_activity_results.json"
-    output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    output_path.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     return output_path

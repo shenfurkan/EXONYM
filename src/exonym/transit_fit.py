@@ -988,6 +988,7 @@ def run_mcmc_transit_fit(
     use_ldtk_prior: bool = False,
     sampler: str = "emcee",
     detrending_method: Optional[str] = None,
+    dlogz_tolerance: float = 0.5,
 ) -> Path:
     """Run an emcee or dynesty transit fit and write the historical output paths."""
     signal = validate_signal_suffix(signal)
@@ -1000,6 +1001,7 @@ def run_mcmc_transit_fit(
             signal=signal,
             use_ldtk_prior=use_ldtk_prior,
             detrending_method=detrending_method,
+            dlogz_tolerance=dlogz_tolerance,
         )
     if sampler != "emcee":
         raise ValueError("sampler must be one of: emcee, dynesty")
@@ -1236,7 +1238,7 @@ def run_mcmc_transit_fit(
     }
     suffix = f".{signal.lstrip('.')}" if signal else ""
     output_path = outputs_dir / f"mcmc_transit_fit{suffix}.json"
-    output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    output_path.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     np.save(str(outputs_dir / f"mcmc_transit_fit_chain{suffix}.npy"), chain)
     return output_path
 
@@ -1249,6 +1251,7 @@ def _run_dynesty_transit_fit(
     signal: Optional[str],
     use_ldtk_prior: bool,
     detrending_method: Optional[str],
+    dlogz_tolerance: float = 0.5,
 ) -> Path:
     """Run optional dynamic nested sampling with an explicit normalized prior transform."""
     signal = validate_signal_suffix(signal)
@@ -1309,7 +1312,6 @@ def _run_dynesty_transit_fit(
     )
     ndim = _parameter_count(eccentric, n_sectors)
     initial_live_points = max(2 * ndim + 1, min(500, max(50, n_samples // 10)))
-    max_likelihood_calls = max(n_samples, initial_live_points)
     nested_sampler = dynesty.DynamicNestedSampler(
         lambda theta: _log_likelihood(
             theta,
@@ -1328,7 +1330,7 @@ def _run_dynesty_transit_fit(
     )
     nested_sampler.run_nested(
         nlive_init=initial_live_points,
-        maxcall=max_likelihood_calls,
+        dlogz=dlogz_tolerance,
         print_progress=False,
     )
     results = nested_sampler.results
@@ -1397,7 +1399,9 @@ def _run_dynesty_transit_fit(
         },
         "diagnostics": {
             "initial_live_points": int(initial_live_points),
-            "max_likelihood_calls": int(max_likelihood_calls),
+            "sampler_niter": int(getattr(results, "niter", 0)),
+            "sampler_stop_criterion": str(getattr(results, "stop_iteration", "unknown")),
+            "dlogz_tolerance": float(dlogz_tolerance),
             "iterations": int(getattr(results, "niter", samples.shape[0])),
             "likelihood_calls": int(np.sum(np.asarray(getattr(results, "ncall", 0)))),
             "sampling_efficiency_percent": sampling_efficiency,
@@ -1433,7 +1437,7 @@ def _run_dynesty_transit_fit(
     outputs_dir.mkdir(parents=True, exist_ok=True)
     suffix = f".{signal.lstrip('.')}" if signal else ""
     output_path = outputs_dir / f"mcmc_transit_fit{suffix}.json"
-    output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    output_path.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     np.save(str(outputs_dir / f"mcmc_transit_fit_chain{suffix}.npy"), chain)
     return output_path
 

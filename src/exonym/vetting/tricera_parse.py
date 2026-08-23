@@ -494,6 +494,6 @@ def run_triceratops_simulation(
     }
     suffix = f".{signal.lstrip('.')}" if signal else ""
     report_path = outputs_dir / f"triceratops_report{suffix}.json"
-    report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    report_path.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
 
     return report_path
