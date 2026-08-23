@@ -1,17 +1,89 @@
 """Target-neutral MCMC transit light curve fitter.
 
-Fits phase-folded transit light curves with batman (Mandel & Agol 2002):
-- Free Kipping (2013) limb darkening (q1, q2 uninformative triangular sampling).
-- Stellar-density locking: a/Rs derived directly from Kepler's third law
-  (Seager & Mallen-Ornelas 2003, Sozzetti et al. 2007) and orbital period.
-- Parameterized eccentric orbits via (sqrt(e)*cos(omega), sqrt(e)*sin(omega))
-  to avoid coordinate singularities at e=0 (Eastman et al. 2013).
-- Gaussian log-likelihood with per-cadence photometric jitter parameter.
-- Posterior sampling via Goodman & Weare (2010) affine-invariant ensemble sampler
-  (emcee) or optional dynamic nested sampling (dynesty).
+Mathematical Formulation
+------------------------
+The transit flux is evaluated with batman (Mandel & Agol 2002), which computes
+an analytic light curve for a quadratic limb-darkened star occulted by an opaque
+spherical planet. The specific intensity profile is
+
+.. math::
+
+    I(\\mu) / I(1) = 1 - u_1 (1 - \\mu) - u_2 (1 - \\mu)^2
+
+where :math:`\\mu = \\cos\\theta` and :math:`\\theta` is the angle between the
+line of sight and the local surface normal (Claret 2000).  The free limb-darkening
+parameters are sampled in Kipping (2013) coordinates
+
+.. math::
+
+    q_1 = (u_1 + u_2)^2, \\qquad
+    q_2 = \\frac{u_1}{2(u_1 + u_2)}
+
+with the inverse transformation
+
+.. math::
+
+    u_1 = 2\\sqrt{q_1}\\,q_2, \\qquad
+    u_2 = \\sqrt{q_1}\\,(1 - 2q_2).
+
+The scaled semi-major axis ``a / R_*`` is derived from the mean stellar density
+via Kepler's third law (Seager & Mallen-Ornelas 2003; Sozzetti et al. 2007):
+
+.. math::
+
+    (a / R_*)^3 = \\frac{G \\, P^2 \\, \\rho_*}{3\\pi}
+
+where :math:`P` is the orbital period in seconds and :math:`\\rho_*` is the
+mean stellar density in cgs.  This density-locking strategy reduces the
+degeneracy between ``a / R_*`` and ``R_p / R_*``.
+
+Eccentric orbits are parameterized via :math:`(\\sqrt{e}\\cos\\omega,\\;
+\\sqrt{e}\\sin\\omega)` (Eastman et al. 2013) to avoid the coordinate
+singularity at :math:`e = 0`.  For circular orbits, :math:`e = 0` and
+:math:`\\omega = 90^\\circ` are fixed.
+
+The log-likelihood assumes independent Gaussian photometric errors with a
+fitted additive jitter term (Foreman-Mackey et al. 2013):
+
+.. math::
+
+    \\ln L = -\\frac{1}{2} \\sum_{i=1}^N \\left[
+        \\frac{(f_i - f_{\\rm model}(t_i))^2}{\\sigma_i^2 + \\sigma_j^2}
+        + \\ln\\bigl(2\\pi(\\sigma_i^2 + \\sigma_j^2)\\bigr)
+    \\right]
+
+where :math:`\\sigma_j = e^{\\ln\\sigma_j}` is the jitter fitted in
+natural-log space to enforce positivity.
+
+Posterior sampling is performed with either the Goodman & Weare (2010)
+affine-invariant ensemble sampler via ``emcee`` or dynamic nested sampling
+via ``dynesty`` (Speagle 2020).  The latter reports the log evidence
+:math:`\\ln Z` and its estimated numerical uncertainty; these are descriptive
+and are **not** validation probabilities.
+
+Astrophysical Rationale
+-----------------------
+- The density prior anchors ``a / R_*`` to the independently measured stellar
+  parameters, preventing the fit from floating into unphysical regions of
+  parameter space where a grazing eclipse of a giant star mimics a planet.
+- Kipping coordinates ensure uniform sampling over the physically valid
+  region of the quadratic limb-darkening triangle.
+- Eccentricity is optional so that circular-orbit fits can serve as a
+  sensitivity baseline before incurring the extra degrees of freedom.
 
 Contains no target constants or hardcoded candidate parameters; all stellar priors,
 ephemerides, and photometric time-series are loaded dynamically from the candidate workspace.
+
+References
+----------
+- Mandel & Agol, *ApJL* 580, L171 (2002)
+- Kipping, *MNRAS* 435, 2152 (2013)
+- Seager & Mallen-Ornelas, *ApJ* 585, 1038 (2003)
+- Sozzetti et al., *ApJ* 664, 1190 (2007)
+- Eastman et al., *PASP* 125, 83 (2013)
+- Goodman & Weare, *Comm. Appl. Math. Comput. Sci.* 5, 65 (2010)
+- Speagle, *MNRAS* 493, 3132 (2020)
+- Foreman-Mackey et al., *PASP* 125, 306 (2013)
 """
 
 from __future__ import annotations
@@ -33,12 +105,23 @@ from .lightcurve import bin_phase_folded_flux, kipping_to_quadratic_limb_darkeni
 from .workspace import CandidateWorkspace, validate_signal_suffix
 
 # Physical constants in CGS units
+# The gravitational constant is the CODATA 2018 value.
 G_CGS = 6.67430e-8          # Gravitational constant (cm^3 g^-1 s^-2)
-RHO_SUN_GCM3 = 1.408        # Mean solar density (g cm^-3)
+RHO_SUN_GCM3 = 1.408        # Mean solar density (g cm^-3)  # ASTROPHYSICAL_HEURISTIC: solar mean from IAU 2015 nominal solar constants
+# ASTROPHYSICAL_HEURISTIC: phase-folded crop window twice the nominal TESS
+# transit-duration envelope; ensures out-of-transit baseline is captured for
+# normalization while keeping far-out-of-eclipse noise from biasing the fit.
 WINDOW_HALF_HOURS = 13.0    # Folded light curve crop window half-width (hours)
+# ASTROPHYSICAL_HEURISTIC: 8-minute bins for median-binned phase-folded
+# visualization only; the likelihood itself operates on native cadence.
 BIN_MINUTES = 8.0           # Default phase-binning resolution (minutes)
+# NUMERICAL_GUARD: supersampling factor 7 is sufficient for the batman
+# analytic transit model with quadratic limb darkening at TESS cadence
+# (Kipping 2010 recommends >= 5 for precision better than 10 ppm).
 SUPERSAMPLE_FACTOR = 7      # Numerical exposure integration sub-sampling factor
 EXPTIME_SECONDS = 120.0     # Nominal TESS 2-minute SPOC cadence (seconds)
+# SCIENTIFIC_BOUNDARY: the folded/binned display uses a coarser effective
+# integration time; this is not the native-cadence posterior exposure.
 FITTED_BIN_EXPOSURE_SECONDS = BIN_MINUTES * 60.0
 
 # Parameter vectors for circular and eccentric orbits
@@ -58,25 +141,53 @@ PARAMETER_NAMES_ECCENTRIC = PARAMETER_NAMES_CIRCULAR + (
 
 
 def stellar_density_a_rs(rho_solar: float, period_days: float) -> float:
-    """Calculate scaled semimajor axis (a/R_star) from mean stellar density and orbital period.
+    """Calculate scaled semimajor axis (a / R_star) from mean stellar density.
 
-    From Kepler's Third Law (Seager & Mallen-Ornelas 2003):
-        (a / R_star)^3 = (G * P^2 * rho_star) / (3 * pi)
-    
+    Mathematical Formulation
+    ------------------------
+    From Kepler's Third Law (Seager & Mallen-Ornelas 2003, eq. 4):
+
+    .. math::
+
+        \\left(\\frac{a}{R_*}\\right)^3
+        = \\frac{G \\, P^2 \\, \\rho_*}{3\\pi}
+
+    where :math:`G = 6.67430 \\times 10^{-8}` cm\ :sup:`3` g\ :sup:`-1`
+    s\ :sup:`-2`, :math:`P` is the orbital period in seconds, and
+    :math:`\\rho_*` is the mean stellar density in g cm\ :sup:`-3`.  The solar
+    density normalisation :math:`\\rho_\\odot = 1.408` g cm\ :sup:`-3` acts as
+    a convenient scaling.
+
+    Astrophysical Rationale
+    -----------------------
+    This relation removes the strong degeneracy between ``R_p / R_*`` and
+    ``a / R_*`` that exists when both are floated freely (Sozzetti et al.
+    2007).  By locking ``a / R_*`` to the independently constrained stellar
+    density, the transit shape information is channelled into the radius
+    ratio and impact parameter.
+
     Parameters
     ----------
     rho_solar : float
-        Mean stellar density normalized to solar density (rho_star / rho_sun).
+        Mean stellar density in solar units (:math:`\\rho_* / \\rho_\\odot`).
+        Must be > 0.
     period_days : float
-        Orbital period in days.
+        Orbital period in days.  Must be > 0.
 
     Returns
     -------
     float
-        Scaled semimajor axis dimensionless ratio (a / R_star).
+        Dimensionless scaled semi-major axis ``a / R_*``.
+
+    Raises
+    ------
+    ValueError
+        If either argument is non-positive.
     """
     if rho_solar <= 0 or period_days <= 0:
         raise ValueError("stellar density and period must be positive")
+    # NUMERICAL_GUARD: convert to CGS (period_days * 86400 s/day) before
+    # evaluating the cube root; the exponent 1/3 is exact.
     rho_gcm3 = rho_solar * RHO_SUN_GCM3
     period_seconds = period_days * 86400.0
     return (
@@ -85,7 +196,43 @@ def stellar_density_a_rs(rho_solar: float, period_days: float) -> float:
 
 
 def conjunction_distance_a_rs(a_rs: float, eccentricity: float, omega_deg: float) -> Optional[float]:
-    """Return the planet-star separation in stellar radii at inferior conjunction."""
+    """Return planet-star separation at inferior conjunction in stellar radii.
+
+    Mathematical Formulation
+    ------------------------
+    For a Keplerian orbit with semi-major axis :math:`a`, eccentricity
+    :math:`e`, and argument of periastron :math:`\\omega`, the star-planet
+    separation at true anomaly :math:`f` is
+
+    .. math::
+
+        r(f) = \\frac{a (1 - e^2)}{1 + e \\cos f}.
+
+    At inferior conjunction (primary transit), :math:`f = \\pi/2 - \\omega`,
+    giving (Winn 2010, eq. 20):
+
+    .. math::
+
+        r_{\\rm conj} = \\frac{a (1 - e^2)}{1 + e \\sin \\omega}.
+
+    The returned value is :math:`r_{\\rm conj} / R_*`.
+
+    Parameters
+    ----------
+    a_rs : float
+        Dimensionless semi-major axis ``a / R_*``.  Must be > 0.
+    eccentricity : float
+        Orbital eccentricity, :math:`0 \\le e < 1`.
+    omega_deg : float
+        Argument of periastron :math:`\\omega` in degrees.
+
+    Returns
+    -------
+    float or None
+        Conjunction separation in stellar radii, or None if inputs are
+        non-finite, non-physical, or the denominator is non-positive.
+    """
+    # NUMERICAL_GUARD: explicit finiteness and domain checks before division.
     if (
         not math.isfinite(a_rs)
         or not math.isfinite(eccentricity)
@@ -95,6 +242,8 @@ def conjunction_distance_a_rs(a_rs: float, eccentricity: float, omega_deg: float
     ):
         return None
     denominator = 1.0 + eccentricity * math.sin(math.radians(omega_deg))
+    # NUMERICAL_GUARD: protect against zero or negative denominator which
+    # would correspond to a non-physical conjunction geometry.
     if denominator <= 0:
         return None
     return a_rs * (1.0 - eccentricity**2) / denominator
@@ -103,10 +252,49 @@ def conjunction_distance_a_rs(a_rs: float, eccentricity: float, omega_deg: float
 def inclination_deg_from_impact_parameter(
     a_rs: float, impact_parameter: float, eccentricity: float = 0.0, omega_deg: float = 90.0
 ) -> Optional[float]:
-    """Convert conjunction impact parameter to inclination for a Keplerian orbit."""
+    """Convert conjunction impact parameter to orbital inclination.
+
+    Mathematical Formulation
+    ------------------------
+    The transit impact parameter :math:`b` is defined as the projected
+    sky-plane separation at inferior conjunction in units of :math:`R_*`:
+
+    .. math::
+
+        b = \\frac{r_{\\rm conj}}{R_*} \\cos i,
+
+    where :math:`r_{\\rm conj}` is the orbital separation at conjunction
+    (see :func:`conjunction_distance_a_rs`).  Inverting,
+
+    .. math::
+
+        i = \\arccos\\!\\left(\\frac{b}{r_{\\rm conj} / R_*}\\right).
+
+    For circular orbits (:math:`e = 0`), :math:`r_{\\rm conj} / R_* = a / R_*`
+    and :math:`b = (a/R_*) \\cos i`.
+
+    Parameters
+    ----------
+    a_rs : float
+        Dimensionless semi-major axis ``a / R_*``.
+    impact_parameter : float
+        Transit impact parameter :math:`b`, :math:`0 \\le b`.
+    eccentricity : float, optional
+        Orbital eccentricity (default 0).
+    omega_deg : float, optional
+        Argument of periastron in degrees (default 90).
+
+    Returns
+    -------
+    float or None
+        Orbital inclination in degrees, or None if the geometry is
+        unphysical (e.g., :math:`b` exceeds the conjunction separation).
+    """
     conjunction_distance = conjunction_distance_a_rs(a_rs, eccentricity, omega_deg)
     if conjunction_distance is None or not math.isfinite(impact_parameter) or impact_parameter < 0:
         return None
+    # NUMERICAL_GUARD: cos(i) > 1 corresponds to non-transiting geometry;
+    # the upper edge case cos(i) = 0 (i = 90 deg) is allowed.
     cosine = impact_parameter / conjunction_distance
     if not 0.0 <= cosine < 1.0:
         return None
@@ -126,12 +314,60 @@ def batman_transit_flux(
     omega_deg: float = 90.0,
     exposure_seconds: float = FITTED_BIN_EXPOSURE_SECONDS,
 ) -> Optional[np.ndarray]:
-    """Evaluate a batman quadratic limb-darkening model at transit-relative phase.
+    """Evaluate a batman quadratic limb-darkening transit model.
 
-    ``a_rs`` remains the Keplerian semimajor axis expected by batman. For an
-    eccentric orbit, ``impact_parameter`` is converted through the
-    conjunction-distance relation before setting the inclination.
+    This function wraps `batman.TransitModel` (Kreidberg 2015), which
+    implements the analytic occultation formalism of Mandel & Agol (2002)
+    for a uniform source with quadratic limb darkening.
+
+    The Kipping (2013) coordinates ``(q1, q2)`` are transformed back to
+    standard quadratic coefficients ``(u1, u2)`` via
+    :func:`kipping_to_quadratic_limb_darkening` before being passed to batman.
+
+    For eccentric orbits, the impact parameter is converted to inclination
+    through the conjunction-distance relation (see
+    :func:`inclination_deg_from_impact_parameter`), ensuring the Keplerian
+    geometry is consistent with the supplied eccentricity and argument of
+    periastron.
+
+    Parameters
+    ----------
+    phase_days : array-like of float
+        Transit-relative times in days, centred such that mid-transit is at
+        phase = 0.
+    period_days : float
+        Orbital period in days.
+    rp_rs : float
+        Planet-to-star radius ratio :math:`R_p / R_*`.
+    a_rs : float
+        Dimensionless semi-major axis ``a / R_*`` (the Keplerian value
+        expected by batman; eccentric geometry is handled via inclination).
+    impact_parameter : float
+        Transit impact parameter at inferior conjunction.
+    q1, q2 : float
+        Kipping (2013) limb-darkening parameters, each in ``(0.01, 0.99)``
+        in practice.
+    baseline : float
+        Out-of-transit flux normalization, applied multiplicatively.
+    eccentricity : float, optional
+        Orbital eccentricity (default 0).
+    omega_deg : float, optional
+        Argument of periastron in degrees (default 90).  Irrelevant when
+        ``eccentricity == 0``.
+    exposure_seconds : float, optional
+        Effective exposure integration time in seconds.  The ``batman``
+        supersampling is performed in units of days, so this value is
+        divided by 86400 internally.
+
+    Returns
+    -------
+    numpy.ndarray or None
+        The transit model flux at each phase point, or None if the parameter
+        combination produces a non-physical geometry, the inclination cannot
+        be computed, or batman raises an exception.
     """
+    # NUMERICAL_GUARD: non-positive exposure time prevents batman's
+    # supersampling integrator from running.
     if not math.isfinite(exposure_seconds) or exposure_seconds <= 0:
         return None
     inclination_deg = inclination_deg_from_impact_parameter(
@@ -142,18 +378,21 @@ def batman_transit_flux(
     try:
         import batman
 
+        # Kipping (2013) inverse transform to standard quadratic coefficients.
         u1, u2 = kipping_to_quadratic_limb_darkening(q1, q2)
         params = batman.TransitParams()
-        params.t0 = 0.0
+        params.t0 = 0.0                      # phase-folded: mid-transit at zero
         params.per = period_days
         params.rp = rp_rs
-        params.a = a_rs
-        params.inc = inclination_deg
+        params.a = a_rs                      # Keplerian semi-major axis
+        params.inc = inclination_deg         # derived from b via conjunction distance
         params.ecc = eccentricity
         params.w = omega_deg
         params.u = [u1, u2]
         params.limb_dark = "quadratic"
 
+        # NUMERICAL_GUARD: SUPERSAMPLE_FACTOR = 7 sub-samples the exposure
+        # to approximate finite-integration-time smearing (Kipping 2010).
         model = batman.TransitModel(
             params,
             np.asarray(phase_days, dtype=float),
@@ -161,9 +400,15 @@ def batman_transit_flux(
             exp_time=float(exposure_seconds) / 86400.0,
         )
 
+        # Mandel & Agol (2002) analytic flux evaluation.
         flux = np.asarray(model.light_curve(params), dtype=float)
+        # SCIENTIFIC_BOUNDARY: baseline scaling is a multiplicative
+        # out-of-transit normalization, not a calibrated per-sector
+        # contamination correction.
         return baseline * flux
     except Exception:
+        # batman may throw for extreme parameter combinations;
+        # return None to signal a non-finite likelihood evaluation.
         return None
 
 
@@ -174,7 +419,43 @@ def _folded_binned_data(
     window_half_hours: float = WINDOW_HALF_HOURS,
     bin_minutes: float = BIN_MINUTES,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Phase-fold and median-bin a light curve around the transit window."""
+    """Phase-fold and median-bin a light curve around the transit window.
+
+    This utility delegates to :func:`bin_phase_folded_flux` for the
+    phase-folding and median-binning logic, then filters the output to
+    retain only finite, positive-uncertainty bins within the specified
+    window.
+
+    Parameters
+    ----------
+    time : array-like of float
+        Time stamps (BTJD).
+    flux : array-like of float
+        Normalized relative flux.
+    ephemeris : dict
+        Must contain ``period_days`` (float, > 0) and ``epoch_btjd`` (float).
+    window_half_hours : float, optional
+        Half-width of the transit phase window in hours.
+    bin_minutes : float, optional
+        Bin width in minutes for median binning.
+
+    Returns
+    -------
+    centers_days : ndarray
+        Median-binned phase centres in days relative to mid-transit.
+    binned_flux : ndarray
+        Median flux in each bin.
+    binned_error : ndarray
+        Standard error of the mean in each bin.
+
+    Raises
+    ------
+    ValueError
+        If fewer than 20 valid bins survive the quality filter.
+    """
+    # SCIENTIFIC_BOUNDARY: bin_phase_folded_flux performs median binning
+    # for visualisation and descriptive fit speed; the native-cadence
+    # likelihood path uses _native_transit_window_data instead.
     centers_hours, binned_flux, binned_error = bin_phase_folded_flux(
         time,
         flux,
@@ -183,12 +464,17 @@ def _folded_binned_data(
         limit_hours=window_half_hours,
         bin_minutes=bin_minutes,
     )
+    # NUMERICAL_GUARD: require finite values and positive uncertainties
+    # so that the chi-squared computation downstream is well-defined.
     valid = (
         np.isfinite(centers_hours)
         & np.isfinite(binned_flux)
         & np.isfinite(binned_error)
         & (binned_error > 0)
     )
+    # ASTROPHYSICAL_HEURISTIC: 20 bins is a minimal sample for a
+    # quadratic limb-darkening fit with 5-7 free parameters; fewer bins
+    # risk degenerate posteriors.
     if int(valid.sum()) < 20:
         raise ValueError("insufficient binned transit window coverage")
     return (
@@ -210,6 +496,52 @@ def _native_transit_window_data(
     maps each cadence to a compact sector index, and estimates one integration
     time per sector from within-sector sampling intervals.  It does not mix
     cadences across sectors or phase-bin them before inference.
+
+    Mathematical Formulation
+    ------------------------
+    The transit-relative phase (in days) is computed as
+
+    .. math::
+
+        \\Delta t = \\bigl((t - t_0 + 0.5 P) \\bmod P\\bigr) - 0.5 P
+
+    where :math:`P` is the orbital period and :math:`t_0` is the reference
+    mid-transit epoch.  The effective crop window is the minimum of the
+    user-supplied ``window_half_hours`` and 2.5 times the ephemeris
+    duration to capture the full transit egress plus baseline.
+
+    Parameters
+    ----------
+    table : dict
+        Light curve table with keys ``time``, ``flux``, ``flux_err``,
+        ``sector``.
+    ephemeris : dict
+        Transit ephemeris with ``period_days``, ``epoch_btjd``,
+        ``duration_days``.
+    window_half_hours : float, optional
+        Crop window half-width in hours (default from module constant).
+
+    Returns
+    -------
+    phase_days : ndarray
+        Transit-relative time in days (centred at zero).
+    flux : ndarray
+        Normalized flux.
+    flux_err : ndarray
+        Flux uncertainty.
+    sector_index : ndarray of int
+        Zero-based compact sector index per cadence.
+    sector_labels : list of int
+        Original sector labels sorted ascending.
+    exposure_seconds_by_sector : ndarray
+        Median intra-sector cadence in seconds for each sector.
+
+    Raises
+    ------
+    ValueError
+        If the table or ephemeris is malformed, the effective window
+        yields fewer than 100 valid cadences, or a sector has no
+        measurable cadence.
     """
     try:
         time = np.asarray(table["time"], dtype=float)
@@ -236,6 +568,11 @@ def _native_transit_window_data(
     ):
         raise ValueError("candidate photometry cannot define a native transit window")
 
+    # ASTROPHYSICAL_HEURISTIC: window capped at 2.5 × duration ensures
+    # out-of-transit baseline is captured but very-long-period objects
+    # with WINDOW_HALF_HOURS >> duration still have a manageable data
+    # volume. The factor 2.5 provides ~1.75 durations of baseline on
+    # each side.
     effective_window = min(window_half_hours, max(2.5, duration_days * 24.0 * 2.5))
     phase_days = ((time - epoch_btjd + 0.5 * period_days) % period_days) - 0.5 * period_days
     valid = (
@@ -279,7 +616,30 @@ def _parameter_names(
     n_sectors: int = 1,
     sector_labels: Optional[Sequence[int]] = None,
 ) -> List[str]:
-    """Return the sampled-parameter names for one or more observed sectors."""
+    """Return the sampled-parameter names for one or more observed sectors.
+
+    For a single sector the layout is ``(rp_rs, log_rho_star,
+    impact_parameter, baseline, log_jitter, q1, q2 [, sqe_cosw, sqe_sinw])``.
+    When multiple sectors are passed, ``rp_rs``, ``log_rho_star``, and
+    ``impact_parameter`` are shared, but each sector receives its own
+    baseline parameter ``baseline_sector_<label>`` to absorb per-sector
+    normalization offsets.
+
+    Parameters
+    ----------
+    eccentric : bool
+        Whether the eccentricity components are included.
+    n_sectors : int, optional
+        Number of distinct observation sectors.
+    sector_labels : sequence of int, optional
+        Original sector labels for the baseline parameter names;
+        defaults to ``range(n_sectors)``.
+
+    Returns
+    -------
+    list of str
+        Ordered parameter names matching the theta vector layout.
+    """
     if n_sectors <= 0:
         raise ValueError("transit likelihood requires at least one sector")
     if n_sectors == 1:
@@ -296,7 +656,12 @@ def _parameter_names(
 
 
 def _parameter_count(eccentric: bool, n_sectors: int = 1) -> int:
-    """Return the number of sampled parameters for the selected sectors."""
+    """Return the number of sampled parameters for the selected sectors.
+
+    The count is ``6 + n_sectors`` for circular orbits (adding one baseline
+    per sector) or ``8 + n_sectors`` for eccentric orbits (adding two
+    :math:`(\\sqrt{e}\\cos\\omega, \\sqrt{e}\\sin\\omega)` components).
+    """
     return 6 + n_sectors + (2 if eccentric else 0)
 
 
@@ -312,6 +677,33 @@ def _initial_fit_parameters(
     ``log_rho_star`` is base-10 log density in solar units, while
     ``log_jitter`` is the natural log of normalized flux scatter because the
     likelihood recovers jitter as ``exp(log_jitter)``.
+
+    Mathematical Formulation
+    ------------------------
+    The initial radius ratio is seeded from the transit depth under the
+    approximation :math:`\\delta \\approx (R_p / R_*)^2`:
+
+    .. math::
+
+        R_p / R_* \\approx \\sqrt{\\delta} = \\sqrt{\\text{depth\\_ppm} \\times 10^{-6}}.
+
+    Parameters
+    ----------
+    depth_ppm : float
+        Transit depth in parts per million.
+    rho_prior_solar : float
+        Prior stellar density in solar units.
+    scatter : float
+        Flux scatter (standard deviation) used to seed log_jitter.
+    eccentric : bool
+        Whether eccentricity components are initialised.
+    n_sectors : int, optional
+        Number of observation sectors (default 1).
+
+    Returns
+    -------
+    ndarray
+        Initial parameter vector ordered as in :func:`_parameter_names`.
     """
     if (
         not math.isfinite(depth_ppm)
@@ -337,11 +729,50 @@ def _initial_fit_parameters(
 def _stellar_density_prior(stellar: Dict[str, Any]) -> Dict[str, float]:
     """Propagate candidate-supplied stellar mass and radius uncertainties.
 
+    Mathematical Formulation
+    ------------------------
+    Mean stellar density in solar units is
+
+    .. math::
+
+        \\rho_* / \\rho_\\odot = \\frac{M / M_\\odot}{(R / R_\\odot)^3}.
+
+    Assuming independent, symmetric errors :math:`\\sigma_M` and
+    :math:`\\sigma_R`, the first-order relative density uncertainty is
+    (Carroll & Ostlie, eq. 7.26):
+
+    .. math::
+
+        \\frac{\\sigma_\\rho}{\\rho}
+        = \\sqrt{\\left(\\frac{\\sigma_M}{M}\\right)^2
+               + \\left(\\frac{3\\sigma_R}{R}\\right)^2}.
+
+    This is converted to :math:`\\log_{10}` space via division by
+    :math:`\\ln(10)` to match the ``log_rho`` parameter convention.
+
     The fit needs symmetric one-sigma ``mass_solar_err`` and
     ``radius_solar_err`` values.  It approximates their errors as independent
     and propagates ``rho_star = M_star / R_star**3`` into base-10 log-density
     space.  No fixed generic density width is substituted when that evidence
     is absent.
+
+    Parameters
+    ----------
+    stellar : dict
+        Must contain ``mass_solar``, ``mass_solar_err``, ``radius_solar``,
+        ``radius_solar_err`` — all positive finite floats.
+
+    Returns
+    -------
+    dict
+        Keys: ``rho_solar`` (mean density in solar units), ``log10_sigma``
+        (:math:`\\log_{10}` uncertainty), plus the input mass and radius
+        values for provenance traceability.
+
+    Raises
+    ------
+    RuntimeError
+        If required keys are missing or produce a non-finite density prior.
     """
     try:
         mass_solar = float(stellar["mass_solar"])
@@ -377,7 +808,36 @@ def _stellar_density_prior(stellar: Dict[str, Any]) -> Dict[str, float]:
 
 
 def _load_ldtk_prior(workspace: CandidateWorkspace) -> Dict[str, Any]:
-    """Load one finite candidate-local quadratic LDTk prior for explicit use."""
+    """Load one finite candidate-local quadratic LDTk prior for explicit use.
+
+    Reads the output artifact written by ``exonym limb-darkening``, which
+    invokes LDTk (Parviainen & Aigrain 2015) to interpolate the Husser et al.
+    (2013) PHOENIX stellar atmosphere grid for quadratic limb-darkening
+    coefficients ``(u1, u2)`` and their uncertainties, using the candidate's
+    :math:`T_{\\rm eff}`, :math:`\\log g`, [Fe/H], and the specified
+    passband.
+
+    The prior is used to weight the Kipping-parameter likelihood via Gaussian
+    terms centred on the LDTk-predicted ``(u1, u2)`` values (see
+    :func:`_log_prior`).
+
+    Parameters
+    ----------
+    workspace : CandidateWorkspace
+        The candidate workspace.
+
+    Returns
+    -------
+    dict
+        Keys: ``u1``, ``u1_err``, ``u2``, ``u2_err`` (all finite floats),
+        ``path`` (relative path to the artifact).
+
+    Raises
+    ------
+    ValueError
+        If the artifact is missing, malformed, targets a different
+        candidate, or has non-positive uncertainties.
+    """
     path = workspace.path / "outputs" / "ldtk_quadratic_limb_darkening_prior.json"
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -417,6 +877,46 @@ def _neg_log_posterior(
     exposure_seconds_by_sector: Optional[np.ndarray] = None,
     n_sectors: int = 1,
 ) -> float:
+    """Return the negative log posterior for a single parameter vector.
+
+    This function computes
+
+    .. math::
+
+        -\\ln P(\\theta\\,|\\,D) = -\\ln L(D\\,|\\,\\theta) - \\ln P(\\theta)
+
+    and returns ``+inf`` whenever the prior or likelihood is non-finite,
+    which is the convention required by ``emcee`` and ``scipy.optimize``
+    minimisers.
+
+    Parameters
+    ----------
+    theta : ndarray
+        Parameter vector matching the layout from :func:`_parameter_names`.
+    phase_days : ndarray
+        Native-cadence transit-relative time in days.
+    flux : ndarray
+        Native-cadence normalized flux.
+    flux_err : ndarray
+        Native-cadence flux uncertainty.
+    ephemeris : dict
+        Transit ephemeris (``period_days``, ``epoch_btjd``).
+    rho_prior_solar : float
+        Prior mean density in solar units.
+    rho_prior_log10_sigma : float
+        Prior density width in :math:`\\log_{10}` space.
+    eccentric : bool
+        Whether the eccentricity components are active.
+    ldtk_prior : dict, optional
+        LDTk quadratic coefficient prior (see :func:`_load_ldtk_prior`).
+    sector_index, exposure_seconds_by_sector, n_sectors
+        Native-cadence sector descriptors.
+
+    Returns
+    -------
+    float
+        ``-ln P``, or ``+inf`` for non-finite values.
+    """
     log_prior = _log_prior(
         theta,
         rho_prior_solar,
@@ -447,7 +947,34 @@ def _neg_log_posterior(
 def _unpack_theta(
     theta: np.ndarray, eccentric: bool, n_sectors: int = 1
 ) -> Tuple[Any, ...]:
-    """Return physical parameters and one flux normalization per data sector."""
+    """Return physical parameters and one flux normalization per data sector.
+
+    Unpacks the flat parameter vector into named components:
+
+    - ``rp_rs``: planet-to-star radius ratio
+    - ``log_rho_star``: :math:`\\log_{10}(\\rho_* / \\rho_\\odot)`
+    - ``impact_parameter``: :math:`b` at conjunction
+    - ``baselines``: per-sector out-of-transit flux normalizations
+    - ``log_jitter``: :math:`\\ln \\sigma_j`, natural-log jitter
+    - ``q1, q2``: Kipping (2013) limb-darkening parameters
+    - ``sqe_cosw, sqe_sinw``: :math:`(\\sqrt{e}\\cos\\omega, \\sqrt{e}\\sin\\omega)`
+      (zero for circular orbits)
+
+    Parameters
+    ----------
+    theta : ndarray
+        Flat parameter vector.
+    eccentric : bool
+        Whether eccentricity components are present.
+    n_sectors : int, optional
+        Number of observation sectors.
+
+    Returns
+    -------
+    tuple
+        ``(rp_rs, log_rho_star, impact_parameter, baselines, log_jitter,
+        q1, q2, sqe_cosw, sqe_sinw)``.
+    """
     expected = _parameter_count(eccentric, n_sectors)
     theta = np.asarray(theta, dtype=float)
     if theta.shape != (expected,):
@@ -481,7 +1008,32 @@ def _log_prior(
     noise_scale: Optional[float] = None,
     n_sectors: int = 1,
 ) -> float:
-    """Evaluate parameter priors separately from the photometric likelihood."""
+    """Evaluate parameter priors separately from the photometric likelihood.
+
+    The prior encodes:
+
+    - **Kipping limb darkening**: uniform Dirichlet prior on ``(q1, q2)``
+      over the triangular support :math:`0 < u_1 + u_2 < 1`, which
+      automatically ensures physically valid quadratic limb-darkening
+      coefficients (Kipping 2013).
+    - **log_rho_star**: Gaussian prior centred on the candidate-local
+      stellar density with width propagated from mass and radius
+      uncertainties (see :func:`_stellar_density_prior`).
+    - **log_jitter**: weak Gaussian penalty with :math:`\\sigma = 1`
+      centred on the flux scatter, preventing the jitter from absorbing
+      the transit signal while remaining broad enough to not dominate
+      the posterior (Foreman-Mackey et al. 2013).
+    - **LDTk prior** (optional): Gaussian terms on ``(u1, u2)`` derived
+      from the candidate's limb-darkening table, anchored to the
+      Husser et al. (2013) PHOENIX grid via Parviainen & Aigrain (2015).
+    - **impact_parameter**: unbounded prior with a rectangular guard
+      at :math:`b \\le 1.2` allowing for grazing transits slightly
+      beyond the stellar limb.
+    - **eccentricity**: flat prior on :math:`(\\sqrt{e}\\cos\\omega,
+      \\sqrt{e}\\sin\\omega)` with physical bound :math:`e < 1`.
+
+    Returns ``-inf`` for any point outside the joint physical domain.
+    """
     if not np.all(np.isfinite(theta)):
         return -np.inf
     try:
@@ -493,11 +1045,22 @@ def _log_prior(
     if not (
         0.001 < rp < 0.3
         and -2.0 < log_rho < 1.5
-        # b <= 1.2 is intentional: it admits grazing transits (b slightly > 1).
-        # Posteriors with median b > 1.0 should be flagged for manual review
-        # as they are degenerate with high-impact-parameter eclipsing binaries.
+        # ASTROPHYSICAL_HEURISTIC: b <= 1.2 admits grazing transits (b slightly > 1).
+        # The quadratic limb-darkening model is defined up to the stellar limb;
+        # a few percent beyond (partially occulted planet) is allowed because
+        # impact-parameter uncertainties from the ephemeris may exceed the
+        # stellar radius.  Posteriors with median b > 1.0 should be flagged for
+        # manual review as they are degenerate with high-impact-parameter
+        # eclipsing binaries.
+        # DIAGNOSTIC_REASONING: the bottleneck guard at b < 1.2 prevents the
+        # sampler from spending time in the fully non-transiting regime, while
+        # the range 1.0 < b < 1.2 allows the posterior to explore grazing
+        # geometries that may still produce a detectable transit.
         and 0.0 <= b < 1.2
         and bool(np.all((0.99 < baselines) & (baselines < 1.01)))
+        # NUMERICAL_GUARD: log_jitter bounds keep exp(log_jitter) within
+        # machine-precision finite range: exp(-12) ≈ 6e-6, exp(-2) ≈ 0.14
+        # (normalized flux units).
         and -12.0 < log_jitter < -2.0
         and 0.01 < q1 < 0.99
         and 0.01 < q2 < 0.99
@@ -540,7 +1103,30 @@ def _log_likelihood(
     exposure_seconds_by_sector: Optional[np.ndarray] = None,
     n_sectors: int = 1,
 ) -> float:
-    """Evaluate a Gaussian native-cadence likelihood with sector baselines."""
+    """Evaluate a Gaussian native-cadence likelihood with sector baselines.
+
+    The log-likelihood for :math:`N` cadences is (Foreman-Mackey et al. 2013,
+    eq. 35):
+
+    .. math::
+
+        \\ln L = -\\frac{1}{2} \\sum_{i=1}^N \\left[
+            \\frac{(f_i - m_i)^2}{\\sigma_i^2 + \\sigma_j^2}
+            + \\ln\\bigl(2\\pi(\\sigma_i^2 + \\sigma_j^2)\\bigr)
+        \\right],
+
+    where :math:`f_i` are the observed fluxes, :math:`m_i` the batman-predicted
+    model fluxes, :math:`\\sigma_i` the reported uncertainties, and
+    :math:`\\sigma_j = e^{\\ln\\sigma_j}` a global jitter term fitted in
+    natural-log space to enforce positivity.
+
+    Each sector may have its own baseline normalization and exposure time,
+    but the planet radius ratio, stellar density, impact parameter, limb
+    darkening, and jitter are shared across all sectors.
+
+    Returns ``-inf`` if the forward model fails (e.g., batman rejects the
+    parameter combination) or if any sector index is out of range.
+    """
     if not np.all(np.isfinite(theta)):
         return -np.inf
     try:
@@ -598,6 +1184,9 @@ def _log_likelihood(
             return -np.inf
         model[selected] = baselines[sector_number] * sector_model
 
+    # NUMERICAL_GUARD: jitter is fitted in log space, so exp(...) is
+    # always positive; adding in quadrature with the reported uncertainty
+    # ensures the total variance is never smaller than the measurement noise.
     jitter = math.exp(log_jitter)
     ivar = 1.0 / (flux_err**2 + jitter**2)
     residual = flux - model
@@ -620,6 +1209,43 @@ def _map_optimize(
     exposure_seconds_by_sector: Optional[np.ndarray] = None,
     n_sectors: int = 1,
 ) -> np.ndarray:
+    """Find the maximum *a posteriori* point via L-BFGS-B.
+
+    The MAP point is used to initialise the MCMC walkers or nested-sampling
+    live points.  The optimisation wraps :func:`_neg_log_posterior` as the
+    objective and applies the same bounding boxes as :func:`_log_prior`.
+
+    .. note::
+
+        If the MAP point lies at a boundary or the optimiser fails to
+        converge, the initial parameter vector is returned unmodified.
+        The downstream sampler is robust to sub-optimal initialisation,
+        though convergence may require more steps.
+
+    Parameters
+    ----------
+    phase_days, flux, flux_err : ndarray
+        Native-cadence data.
+    ephemeris : dict
+        Transit ephemeris.
+    rho_prior_solar : float
+        Prior mean density (solar units).
+    rho_prior_log10_sigma : float
+        Prior density width (:math:`\\log_{10}` space).
+    eccentric : bool
+        Whether eccentricity parameters are active.
+    start : ndarray
+        Initial guess.
+    ldtk_prior : dict, optional
+        LDTk prior for limb darkening.
+    sector_index, exposure_seconds_by_sector, n_sectors
+        Native-cadence sector descriptors.
+
+    Returns
+    -------
+    ndarray
+        MAP parameter vector.
+    """
     from scipy.optimize import minimize
 
     if start.shape != (_parameter_count(eccentric, n_sectors),):
@@ -683,6 +1309,22 @@ def _map_optimize(
 
 
 def _quantile_summary(chain: np.ndarray) -> Dict[str, float]:
+    """Compute median, 16th, and 84th percentiles for 1-D posterior samples.
+
+    These are the standard posterior summary quantiles for symmetric
+    (approximately Gaussian) marginal posteriors.  The ``plus`` and ``minus``
+    fields provide the 1-sigma-equivalent interval half-widths.
+
+    Parameters
+    ----------
+    chain : ndarray
+        1-D array of posterior draws.
+
+    Returns
+    -------
+    dict
+        Keys ``p16``, ``median``, ``p84``, ``plus``, ``minus``.
+    """
     quantiles = np.quantile(chain, [0.16, 0.50, 0.84])
     return {
         "p16": float(quantiles[0]),
@@ -700,7 +1342,28 @@ def _posterior_summaries(
     n_sectors: int = 1,
     sector_labels: Optional[Sequence[int]] = None,
 ) -> Dict[str, Dict[str, float]]:
-    """Summarize sampled and derived transit parameters from an equal-weight chain."""
+    """Summarize sampled and derived transit parameters from an equal-weight chain.
+
+    For every sample in the flattened post-burn-in chain, this function
+    computes derived quantities that depend on more than one fitted
+    parameter:
+
+    - ``a_rs``: scaled semi-major axis from Kepler's law
+      (:func:`stellar_density_a_rs`)
+    - ``inclination_deg``: orbital inclination from impact parameter
+      (:func:`inclination_deg_from_impact_parameter`)
+    - ``rho_star_solar``: :math:`10^{\\log_{10}\\rho}` in solar units
+    - ``u1, u2``: standard quadratic limb-darkening coefficients
+      transformed from ``(q1, q2)`` via Kipping (2013).
+
+    Astrophysical Rationale
+    -----------------------
+    Derived quantities are computed at the sample level rather than from
+    summary statistics to capture covariances correctly.  For example,
+    ``a_rs`` depends on both ``log_rho_star`` and the period, and
+    ``inclination_deg`` couples ``a_rs`` (via the conjunction distance),
+    ``b``, and eccentricity.
+    """
     names = _parameter_names(eccentric, n_sectors, sector_labels)
     if chain.ndim != 2 or chain.shape[1] != len(names):
         raise ValueError("transit posterior chain has an invalid sector layout")
@@ -787,7 +1450,41 @@ def _posterior_summaries(
 def _resample_weighted_posterior(
     samples: np.ndarray, weights: np.ndarray, seed: int
 ) -> Tuple[np.ndarray, float]:
-    """Systematically resample normalized nested-sampling weights with a fixed seed."""
+    """Systematically resample normalized nested-sampling weights with a fixed seed.
+
+    This uses the ``searchsorted`` method (systematic resampling) that
+    preserves the equal-weight property better than multinomial draws and
+    guarantees a deterministic outcome for a given seed (Handley et al.
+    2015).
+
+    Mathematical Formulation
+    ------------------------
+    After normalizing weights :math:`w_i` to sum to unity, the systematic
+    resampling algorithm draws :math:`N` new indices by
+
+    .. math::
+
+        u_k = \\frac{k + \\xi}{N}, \\quad k = 0, \\dots, N-1,
+
+    where :math:`\\xi \\sim U(0, 1)`, and assigns each new draw to the
+    original sample whose cumulative weight first exceeds :math:`u_k`.
+
+    Parameters
+    ----------
+    samples : ndarray
+        Posterior samples, shape ``(n_live, n_params)``.
+    weights : ndarray
+        Nested-sampling weights of shape ``(n_live,)``.
+    seed : int
+        RNG seed for reproducibility.
+
+    Returns
+    -------
+    resampled : ndarray
+        Equal-weight posterior draws.
+    ess : float
+        Effective sample size :math:`1 / \\sum w_i^2`.
+    """
     samples = np.asarray(samples, dtype=float)
     weights = np.asarray(weights, dtype=float)
     if samples.ndim != 2 or weights.shape != (samples.shape[0],):
@@ -812,7 +1509,58 @@ def _make_dynesty_prior_transform(
     ldtk_prior: Optional[Dict[str, Any]],
     n_sectors: int = 1,
 ):
-    """Create a normalized prior transform for dynesty's likelihood-only API."""
+    """Create a normalized prior transform for dynesty's likelihood-only API.
+
+    dynesty requires sampling from the unit hypercube and applying a
+    prior transform :math:`T: [0, 1]^d \\to \\Theta`.  This function
+    builds that transform for the transit parameter space.
+
+    Each parameter is mapped from a unit-uniform variate via inverse-CDF
+    sampling of a truncated Gaussian distribution, except for the
+    Kipping ``(q1, q2)`` parameters which use a gridded inverse-CDF
+    constructed from the product of the LDTk Gaussian likelihood on
+    ``(u1, u2)`` and the uniform Dirichlet prior on ``(q1, q2)``
+    (Kipping 2013).  This ensures that the evidence :math:`\\ln Z`
+    reported by dynesty is computed under a proper prior.
+
+    Mathematical Formulation
+    ------------------------
+    For a truncated Gaussian with mean :math:`\\mu`, standard deviation
+    :math:`\\sigma`, and bounds :math:`[a, b]`, the prior transform is
+
+    .. math::
+
+        T(u) = \\mu + \\sigma\\,\\Phi^{-1}\\!\\bigl(
+            \\Phi(\\alpha) + u\\,[\\Phi(\\beta) - \\Phi(\\alpha)]
+        \\bigr),
+
+    where :math:`\\alpha = (a - \\mu)/\\sigma`,
+    :math:`\\beta = (b - \\mu)/\\sigma`, :math:`\\Phi` is the standard
+    normal CDF, and :math:`\\Phi^{-1}` its inverse (percent-point
+    function).
+
+    Parameters
+    ----------
+    rho_prior_solar : float
+        Prior mean density in solar units.
+    rho_prior_log10_sigma : float
+        Prior density width in :math:`\\log_{10}` space.
+    noise_scale : float
+        Flux scatter for the jitter prior width.
+    eccentric : bool
+        Whether eccentricity components are active.
+    ldtk_prior : dict or None
+        LDTk limb-darkening prior.
+    n_sectors : int, optional
+        Number of observation sectors.
+
+    Returns
+    -------
+    callable
+        A function ``ptform(u)`` that maps ``u`` in ``[0, 1]^d`` to the
+        physical parameter vector in the order expected by
+        :func:`_unpack_theta`.
+    """
     from scipy.special import ndtr, ndtri
 
     if rho_prior_solar <= 0 or rho_prior_log10_sigma <= 0 or noise_scale <= 0:
@@ -901,6 +1649,12 @@ def _synthetic_transit_table(
 
     The injected radius is derived from the ephemeris depth so the synthetic
     signal is self-consistent with the fitter's initialization.
+
+    .. warning::
+
+        This function produces **synthetic** photometry with hardcoded
+        limb-darkening coefficients (q1=0.35, q2=0.3) and 80 ppm Gaussian
+        noise.  It exists for development and testing only.
     """
     rng = np.random.default_rng(seed=rng_seed)
     cadence_days = 120.0 / 86400.0
@@ -941,7 +1695,45 @@ def _synthetic_transit_table(
 def _mcmc_convergence_diagnostics(
     raw_chain: np.ndarray, tau_values: Optional[np.ndarray], parameter_names: Sequence[str]
 ) -> Dict[str, Any]:
-    """Assess ensemble-chain mixing without claiming independent-chain validation."""
+    """Assess ensemble-chain mixing without claiming independent-chain validation.
+
+    Computes the split-:math:`\\hat{R}` statistic (Gelman-Rubin, Gelman et
+    al. 2014) and the integrated autocorrelation time via ``emcee``'s
+    built-in estimator.  The effective sample size is
+
+    .. math::
+
+        \\text{ESS} = \\frac{N_{\\rm steps} \\times N_{\\rm walkers}}{\\tau},
+
+    where :math:`\\tau` is the integrated autocorrelation time.
+
+    .. warning::
+
+        Ensemble diagnostics are **not** a substitute for independently
+        initialised chains or a calibrated correlated-noise likelihood.
+        The ``scientific_posterior_eligible`` flag is always ``False``
+        because convergence under i.i.d. Gaussian likelihood with a single
+        ensemble does not demonstrate that the posterior is physically
+        meaningful.  This is a :ref:`SCIENTIFIC_BOUNDARY` — a calibrated
+        model-comparison framework is required for scientific claims.
+
+    Parameters
+    ----------
+    raw_chain : ndarray
+        Post-burn-in ensemble chain of shape ``(n_steps, n_walkers,
+        n_params)``.
+    tau_values : ndarray or None
+        Per-parameter integrated autocorrelation times.
+    parameter_names : sequence of str
+        Parameter names for the diagnostic keys.
+
+    Returns
+    -------
+    dict
+        Keys: ``split_r_hat``, ``effective_samples``,
+        ``chain_length_over_tau``, ``thresholds``, ``basic_mixing_passed``,
+        ``status``, ``scientific_posterior_eligible``, ``reason``.
+    """
     chain = np.asarray(raw_chain, dtype=float)
     if chain.ndim != 3 or chain.shape[0] < 4 or chain.shape[1] < 2 or not np.all(np.isfinite(chain)):
         return {
@@ -990,7 +1782,58 @@ def run_mcmc_transit_fit(
     detrending_method: Optional[str] = None,
     dlogz_tolerance: float = 0.5,
 ) -> Path:
-    """Run an emcee or dynesty transit fit and write the historical output paths."""
+    """Run an emcee or dynesty transit fit and write the historical output paths.
+
+    This is the top-level entry point for transit fitting.  It loads the
+    candidate light curve, stellar parameters, and ephemeris; constructs the
+    prior and likelihood; performs MAP optimisation; initialises ensemble
+    walkers; runs the affine-invariant MCMC chain (Goodman & Weare 2010)
+    via ``emcee``; computes posterior summaries and convergence diagnostics;
+    and serialises the results to the candidate's ``outputs/`` directory.
+
+    The native-cadence likelihood uses a Gaussian independent-noise model
+    with a fitted jitter term and per-sector baseline parameters.  The
+    resulting posterior is **exploratory** and explicitly does not qualify
+    as a validated posterior or a planet-claim probability.
+
+    Parameters
+    ----------
+    workspace : CandidateWorkspace
+        The candidate workspace.
+    n_samples : int, optional
+        Number of production MCMC steps per walker (default 5000).
+    eccentric : bool, optional
+        Whether to fit eccentric orbit components (default False).
+    n_walkers : int, optional
+        Number of ensemble walkers; auto-set if None.
+    burn_in : int, optional
+        Number of burn-in steps; auto-set if None.
+    seed : int, optional
+        RNG seed for reproducibility (default 5).
+    signal : str, optional
+        Signal suffix for multi-signal candidates.
+    use_ldtk_prior : bool, optional
+        Whether to apply the LDTk limb-darkening prior (default False).
+    sampler : {'emcee', 'dynesty'}, optional
+        Sampler backend (default ``'emcee'``).
+    detrending_method : str, optional
+        Detrending method for light curve retrieval.
+    dlogz_tolerance : float, optional
+        dynesty convergence tolerance in :math:`\\Delta\\ln Z` (default 0.5).
+
+    Returns
+    -------
+    Path
+        Path to the written ``mcmc_transit_fit.json`` artifact.
+
+    Raises
+    ------
+    RuntimeError
+        If photometry, ephemeris, or stellar parameters are synthetic or
+        missing.
+    ValueError
+        If ``sampler`` is unrecognised.
+    """
     signal = validate_signal_suffix(signal)
     if sampler == "dynesty":
         return _run_dynesty_transit_fit(
@@ -1073,6 +1916,16 @@ def run_mcmc_transit_fit(
     n_walkers = max(n_walkers, 2 * ndim)
     if burn_in is None:
         burn_in = max(50, n_samples // 5)
+    # ASTROPHYSICAL_HEURISTIC: burn-in fraction defaults to max(50, n_samples/5)
+    # to discard the initial exploration phase where walkers are migrating
+    # from their MAP-ball initialisation to the typical set.  The floor of
+    # 50 steps guards against very short chains.
+    if burn_in is None:
+        burn_in = max(50, n_samples // 5)
+    # ASTROPHYSICAL_HEURISTIC: default walker count is twice the number of
+    # parameters (minimum per Foreman-Mackey et al. 2013) or up to 48, but
+    # at least 1 walker per 20 production steps so that the chain has
+    # adequate length relative to the ensemble size.
     rng = np.random.default_rng(seed=seed)
 
     def valid_walker_start(candidate_theta: np.ndarray) -> bool:
@@ -1127,6 +1980,10 @@ def run_mcmc_transit_fit(
 
     # Reproducibility: walker positions and emcee's StretchMove RNG are both
     # explicitly seeded without mutating NumPy's process-global RNG.
+    # ASTROPHYSICAL_HEURISTIC: StretchMove a=1.5 is the Goodman & Weare
+    # (2010) recommended value for general-purpose MCMC; it yields an
+    # acceptance fraction near the optimal ~25% for multi-dimensional
+    # Gaussians.
     sampler = emcee.EnsembleSampler(
         n_walkers,
         ndim,
@@ -1183,6 +2040,11 @@ def run_mcmc_transit_fit(
         "work_package": "MCMC_TRANSIT_FIT",
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "source": source,
+        # SCIENTIFIC_BOUNDARY: the posterior is labeled exploratory because
+        # the fit does not include a calibrated correlated-noise model,
+        # independent-chain convergence validation, or dilution/contamination
+        # correction.  A full validation-grade posterior requires the
+        # scene-model framework (methods/phasecurve-secondary-control.md).
         "scientific_status": "exploratory-native-cadence-inference",
         "validation_eligible": False,
         "validation_reason": (
@@ -1253,7 +2115,63 @@ def _run_dynesty_transit_fit(
     detrending_method: Optional[str],
     dlogz_tolerance: float = 0.5,
 ) -> Path:
-    """Run optional dynamic nested sampling with an explicit normalized prior transform."""
+    """Run optional dynamic nested sampling with an explicit normalized prior transform.
+
+    This function wraps dynesty (Speagle 2020) to draw posterior samples
+    under the same likelihood and prior model used by the emcee path, but
+    with the addition of a custom prior transform that maps the unit
+    hypercube through truncated-Gaussian and LDTk-weighted inverse-CDF
+    transforms (see :func:`_make_dynesty_prior_transform`).
+
+    Nested sampling simultaneously estimates the Bayesian evidence
+
+    .. math::
+
+        Z = \\int L(\\theta) \\, \\pi(\\theta) \\, d\\theta
+
+    which is reported as ``log_z`` with its estimated numerical uncertainty
+    ``log_z_err``.  This evidence is **descriptive** — it is not a planet
+    validation probability and depends on the choice of prior, likelihood,
+    and stopping rule.
+
+    .. note::
+
+        The evidence reported by dynesty is the *model* evidence under the
+        Gaussian independent-noise likelihood, not a model-comparison odds
+        ratio.  Comparing ``log_z`` between circular and eccentric fits is
+        not statistically rigorous without calibrating the prior odds and
+        accounting for correlated noise.
+
+    Parameters
+    ----------
+    workspace : CandidateWorkspace
+        The candidate workspace.
+    n_samples : int
+        Number of live points proxy; used to scale ``nlive_init``.
+    eccentric : bool
+        Whether eccentricity components are active.
+    seed : int
+        RNG seed.
+    signal : str or None
+        Signal suffix.
+    use_ldtk_prior : bool
+        Whether to apply LDTk limb-darkening prior.
+    detrending_method : str or None
+        Detrending method for light curve retrieval.
+    dlogz_tolerance : float, optional
+        Convergence tolerance :math:`\\Delta\\ln Z` (default 0.5).
+
+    Returns
+    -------
+    Path
+        Path to the written ``mcmc_transit_fit.json`` artifact.
+
+    Raises
+    ------
+    RuntimeError
+        If dynesty is not installed, photometry/parameters are synthetic
+        or missing, or the nested-sampling results are incomplete.
+    """
     signal = validate_signal_suffix(signal)
     try:
         import dynesty
@@ -1311,7 +2229,14 @@ def _run_dynesty_transit_fit(
         n_sectors=n_sectors,
     )
     ndim = _parameter_count(eccentric, n_sectors)
+    # ASTROPHYSICAL_HEURISTIC: initial live point count is at least
+    # 2*ndim+1 (minimal for reliable evidence integration; Skilling 2006)
+    # and is capped at 500 to limit runtime.  For very large samples the
+    # live point count is scaled as n_samples // 10.
     initial_live_points = max(2 * ndim + 1, min(500, max(50, n_samples // 10)))
+    # SCIENTIFIC_BOUNDARY: dynesty's DynamicNestedSampler with dlogz
+    # tolerance controls when the evidence integral has converged; this
+    # is a numerical stopping rule, not a physical validation criterion.
     nested_sampler = dynesty.DynamicNestedSampler(
         lambda theta: _log_likelihood(
             theta,
@@ -1392,6 +2317,10 @@ def _run_dynesty_transit_fit(
             {"source": "ldtk", "path": ldtk_prior["path"]} if ldtk_prior is not None else None
         ),
         "posterior": posteriors,
+        # SCIENTIFIC_BOUNDARY: nested-sampling log Z is the model evidence
+        # under the Gaussian independent-noise likelihood and chosen prior;
+        # it does not constitute a validation probability or calibrated
+        # model-comparison odds ratio.
         "evidence": {
             "log_z": float(log_evidence[-1]),
             "log_z_err": float(log_evidence_error[-1]),
@@ -1443,9 +2372,28 @@ def _run_dynesty_transit_fit(
 
 
 def _chunk_medians(samples: np.ndarray) -> List[float]:
-    """Median down a large sample chain to ~1000 values for model evaluation."""
+    """Median down a large sample chain to ~1000 values for model evaluation.
+
+    This is a throughput optimisation: evaluating the batman forward model
+    on a full posterior chain of O(10\ :sup:`5`) samples would be
+    prohibitively slow for model visualisation.  The chunk-median
+    compression preserves the median transit shape while reducing the
+    evaluation budget by roughly two orders of magnitude.
+
+    Parameters
+    ----------
+    samples : ndarray
+        1-D array of samples.
+
+    Returns
+    -------
+    list of float
+        Medians of consecutive chunks; length ≤ 1000.
+    """
     samples = np.asarray(samples, dtype=float)
     if samples.size <= 1000:
         return [float(value) for value in samples]
+    # ASTROPHYSICAL_HEURISTIC: 1000-sample cap is sufficient for
+    # visualising the median transit model and its credible interval.
     step = int(np.ceil(samples.size / 1000.0))
     return [float(np.median(samples[index : index + step])) for index in range(0, samples.size, step)]

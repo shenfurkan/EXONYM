@@ -1,25 +1,96 @@
 """Target-neutral transit search engine supporting BLS and native TLS.
 
 Implements blind and targeted periodic transit detection algorithms across photometric
-time-series without hardcoded candidate designations or ephemerides:
+time-series without hardcoded candidate designations or ephemerides.
 
-1. Box Least Squares (BLS) Search (Kovács, Zucker & Mazeh 2002):
+.. admonition:: Literature references
+    - Kovács, Zucker & Mazeh 2002 (BLS algorithm)
+    - Hippke & Heller 2019 (TLS algorithm, SDE ranking statistic)
+    - ``methods/tls_search.md`` — SDE field definition and use-threads rationale
+    - ``methods/detrending-and-transit-inference.md`` — density-duration relation,
+      Mandel & Agol 2002 limb darkening
+    - Ivezić et al. 2014 (Statistics, Data Mining, and Machine Learning in Astronomy) —
+      BLS SNR, MAD/biweight estimators, 1.4826 normalisation factor
+    - Perryman 2018 (The Exoplanet Handbook), §2 — transit contact points T₁–T₄,
+      circular-orbit duration relation
+
+1. Box Least Squares (BLS) Search (Kovács, Zucker & Mazeh 2002)
+   -------------------------------------------------------------
    Uses Astropy's weighted ``BoxLeastSquares`` implementation to fit periodic
    step functions (top-hat boxes) defined by:
-   - Trial period P in [P_min, P_max] days
-   - Fractional transit duration q = T_14 / P
-   - Transit epoch / center time T_0 (BTJD)
-   - Transit depth delta = <y_out> - <y_in>
-   - A fitted depth and formal uncertainty. The reported ``snr`` is their
-     ratio, not a calibrated false-alarm probability or detection reliability.
 
-2. Grid Resolution:
+   - Trial period *P* in [P_min, P_max] days.
+   - Fractional transit duration *q = T₁₄ / P*.
+   - Transit epoch / centre time *T₀* (BTJD).
+   - Transit depth *δ = ⟨y_out⟩ − ⟨y_in⟩*.
+
+   The reported ``snr`` is the fitted depth divided by its formal uncertainty.
+   **It is a ranking statistic only** — not a calibrated false-alarm probability,
+   detection reliability, or population completeness measure.
+
+   **Frequency grid** — To prevent periodogram under-resolution across a
+   multi-sector baseline, Astropy's ``autopower`` method spaces trial
+   frequencies by :math:`\\Delta f \\propto q / T_{\\rm baseline}^2` (duration
+   over baseline-squared).  The natural period resolution near *P* ≈ *P_max*
+   is :math:`\\Delta P \\approx 2\\,q\\,P^2 / T_{\\rm baseline}`.
+   ``n_periods`` acts as a *floor*, never reducing the number of trials below
+   the baseline-duration minimum.
+
+   **BLS SNR** — Following Ivezić §10.3.2, the BLS signal-to-noise is
+
+   .. math::
+
+       {\\rm SNR}_{\\rm BLS}
+       = \\frac{\\delta}{\\sigma_{\\rm out}} \\sqrt{n_{\\rm eff}},
+       \\qquad
+       n_{\\rm eff} = \\frac{n_{\\rm in}\\,n_{\\rm out}}{n_{\\rm in} + n_{\\rm out}}
+
+   where δ is the transit depth, σ_out the out-of-transit RMS, and n_in, n_out
+   the number of in/out-of-transit cadences.  The Astropy weighted fit reports
+   a depth uncertainty whose ratio with the fitted depth is the field ``snr``.
+
+2. Grid Resolution
+   ----------------
    - Astropy's baseline-and-duration-aware frequency grid prevents a requested
      sparse scan from under-resolving a multi-sector light curve.
+   - The ``frequency_factor`` cap (≤ 1.0) ensures the grid can only be
+     *oversampled* relative to the Astropy default, never coarser.
 
-3. Optional Transit Least Squares (TLS) (Hippke & Heller 2019):
-   Integrates realistic physical limb-darkened transit shapes (Mandel & Agol 2002) with ingress/egress
-   morphology, yielding higher sensitivity for shallow small-planet transits.
+3. Optional Transit Least Squares (TLS) (Hippke & Heller 2019)
+   ------------------------------------------------------------
+   Integrates realistic physical limb-darkened transit shapes
+   (Mandel & Agol 2002) with ingress/egress morphology, yielding higher
+   sensitivity for shallow small-planet transits.  The ranking statistic is the
+   **Signal Detection Efficiency** (SDE), defined as
+
+   .. math::
+
+       {\\rm SDE} = \\frac{{\\rm SR}_{\\rm peak} - \\langle{\\rm SR}\\rangle}
+                         {\\sigma_{\\rm SR}}
+
+   where SR is the TLS signal-residue statistic, ⟨SR⟩ its arithmetic mean
+   across the searched period range, and σ_SR its standard deviation.
+
+4. Harmonic alias checks
+   ----------------------
+   Downstream consumers (e.g. screening, activity analysis) test the dominant
+   peak against *P*/2, 2*P*, and subharmonic aliases to discriminate the true
+   orbital period from common observing-window harmonics.  The search engine
+   itself returns only the strongest peak in the requested range.
+
+5. Density-duration relation
+   ---------------------------
+   When asteroseismic or archival stellar density ρ_* is available, a physical
+   duration grid can be derived from the circular-orbit transit duration:
+
+   .. math::
+
+       T_{14} = \\left(\\frac{3P}{\\pi^2 G\\rho_*}\\right)^{1/3}
+                \\frac{\\sqrt{(1+k)^2 - b^2}}{\\sin i}
+
+   where *k* = R_p/R_*, *b* = a cos i / R_* (impact parameter), and *i* is the
+   orbital inclination (Perryman §2).
+
 """
 
 from __future__ import annotations
@@ -42,13 +113,51 @@ from .workspace import CandidateWorkspace, validate_signal_suffix
 
 @dataclass
 class BLSSearchResult:
-    """Standardized result container for periodic transit searches."""
+    """Standardized result container for periodic transit searches.
 
-    best_period: Optional[float]          # Optimal orbital period (days)
-    best_epoch: Optional[float]           # Optimal transit epoch (BTJD)
-    best_depth_ppm: Optional[float]       # Optimal transit depth (parts per million)
-    best_duration_hours: Optional[float]  # Optimal total transit duration T_14 (hours)
-    snr: Optional[float]                  # Fitted depth / formal BLS depth uncertainty
+    .. note::
+        The ``snr`` field is the BLS fitted depth divided by its formal
+        uncertainty — a **ranking statistic**, not a calibrated false-alarm
+        probability (see Ivezić §10.3.2 for the BLS SNR derivation).  The
+        ``detection_status`` field is a pipeline-level label reflecting whether
+        the peak crossed the candidate-selection threshold; it is not a claim
+        of planetary origin.
+
+    Attributes
+    ----------
+    best_period : Optional[float]
+        Optimal orbital period in **days**.  Derived from the peak of the BLS
+        or TLS periodogram.  ``None`` when no peak crosses the threshold.
+    best_epoch : Optional[float]
+        Transit epoch (centre time T₀) in **BTJD** (BJD_TDB − 2_457_000).
+    best_depth_ppm : Optional[float]
+        Fitted transit depth in **parts per million**.  For BLS this is the
+        box-car depth :math:`\\langle y_{\\rm out}\\rangle - \\langle y_{\\rm
+        in}\\rangle`; for TLS it is ``1 - min(flux_model)``.
+    best_duration_hours : Optional[float]
+        Total transit duration T₁₄ in **hours** (first to fourth contact).
+    snr : Optional[float]
+        BLS fitted depth divided by formal depth uncertainty; TLS returns
+        ``None`` here (its SDE occupies a separate field in the raw result dict).
+    n_distinct_transit_events : int
+        Number of unique transit epochs (integer-rounded event numbers)
+        observed within the dataset for the best period and epoch.
+    n_period_trials : int
+        Total number of period samples evaluated in the periodogram grid.
+    detection_status : str
+        Pipeline label: ``"detected"`` when the peak exceeds
+        ``MINIMUM_BLS_CANDIDATE_SNR`` and has ≥ 2 observed events, else
+        ``"no-detection"``.
+    best_depth_uncertainty_ppm : Optional[float]
+        Formal uncertainty of the fitted depth in **ppm** from the weighted
+        BLS fit.  Propagated from ``periodogram.depth_err``.
+    """
+
+    best_period: Optional[float]
+    best_epoch: Optional[float]
+    best_depth_ppm: Optional[float]
+    best_duration_hours: Optional[float]
+    snr: Optional[float]
     n_distinct_transit_events: int
     n_period_trials: int = 0
     detection_status: str = "detected"
@@ -75,11 +184,43 @@ class BLSSearchResult:
 def _frequency_period_grid(period_min: float, period_max: float, n_periods: int) -> np.ndarray:
     """Return trial periods uniformly sampled in orbital frequency.
 
-    A uniform period grid under-resolves long-period signals on a multi-sector
-    baseline.  Keeping the number of samples fixed in frequency gives the
-    periodogram approximately constant phase drift resolution instead.  The
-    returned periods decrease from ``period_max`` to ``period_min``; callers
-    must not infer a ranking from their order.
+    Mathematical Formulation
+    ------------------------
+    A uniform period grid :math:`P_k = P_{\\rm min} + k\\,\\Delta P` under-resolves
+    long-period signals on a multi-sector baseline because a fixed period step
+    corresponds to an ever-narrowing frequency step as period increases:
+
+    .. math::
+
+        \\Delta f \\approx \\frac{\\Delta P}{P^2}.
+
+    By instead sampling *frequency* uniformly,
+
+    .. math::
+
+        f_k = f_{\\rm min} + k\\,\\frac{f_{\\rm max} - f_{\\rm min}}{N-1},
+        \\qquad
+        P_k = 1 / f_k,
+
+    the periodogram maintains approximately constant phase-drift resolution
+    at all trial periods.  This is equivalent to requiring
+    :math:`\\Delta f \\lesssim 1/T_{\\rm baseline}` (one cycle across the
+    observational baseline) at the longest periods searched.
+
+    Parameters
+    ----------
+    period_min : float
+        Shortest trial period in days (> 0).
+    period_max : float
+        Longest trial period in days (> period_min).
+    n_periods : int
+        Number of frequency samples (≥ 2).
+
+    Returns
+    -------
+    np.ndarray
+        Periods in **decreasing** order (from ``period_max`` to ``period_min``).
+        Callers must not infer a ranking from the ordering.
     """
     if isinstance(n_periods, bool) or not isinstance(n_periods, (int, np.integer)):
         raise ValueError("n_periods must be an integer of at least two")
@@ -96,8 +237,42 @@ def _uncertainties_for_bls(
 
     Candidate-product loading normally supplies reported uncertainties. Public
     array callers may omit them, in which case a robust constant scatter is
-    used solely to retain a dimensionless ranking statistic; the
-    candidate-facing runner records that fallback.
+    used **solely to retain a dimensionless ranking statistic**; the
+    candidate-facing runner records that fallback in the search provenance.
+
+    Mathematical Formulation
+    ------------------------
+    When uncertainties are absent, a robust scatter estimate is computed from
+    the **median absolute deviation** (MAD), rescaled to approximate the
+    standard deviation of a Gaussian distribution (Ivezić §3.4.2):
+
+    .. math::
+
+        \\sigma_{\\rm robust}
+        = 1.4826 \\times {\\rm MAD},
+        \\qquad
+        {\\rm MAD} = {\\rm median}\\bigl(|y_i - {\\rm median}(y)|\\bigr).
+
+    The factor 1.4826 = 1 / Φ⁻¹(0.75) is the asymptotic normalisation such
+    that, for Gaussian noise, σ_robust → σ.
+
+    Parameters
+    ----------
+    values : np.ndarray
+        Flux values used for the scatter estimate when errors are absent.
+    flux_err : Optional[Sequence[float]]
+        Reported per-cadence uncertainties or ``None``.
+
+    Returns
+    -------
+    np.ndarray
+        Strictly positive finite uncertainties matching the shape of ``values``.
+
+    Raises
+    ------
+    ValueError
+        If ``flux_err`` is provided but contains non-finite or non-positive
+        entries, or its shape mismatches ``values``.
     """
     if flux_err is not None:
         errors = np.asarray(flux_err, dtype=float)
@@ -108,8 +283,12 @@ def _uncertainties_for_bls(
         return errors
 
     median = float(np.median(values))
+    # NUMERICAL_GUARD: 1.4826 * MAD ≈ σ for Gaussian noise (Ivezić Eq. 3.37);
+    # the factor is the inverse of the normal CDF at 0.75.
     mad = float(np.median(np.abs(values - median)))
     scatter = 1.4826 * mad
+    # NUMERICAL_GUARD: non-finite or negative scatter from degenerate data
+    # (e.g. all values identical) → fall back to a tiny constant.
     if not np.isfinite(scatter) or scatter <= 0:
         scatter = 1e-4
     return np.full(values.size, scatter, dtype=float)
@@ -128,23 +307,98 @@ def _baseline_aware_frequency_factor(
     scale. A caller can request *more* samples through ``n_periods`` but never
     a coarser-than-standard scan, preventing a fixed sparse grid from missing
     narrow, long-baseline signals.
+
+    Mathematical Formulation
+    ------------------------
+    Astropy's default frequency step for a duration *q* (in days) across a
+    baseline *T* is
+
+    .. math::
+
+        \\Delta f_{\\rm natural} = \\frac{q}{T^2}.
+
+    The number of natural trials over the frequency span
+    :math:`f_{\\rm max} - f_{\\rm min}` is therefore
+
+    .. math::
+
+        N_{\\rm natural}
+        = \\frac{1/P_{\\rm min} - 1/P_{\\rm max}}{\\Delta f_{\\rm natural}}.
+
+    The returned ``frequency_factor`` is the ratio
+    :math:`N_{\\rm natural} / N_{\\rm requested}`, capped at 1.0 so that the
+    grid is never coarser than the Astropy default.
+
+    Parameters
+    ----------
+    time : np.ndarray
+        Observation times in BTJD.
+    period_min : float
+        Shortest searched period in days.
+    period_max : float
+        Longest searched period in days.
+    duration_days : float
+        Trial transit duration in days.
+    requested_minimum_trials : int
+        The ``n_periods`` value passed by the caller.
+
+    Returns
+    -------
+    float
+        Frequency factor in (0, 1.0]; 1.0 preserves full Astropy resolution.
     """
+    # NUMERICAL_GUARD: baseline must be finite and positive.
     baseline_days = float(np.ptp(time))
     if not np.isfinite(baseline_days) or baseline_days <= 0:
         raise ValueError("BLS requires observations spanning a positive time baseline")
+    # Astropy natural frequency step: Δf = q / T².
     natural_step = duration_days / (baseline_days * baseline_days)
     frequency_span = 1.0 / period_min - 1.0 / period_max
+    # NUMERICAL_GUARD: at least 2 trials to define a frequency span.
     natural_trials = max(2, int(np.ceil(frequency_span / natural_step)) + 1)
+    # Cap at 1.0: never coarser than the Astropy default grid.
     return min(1.0, natural_trials / float(requested_minimum_trials))
 
 
 def _distinct_transit_events(
     time: np.ndarray, period: float, epoch: float, duration_hours: float
 ) -> int:
-    """Count observed event windows containing at least one cadence."""
+    """Count observed event windows containing at least one cadence.
+
+    Each transit event is identified by its integer-rounded epoch number
+    :math:`n = {\\rm round}((t_i - T_0) / P)`.  Cadences whose phase falls
+    within ±½ T₁₄ of the nominal epoch centre are tagged as in-transit and
+    binned by their epoch number.  The returned count is the number of
+    **unique** epoch numbers represented.
+
+    This integer-rounding approach is robust against finite cadence sampling:
+    a transit that spans two consecutive integer epoch bins still contributes
+    one distinct event per epoch, while the same epoch observed across
+    multiple cadences (e.g. 30-minute sampling of a 3-hour transit) is not
+    double-counted.
+
+    Parameters
+    ----------
+    time : np.ndarray
+        Observation times in BTJD.
+    period : float
+        Trial period in days.
+    epoch : float
+        Transit epoch (T₀) in BTJD.
+    duration_hours : float
+        Total transit duration T₁₄ in hours.
+
+    Returns
+    -------
+    int
+        Number of unique transit event epochs with at least one in-transit
+        cadence.  Returns 0 if no cadences lie within any transit window.
+    """
+    # Identify cadences within ±½ T₁₄ of the transit centre.
     in_transit = np.abs(phase_hours(time, period, epoch)) <= 0.5 * duration_hours
     if not np.any(in_transit):
         return 0
+    # Integer-round epoch number: n_i = round((t_i − T₀) / P).
     event_numbers = np.rint((time[in_transit] - epoch) / period).astype(int)
     return int(np.unique(event_numbers).size)
 
@@ -160,23 +414,80 @@ def find_transits(
 ) -> BLSSearchResult:
     """Run a target-neutral BLS periodogram search over a light curve.
 
-    Returns the optimal (period, epoch, depth_ppm, duration_hours, score).
-    ``snr`` is the fitted weighted BLS depth divided by its formal uncertainty.
-    It is retained as a compatibility field name only and is not a calibrated
-    detection significance, false-alarm probability, or reliability estimate.
+    Implements the Kovács, Zucker & Mazeh (2002) Box Least Squares algorithm
+    via Astropy's weighted ``BoxLeastSquares.autopower``.  A periodic top-hat
+    (box-car) transit with fractional duration :math:`q = T_{14} / P` is
+    fitted at each trial frequency; the resulting depth and formal uncertainty
+    yield the ``snr`` field.
 
-    The trial grid is generated by Astropy using the observed time baseline and
-    requested transit duration. ``n_periods`` is treated as a minimum requested
-    density: it can add samples but cannot make the standard BLS grid coarser.
-    A selected peak must contain at least two observed transit events and meet
-    the fixed candidate-selection threshold. That threshold is not an FAP
-    calibration.
+    Mathematical Formulation
+    ------------------------
+    The BLS statistic at each trial period and epoch is the fitted depth
+    :math:`\\delta = \\langle y_{\\rm out}\\rangle - \\langle y_{\\rm
+    in}\\rangle` divided by its formal uncertainty.  For weighted data with
+    per-cadence errors σᵢ, the BLS SNR reduces to (Ivezić §10.3.2):
+
+    .. math::
+
+        {\\rm SNR}_{\\rm BLS}
+        = \\frac{\\delta}{\\sigma_{\\rm out}} \\sqrt{n_{\\rm eff}},
+
+    where n_eff = (n_in · n_out) / (n_in + n_out) accounts for the effective
+    number of independent measurements.
+
+    Astrophysical Rationale
+    -----------------------
+    - The trial grid is generated by Astropy using the observed time baseline
+      and the requested transit duration.  ``n_periods`` is a **minimum**
+      requested density: the ``frequency_factor`` adaptor ensures the grid can
+      be oversampled but never made coarser than the Astropy default.
+    - A selected peak must contain at least **two** observed distinct transit
+      events and cross ``MINIMUM_BLS_CANDIDATE_SNR``.  That threshold is an
+      empirical cut, not a calibrated false-alarm probability.
+    - ``snr`` is retained as a compatibility field name only; it is not a
+      calibrated detection significance, false-alarm probability, or
+      reliability estimate.
+
+    Parameters
+    ----------
+    time_btjd : Sequence[float]
+        Observation times in BTJD (BJD_TDB − 2_457_000).
+    flux : Sequence[float]
+        Normalised flux values (median ≈ 1 in the out-of-transit baseline).
+    period_min : float
+        Shortest searched orbital period in days.  Default 0.5 d.
+    period_max : float
+        Longest searched orbital period in days.  Default 15.0 d.
+    n_periods : int
+        Minimum number of trial periods (acts as a floor; Astropy may use
+        more).  Default 2000.
+    duration_hours : float
+        Fixed trial transit duration T₁₄ in hours.
+    flux_err : Optional[Sequence[float]]
+        Per-cadence normalised flux uncertainties.  When ``None``, a robust
+        constant scatter is used; the candidate-facing runner records this
+        fallback in the provenance.
+
+    Returns
+    -------
+    BLSSearchResult
+        Standardised container with optimal period, epoch, depth, duration,
+        SNR, and detection status.
+
+    Raises
+    ------
+    ValueError
+        If input arrays are incompatible, too few points, or the period /
+        duration bounds are invalid.
+    RuntimeError
+        If the ``astropy`` core dependency is absent.
     """
     time = np.asarray(time_btjd, dtype=float)
     values = np.asarray(flux, dtype=float)
 
     if time.shape != values.shape:
         raise ValueError("time and flux must have matching shapes")
+    # Filter to finite time, flux, and (when provided) finite positive errors.
     finite = np.isfinite(time) & np.isfinite(values)
     if flux_err is not None:
         raw_errors = np.asarray(flux_err, dtype=float)
@@ -189,10 +500,13 @@ def find_transits(
     time = time[finite]
     values = values[finite]
 
+    # NUMERICAL_GUARD: Astropy's BLS requires a minimum of 2 transits × a
+    # handful of cadences each; 50 points is a pragmatic floor.
     if time.size < 50:
         raise ValueError("insufficient data points for BLS transit search")
     if period_min <= 0 or period_max <= period_min:
         raise ValueError("invalid period search bounds")
+    # Validate the frequency grid without using its return value (side-effect check).
     _frequency_period_grid(period_min, period_max, n_periods)
 
     try:
@@ -207,6 +521,10 @@ def find_transits(
     frequency_factor = _baseline_aware_frequency_factor(
         time, period_min, period_max, duration_days, n_periods
     )
+    # Build weighted BLS periodogram via Astropy's C-optimised "fast" solver.
+    # ``objective="likelihood"`` uses the chi-squared-based statistic for which
+    # the formal depth uncertainty is well-defined (see Astropy BLS docs).
+    # ``minimum_n_transit=2`` guards against single-event false positives.
     periodogram = BoxLeastSquares(time, values, dy=errors).autopower(
         duration_days,
         objective="likelihood",
@@ -216,6 +534,8 @@ def find_transits(
         maximum_period=period_max,
         frequency_factor=frequency_factor,
     )
+    # NUMERICAL_GUARD: require positive finite depth and depth_err; negative
+    # depths are unphysical and infinite errors indicate degenerate fits.
     valid = (
         np.isfinite(periodogram.power)
         & np.isfinite(periodogram.period)
@@ -225,6 +545,8 @@ def find_transits(
         & (periodogram.depth > 0)
         & (periodogram.depth_err > 0)
     )
+    # Walk peaks in descending periodogram power until one satisfies all
+    # quality gates (finite geometry, ≥ 2 observed events, finite SNR).
     best: Optional[Dict[str, float]] = None
     for index in np.argsort(periodogram.power)[::-1]:
         if not valid[index]:
@@ -236,6 +558,8 @@ def find_transits(
             continue
         depth = float(periodogram.depth[index])
         depth_err = float(periodogram.depth_err[index])
+        # SCIENTIFIC_BOUNDARY: this SNR is a ranking statistic only — see
+        # module docstring §1 for the BLS SNR derivation.
         snr = depth / depth_err
         if not np.isfinite(snr):
             continue
@@ -259,6 +583,8 @@ def find_transits(
             n_period_trials=int(periodogram.period.size),
             detection_status="no-detection",
         )
+    # ASTROPHYSICAL_HEURISTIC: MINIMUM_BLS_CANDIDATE_SNR is a candidate-
+    # selection threshold, not a calibrated FAP (see inputs.py constant).
     if best["snr"] < MINIMUM_BLS_CANDIDATE_SNR:
         return BLSSearchResult(
             best_period=None,
@@ -272,6 +598,8 @@ def find_transits(
             best_depth_uncertainty_ppm=best["depth_err"] * 1e6,
         )
 
+    # NUMERICAL_GUARD: clamp non-negative snr; the gate above ensures it is
+    # at least the threshold, but floating-point drift is harmless.
     return BLSSearchResult(
         best_period=best["period"],
         best_epoch=best["epoch"],
@@ -298,6 +626,37 @@ def find_transits_duration_grid(
     The returned best result is selected by the same uncalibrated ranking
     statistic as an individual BLS search.  This is a deterministic model
     selection step, not an additional significance calibration.
+
+    Astrophysical Rationale
+    -----------------------
+    A single fixed duration may misrepresent transits whose T₁₄ differs
+    from the trial value: durations that are too short under-sample in-transit
+    cadences and inflate scatter; durations that are too long dilute the
+    box-car depth relative to the true signal.  Scanning a physically
+    motivated grid — typically derived from the circular-orbit density
+    relation (module docstring §5) or a broad prior such as
+    [1.5, 3.0, 6.0, 12.0] hours — identifies the highest-SNR match.
+
+    Parameters
+    ----------
+    time_btjd : Sequence[float]
+        Observation times in BTJD.
+    flux : Sequence[float]
+        Normalised flux values.
+    duration_grid_hours : Sequence[float]
+        Non-empty, duplicate-free list of positive trial durations in hours.
+    period_min, period_max : float
+        Period search bounds in days.
+    n_periods : int
+        Minimum trial period count per duration.
+    flux_err : Optional[Sequence[float]]
+        Per-cadence uncertainties or ``None``.
+
+    Returns
+    -------
+    Tuple[BLSSearchResult, List[Dict]]
+        The best result across all durations (by SNR) and the full list of
+        per-duration result payloads for provenance.
     """
     durations = [float(value) for value in duration_grid_hours]
     if not durations or any(not np.isfinite(value) or value <= 0 for value in durations):
@@ -334,27 +693,73 @@ def find_transits_tls(
 ) -> Dict[str, float]:
     """Run a weighted, native-cadence Transit Least Squares search.
 
-    Args:
-        time_btjd: Observation times in BTJD.
-        flux: Normalized flux values.
-        flux_err: Per-cadence normalized flux uncertainties.
-        period_min: Minimum searched orbital period in days.
-        period_max: Maximum searched orbital period in days.
-        use_threads: TLS worker count. The default of one avoids TLS's
-            multiprocessing path, which is unreliable in constrained Windows
-            shells.
+    Implements Hippke & Heller (2019) via the ``transitleastsquares`` package
+    (``transitleastsquares`` function).  Unlike BLS, TLS convolves the
+    light curve with a **physically realistic limb-darkened transit model**
+    (Mandel & Agol 2002), including ingress/egress morphology and quadratic
+    limb-darkening coefficients.  This yields higher sensitivity to shallow,
+    small-planet transits and native-cadence resolution.
 
-    Returns:
-        TLS best period, epoch, depth, duration, and SDE. This is a discovery
-        statistic, not a planetary-validation result.
+    Mathematical Formulation
+    ------------------------
+    TLS ranks trial periods by the **Signal Detection Efficiency** (SDE),
+    defined as the z-score of the signal-residue (SR) statistic across the
+    searched period range (Hippke & Heller 2019, Eq. 8):
+
+    .. math::
+
+        {\\rm SDE} = \\frac{{\\rm SR}_{\\rm peak} - \\mu_{\\rm SR}}
+                         {\\sigma_{\\rm SR}},
+
+    where μ_SR is the arithmetic mean and σ_SR the standard deviation of SR
+    over all trial periods.  The SDE is a ranking statistic; its relationship
+    to a false-alarm probability depends on the noise properties of the
+    specific light curve, detrending, and search bounds (see
+    ``methods/tls_search.md``).
+
+    Parameters
+    ----------
+    time_btjd : Sequence[float]
+        Observation times in BTJD (BJD_TDB − 2_457_000).
+    flux : Sequence[float]
+        Normalised flux values (median ≈ 1).
+    flux_err : Sequence[float]
+        Per-cadence normalised flux uncertainties (must be finite, positive).
+    period_min : float
+        Shortest searched orbital period in days.  Default 0.5 d.
+    period_max : float
+        Longest searched orbital period in days.  Default 15.0 d.
+    use_threads : int
+        TLS worker count.  The default of 1 avoids TLS's multiprocessing path,
+        which is unreliable in constrained Windows shells
+        (``methods/tls_search.md``).
+
+    Returns
+    -------
+    Dict[str, float]
+        Dictionary with keys ``best_period``, ``best_epoch``, ``best_depth_ppm``,
+        ``best_duration_hours``, and ``sde``.  **This is a discovery ranking
+        statistic, not a planetary-validation result.**
+
+    Raises
+    ------
+    RuntimeError
+        If the ``transitleastsquares`` package is absent (requires the
+        ``[discovery]`` optional dependency group) or if TLS returns a
+        non-physical solution.
+    ValueError
+        If input arrays are incompatible, too few points, or period/thread
+        bounds are invalid.
     """
     time = np.asarray(time_btjd, dtype=float)
     values = np.asarray(flux, dtype=float)
     errors = np.asarray(flux_err, dtype=float)
+    # Filter to finite time, flux, and finite positive errors.
     finite = np.isfinite(time) & np.isfinite(values) & np.isfinite(errors) & (errors > 0)
     time = time[finite]
     values = values[finite]
     errors = errors[finite]
+    # NUMERICAL_GUARD: same 50-point floor as BLS.
     if time.size < 50:
         raise ValueError("insufficient data points for TLS transit search")
     if period_min <= 0 or period_max <= period_min:
@@ -369,14 +774,20 @@ def find_transits_tls(
             "TLS search requires the optional 'discovery' dependency group"
         ) from exc
 
+    # Run TLS with verbose=False and no progress bar (headless operation).
+    # use_threads=1 avoids multiprocessing failures on Windows.
     result = transitleastsquares(time, values, errors, verbose=False).power(
         period_min=period_min,
         period_max=period_max,
         show_progress_bar=False,
         use_threads=use_threads,
     )
+    # TLS reports the bottom-of-transit flux (minimum of the best-fit
+    # limb-darkened model).  Convert to relative depth in ppm.
     bottom_flux = float(result.depth)
     depth_relative = 1.0 - bottom_flux
+    # NUMERICAL_GUARD: reject non-finite or unphysical solutions (depth
+    # outside (0, 1) in relative flux units).
     values_to_check = (
         float(result.period),
         float(result.T0),
@@ -396,12 +807,39 @@ def find_transits_tls(
 
 
 def _median_bin(time: np.ndarray, flux: np.ndarray, n_bins: int = 4000) -> Tuple[np.ndarray, np.ndarray]:
-    """Median-bin a time-sorted light curve down to at most n_bins samples."""
+    """Median-bin a time-sorted light curve down to at most ``n_bins`` samples.
+
+    Each bin contains approximately ``N_total / n_bins`` consecutive cadences
+    after time-sorting.  The bin centre is the **mean** time and the bin
+    value is the **median** flux.  The median is more robust against outlier
+    cadences than simple averaging and does not require iterative sigma-
+    clipping.
+
+    This is the binning step used by the candidate-facing BLS runner to
+    cap the matrix at ``max_points`` (default 4000).  TLS searches operate
+    at native cadence and are not binned.
+
+    Parameters
+    ----------
+    time : np.ndarray
+        1-D array of observation times (any absolute system).
+    flux : np.ndarray
+        Matching 1-D flux array.
+    n_bins : int
+        Maximum number of output points.
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray]
+        Binned (time, flux) arrays of length ≤ ``n_bins``, or the original
+        arrays if they are already smaller.
+    """
     if time.size <= n_bins:
         return time, flux
     order = np.argsort(time)
     time_sorted = time[order]
     flux_sorted = flux[order]
+    # Divide sorted indices into n_bins nearly equal partitions.
     edges = np.linspace(0, time_sorted.size, n_bins + 1).astype(int)
     bin_times = np.empty(n_bins, dtype=float)
     bin_flux = np.empty(n_bins, dtype=float)
@@ -422,8 +860,27 @@ def load_candidate_light_curve(
 
     Products are read from ``data/processed/`` first, then ``data/raw/``.
     Multiple products are concatenated (per-sector binning) so multi-sector
-    baselines are searched jointly. Returns None when no readable FITS light
-    curve with at least 50 points exists.
+    baselines are searched jointly.  Returns ``None`` when no readable FITS
+    light curve with at least 50 points exists after quality filtering.
+
+    The ``max_points`` cap triggers ``_median_bin`` inside the underlying
+    ``load_light_curve_table`` call, ensuring that the BLS matrix stays
+    within computational bounds for long-baseline, high-cadence data.
+
+    Parameters
+    ----------
+    workspace : CandidateWorkspace
+        The candidate's workspace directory.
+    max_points : int
+        Maximum number of points after per-product median binning.
+    sectors : Optional[Sequence[int]]
+        Optional list of integer sector numbers to scope; all sectors are
+        used when ``None``.
+
+    Returns
+    -------
+    Optional[Tuple[np.ndarray, np.ndarray]]
+        (time_btjd, flux) arrays or ``None``.
     """
     from .inputs import load_light_curve_table
 
@@ -464,7 +921,32 @@ def _input_manifest_records(
     input_files: Sequence[Path],
     input_sha256s: Sequence[str],
 ) -> List[Dict[str, Any]]:
-    """Describe raw products only while they retain their acquisition provenance."""
+    """Describe raw products only while they retain their acquisition provenance.
+
+    Each raw FITS product must have a hash-matched ``.provenance.json``
+    sidecar and pass the gatekeeper's ``has_valid_raw_product_provenance``
+    check.  If *any* product fails, the whole list is rejected (returned
+    as empty), ensuring that no search output claims provenance that has
+    been invalidated by later product changes.
+
+    This is a **hard gate**: search outputs are only evidence-bearing when
+    every contributing raw product has a valid acquisition provenance record
+    (see ``methods/detrending-and-transit-inference.md``).
+
+    Parameters
+    ----------
+    workspace : CandidateWorkspace
+    input_files : Sequence[Path]
+        Absolute or candidate-relative paths to FITS products.
+    input_sha256s : Sequence[str]
+        Expected SHA-256 digests for each product, in matching order.
+
+    Returns
+    -------
+    List[Dict[str, Any]]
+        List of manifest-ready provenance records, or an empty list if any
+        product fails validation.
+    """
     if len(input_files) != len(input_sha256s) or not input_files:
         return []
     from .gatekeeper import has_valid_raw_product_provenance
@@ -509,16 +991,69 @@ def run_bls_on_candidate(
     duration_grid_hours: Optional[Sequence[float]] = None,
     detrending_method: Optional[str] = None,
 ) -> Path:
-    """Run BLS transit search on candidate data and save JSON summary to outputs/.
+    """Run BLS or TLS transit search on candidate data and save JSON summary to ``outputs/``.
 
-    If ``signal`` is provided, the search reads the matching per-signal prior,
-    uses its duration, and restricts the period grid to +/- 0.1 days around
-    its period. Targeted runs are written to
-    ``outputs/bls_search_results<signal>.json`` so independent signals cannot
-    overwrite one another. A run without ``signal`` retains the historical
-    ``outputs/bls_search_results.json`` path and behavior.
+    This is the **candidate-facing orchestrator** — it loads photometry,
+    validates provenance, selects the engine, and writes a result JSON
+    and a signed manifest.  It replaces a previously decentralised collection
+    of scripts with a single, reproducible pipeline entry point.
 
-    Candidate searches require real, readable light-curve photometry.
+    Signal-targeted mode
+    --------------------
+    When ``signal`` is provided (e.g. ``""`` for the primary, ``".1"`` for a
+    secondary), the search reads the matching per-signal prior from
+    ``config/signals/transit_config<signal>.json``, uses its duration, and
+    restricts the period grid to ±0.1 days around the prior period.
+    Targeted runs write to ``outputs/<engine>_search_results<signal>.json``
+    so independent signals cannot overwrite one another.
+
+    Blind search mode
+    -----------------
+    Without ``signal``, the full ``[period_min, period_max]`` range is scanned
+    using ``n_periods`` as a minimum trial density.  BLS uses per-product
+    median binning capped at 4000 points; TLS operates at native cadence.
+
+    Provenance gates
+    ----------------
+    Both engines require **schema-valid, hash-matched raw provenance
+    sidecars** for every input FITS product.  If a product's provenance has
+    been invalidated (missing sidecar, hash mismatch, or failed gatekeeper
+    check), the search fails with a ``ValueError`` rather than producing
+    unattributable output.
+
+    Parameters
+    ----------
+    workspace : CandidateWorkspace
+    period_min, period_max : float
+        Blind-search period bounds in days.  Ignored in targeted mode.
+    n_periods : int
+        Minimum trial period density (BLS only; acts as floor).
+    signal : Optional[str]
+        Per-signal suffix (``""`` or ``".1"``, etc.) for targeted mode.
+    engine : str
+        ``"bls"`` or ``"tls"``.
+    sectors : Optional[Sequence[int]]
+        Optional sector filter.
+    result_suffix : Optional[str]
+        ``.label`` suffix for blind search output disambiguation; mutually
+        exclusive with ``signal``.
+    duration_grid_hours : Optional[Sequence[float]]
+        BLS-only multi-duration scan.
+    detrending_method : Optional[str]
+        Name of the detrending method whose ``data/processed/`` product
+        should be consumed.  ``None`` uses raw photometry.
+
+    Returns
+    -------
+    Path
+        Absolute path to the written result JSON.
+
+    Raises
+    ------
+    ValueError
+        If engine, signal, suffix, or input data are inconsistent or invalid.
+    RuntimeError
+        If provenance sidecars change during the search (integrity violation).
     """
     from .inputs import BTJD_TIME_SYSTEM
 
@@ -526,6 +1061,7 @@ def run_bls_on_candidate(
         raise ValueError("search engine must be 'bls' or 'tls'")
     if duration_grid_hours is not None and engine != "bls":
         raise ValueError("duration_grid_hours is supported only by BLS searches")
+    # Validate frequency grid before any I/O to catch configuration errors early.
     if engine == "bls":
         _frequency_period_grid(period_min, period_max, n_periods)
 
@@ -566,6 +1102,9 @@ def run_bls_on_candidate(
         if not np.isfinite(duration_hours) or duration_hours <= 0:
             raise ValueError("signal prior duration must be positive and finite")
 
+        # ASTROPHYSICAL_HEURISTIC: ±0.1 d window around the prior period.
+        # This is wide enough to capture the expected precision of a catalog
+        # ephemeris on a multi-sector baseline while excluding unrelated peaks.
         period_min = max(0.5, prior_p - 0.1)
         period_max = prior_p + 0.1
         if period_max <= period_min:
@@ -599,6 +1138,8 @@ def run_bls_on_candidate(
     input_sha256s: List[str] = []
     preprocessing: Dict[str, Any] = dict(PIPELINE_NORMALIZATION)
     if engine == "tls":
+        # TLS loads at native cadence (max_points=None) and requires
+        # raw provenance sidecars for every contributing product.
         from .inputs import load_light_curve_table
 
         native_table = load_light_curve_table(
@@ -698,6 +1239,9 @@ def run_bls_on_candidate(
     payload["time_system"] = BTJD_TIME_SYSTEM
     payload["n_points"] = int(time.size)
     payload["preprocessing"] = preprocessing
+    # SCIENTIFIC_BOUNDARY: the statistic payload explicitly records that
+    # neither SNR nor SDE is a calibrated FAP.  Downstream consumers
+    # (screening, vetting) must treat them as ranking scores only.
     payload["statistic"] = {
         "name": (
             "weighted BLS fitted-depth signal-to-noise"
@@ -719,6 +1263,8 @@ def run_bls_on_candidate(
         payload["search_provenance"] = signal_provenance
 
     if engine in ("bls", "tls"):
+        # Hard gate: re-validate provenance AFTER writing the result so we
+        # detect sidecar changes that occurred during the search window.
         current_input_records = _input_manifest_records(
             workspace, input_files, input_sha256s
         )
@@ -796,14 +1342,52 @@ def calculate_ttv_super_period(
     period_outer_days: float,
     j_resonance: int = 2,
 ) -> float:
-    """Return TTV super-period P_ttv in days for a j:j-1 resonance."""
+    """Return TTV super-period :math:`P_{\\rm TTV}` in days for a j:j−1 resonance.
+
+    Mathematical Formulation
+    ------------------------
+    For two planets in (or near) a first-order mean-motion resonance
+    *j* : *j*−1, the libration (super) period of the transit-timing
+    variations is the inverse of the beat frequency between the resonant
+    outer frequency and inner frequency (Lithwick et al. 2012, Fabrycky
+    2010):
+
+    .. math::
+
+        P_{\\rm TTV}
+        = \\frac{1}{|f_{\\rm inner} - f_{\\rm outer}|},
+        \\qquad
+        f_{\\rm inner} = \\frac{j}{P_{\\rm outer}},
+        \\quad
+        f_{\\rm outer} = \\frac{j-1}{P_{\\rm inner}}.
+
+    When :math:`P_{\\rm outer}/P_{\\rm inner} = j/(j-1)`, the frequencies
+    are equal, :math:`P_{\\rm TTV}\\to\\infty` (exact resonance), and the
+    analytic formula returns ``float('inf')``.
+
+    Parameters
+    ----------
+    period_inner_days : float
+        Orbital period of the inner planet in days (> 0).
+    period_outer_days : float
+        Orbital period of the outer planet in days (> period_inner).
+    j_resonance : int
+        Integer *j* for a j:j−1 resonance (≥ 2).  Default 2 (2:1).
+
+    Returns
+    -------
+    float
+        TTV super-period in days, or ``float('inf')`` for exact resonance.
+    """
     if period_inner_days <= 0 or period_outer_days <= period_inner_days:
         raise ValueError("periods must satisfy 0 < P_inner < P_outer")
     if j_resonance <= 1:
         raise ValueError("j_resonance must be an integer >= 2")
+    # Beat frequency: |j/P_outer − (j−1)/P_inner|.
     freq_inner = j_resonance / period_outer_days
     freq_outer = (j_resonance - 1) / period_inner_days
     delta_freq = abs(freq_inner - freq_outer)
+    # NUMERICAL_GUARD: exact resonance yields Δf = 0 → infinite super-period.
     if delta_freq == 0:
         return float("inf")
     return 1.0 / delta_freq
@@ -814,7 +1398,38 @@ def compute_linear_ephemeris_residuals(
     period_days: float,
     epoch_btjd: float,
 ) -> Dict[str, Any]:
-    """Return dict with ``residuals_minutes`` (list of O−C) and ``n_nonfinite_midtimes``."""
+    """Compute observed-minus-calculated (O−C) residuals for a linear ephemeris.
+
+    For each observed mid-time :math:`t_{\\rm obs}`, the nearest epoch
+    number is
+
+    .. math::
+
+        n = {\\rm round}\\left(\\frac{t_{\\rm obs} - T_0}{P}\\right),
+
+    and the calculated time is :math:`t_{\\rm calc} = T_0 + n P`.  The O−C
+    residual in minutes is :math:`(t_{\\rm obs} - t_{\\rm calc}) \\times
+    1440` (rounded to 4 decimal places).
+
+    This linear formulation assumes no TTV, orbital decay, apsidal precession,
+    or instrument-system clock differences.  Non-finite mid-times are skipped
+    and tallied separately.
+
+    Parameters
+    ----------
+    transit_times_btjd : Sequence[float]
+        Observed transit mid-times in BTJD.
+    period_days : float
+        Linear ephemeris period in days (> 0).
+    epoch_btjd : float
+        Reference transit epoch T₀ in BTJD.
+
+    Returns
+    -------
+    Dict[str, Any]
+        ``residuals_minutes`` (list of float, rounded to 4 d.p.) and
+        ``n_nonfinite_midtimes`` (int count of skipped non-finite entries).
+    """
     if period_days <= 0:
         raise ValueError("period_days must be positive")
     residuals_min = []
@@ -827,8 +1442,10 @@ def compute_linear_ephemeris_residuals(
             )
             n_nonfinite_midtimes += 1
             continue
+        # Nearest integer epoch: n = round((t_obs − T₀) / P).
         n_epoch = round((t_obs_float - float(epoch_btjd)) / float(period_days))
         t_calc = float(epoch_btjd) + n_epoch * float(period_days)
+        # O−C in days, converted to minutes (×1440), rounded to 0.0001 min.
         omc_days = t_obs_float - t_calc
         residuals_min.append(round(omc_days * 1440.0, 4))
     return {"residuals_minutes": residuals_min, "n_nonfinite_midtimes": n_nonfinite_midtimes}

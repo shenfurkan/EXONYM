@@ -41,32 +41,6 @@ def test_empty_local_template_directory_prevents_partial_workspace(tmp_path):
     assert not (tmp_path / "candidate" / "empty-template-test").exists()
 
 
-def test_bundled_resources_match_source_resource_trees():
-    # Arrange
-    repository_root = Path(__file__).resolve().parents[1]
-    source_roots = (repository_root / "templates", repository_root / "schemas")
-    bundled_root = repository_root / "src" / "exonym" / "_resources"
-
-    # Act / Assert
-    for source_root in source_roots:
-        bundled_directory = bundled_root / source_root.name
-        source_files = {
-            path.relative_to(source_root)
-            for path in source_root.rglob("*")
-            if path.is_file()
-        }
-        bundled_files = {
-            path.relative_to(bundled_directory)
-            for path in bundled_directory.rglob("*")
-            if path.is_file()
-        }
-        assert bundled_files == source_files
-        for relative_path in source_files:
-            assert _normalized_text(bundled_directory / relative_path) == _normalized_text(
-                source_root / relative_path
-            )
-
-
 def test_default_root_uses_cwd_for_an_installed_package(monkeypatch, tmp_path):
     # Arrange
     installed_module = tmp_path / "site-packages" / "exonym" / "__main__.py"

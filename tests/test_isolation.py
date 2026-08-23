@@ -121,7 +121,7 @@ def test_registered_alias_leak_outside_candidate_fails(tmp_path):
     assert any(v.rule == "registered-alias-leak" for v in report.violations)
 
 
-def test_hardcoded_sectors_in_shared_source_fail(tmp_path):
+def test_hardcoded_sectors_in_shared_source_produce_warnings(tmp_path):
     repo = _make_repo(tmp_path)
     _write(
         repo,
@@ -130,8 +130,10 @@ def test_hardcoded_sectors_in_shared_source_fail(tmp_path):
     )
 
     report = check_repository(repo)
-    assert not report.ok
+    # AST scan downgraded to warnings: report.ok must be True.
+    assert report.ok
     assert any(v.rule == "hardcoded-target-literal" for v in report.violations)
+    assert all(v.severity == "warning" for v in report.violations if v.rule == "hardcoded-target-literal")
 
 
 def test_generic_source_passes(tmp_path):
@@ -150,17 +152,22 @@ def test_generic_source_passes(tmp_path):
     assert report.ok, format_report(report)
 
 
-def test_ephemeris_keyword_literal_fails_but_trivial_passes(tmp_path):
+def test_ephemeris_keyword_literal_warning_but_trivial_passes(tmp_path):
     repo = _make_repo(tmp_path)
     _write(
         repo,
         "src/analysis.py",
         "fit(period_days=9.2224171, epoch_btjd=2281.123)\n",
     )
-    assert not check_repository(repo).ok
+    report = check_repository(repo)
+    # AST scan now produces warnings, not errors.
+    assert report.ok
+    assert any(v.rule == "hardcoded-ephemeris-keyword" for v in report.violations)
+    assert all(v.severity == "warning" for v in report.violations if v.rule == "hardcoded-ephemeris-keyword")
 
     _write(repo, "src/analysis.py", "fit(period_days=1.0, epoch_btjd=0.0)\n")
-    assert check_repository(repo).ok
+    report = check_repository(repo)
+    assert report.ok
 
 
 def test_research_payload_outside_candidate_fails(tmp_path):

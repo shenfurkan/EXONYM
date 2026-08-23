@@ -1,8 +1,64 @@
 """Candidate workspace registration, template mirroring, and layout helpers.
 
-Target-specific research is only permitted under ``candidate/<candidate-id>/``.
+Directory Ownership Model
+--------------------------
+The repository enforces a strict two-zone isolation boundary (see
+``exonym-core-architecture``).  Target-specific data --- photometry, ephemerides,
+pipeline outputs, decisions, and claims --- may *only* reside under
+``candidate/<candidate-id>/``.  Every other subdirectory (``src/``, ``schemas/``,
+``templates/``, ``tests/``, ``docs/``, ``policy/``) is the protected neutral
+zone.  This module defines the 23 standard subdirectories that every candidate
+workspace provisions and the metadata schema (v2) that binds each workspace to
+the lifecycle and workflow state machine.
+
+Template Mirroring Invariant
+-----------------------------
 New workspaces are provisioned by cloning the global ``templates/`` tree and
-binding placeholder identifiers. This module contains no target constants.
+substituting ``{{CANDIDATE_ID}}`` and related identity placeholders.  The
+template source is resolved in priority order: (1) a project-local editable
+``templates/`` directory, (2) the bundled immutable copy inside the installed
+wheel.  A missing *or empty* template tree is a hard error --- it would leave a
+workspace without its mandatory protocol, decision, and tracking skeleton files,
+preventing the workspace from ever passing its workflow gates.
+
+Schema v2 Metadata Contract
+----------------------------
+Every workspace is registered by ``candidate.json`` at schema version 2.  The
+record carries:
+
+* ``candidate_id`` --- normalized lowercase directory-safe identifier.
+* ``identifiers`` --- namespace of survey-alert and catalog handles (aliases,
+  mission tag, optional per-signal forwarder).
+* ``lifecycle`` --- one of ``active``, ``paused``, ``stopped``, ``published``,
+  ``archived``, with a state-transition timestamp and reason.
+* ``workflow`` --- current seven-phase position (``intake`` through ``review``).
+* ``scientific_disposition`` --- ``unknown``, ``candidate``,
+  ``unvalidated_candidate``, ``false_positive``, ``validated``, ``confirmed``,
+  or ``inconclusive``.
+* ``publication`` --- ``none``, ``draft``, ``submitted``, or ``published``.
+
+Validation enforces:
+
+* Schema version match (exactly 2).
+* Candidate ID matches its enclosing directory name.
+* Lifecycle state, workflow phase, disposition, and publication values drawn
+  from the closed enumerations declared in this module.
+* Non-finite JSON number constants (``Infinity``, ``NaN``) are rejected at the
+  parse level; duplicate object keys produce an immediate error.
+* Workspace paths and metadata files must never be symlinks, junctions, or
+  reparse points (validated by ``exonym.isolation.is_reparse_point``).
+
+Relationship to Feasibility and Triage
+---------------------------------------
+The workspace lifecycle is defined by ``methods/candidate-feasibility.md``
+(12 stop conditions; go/no-go assessment before committing analysis time) and
+``methods/engine-execution-and-triage.md`` (routing rule triage =
+max(s_screen, s_archive, s_localization, s_activity, s_dilution); FPP sum
+formula; DS9 coordinate handling).  The ``analysis`` gate is intentionally
+always blocked until calibrated scene-model integration exists.
+
+This module contains no target constants, sector numbers, ephemeris values, or
+registered candidate aliases.
 """
 
 from __future__ import annotations
@@ -18,9 +74,58 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from .resources import iter_template_texts
 
 
+# ---------------------------------------------------------------------------
+# Directory ownership: every candidate workspace lives under this top-level
+# collection directory.  The name is part of the isolation boundary ---
+# target-specific data may NOT appear outside it.
+# ---------------------------------------------------------------------------
 CANDIDATE_DIRECTORY = "candidate"
+
+# The schema-v2 identity record stored in every workspace root.
 METADATA_FILENAME = "candidate.json"
+
+# Increment only when the metadata record format changes incompatibly.
+# The ``validate_metadata`` gate rejects any other version.
 SCHEMA_VERSION = 2
+# ---------------------------------------------------------------------------
+# 23 standard directories provisioned in every candidate workspace.
+#
+# config/         Candidate-local YAML/JSON configuration overrides.
+# data/raw/       Immutable ingested photometry, pixel-level FITS, and
+#                 provenance sidecars keyed by product stem.
+# data/external/  Star catalogs, stellar-parameter tables, literature
+#                 values ingested from third-party sources.
+# data/interim/   Intermediate pipeline products (e.g. extracted light
+#                 curves before detrending).
+# data/processed/ Detrended light curves, normalized time series, and
+#                 other analysis-ready artifacts.
+# protocols/      Frozen analysis protocols and methodological decisions
+#                 recorded before producing outputs.
+# runs/           Per-engine run directories with SHA-256 input/output
+#                 manifests and status records.
+# gates/          Phase-gate sign-off artifacts produced by
+#                 ``exonym.gatekeeper`` (mandatory-item checklists).
+# claims/         Candidate-local claim evidence (FPP reports, validation
+#                 summaries).  The analysis gate intentionally blocks
+#                 writing ``fpp_claim.json``.
+# decisions/      Recorded go/no-go, rejection, and hold decisions with
+#                 supporting evidence references.
+# provenance/     SHA-256 manifests for reproducibility bundles.
+# outputs/        Numerical outputs, tables, CSV exports from pipeline
+#                 stages.
+# figures/        Publication-quality and diagnostic plots.
+# literature/     PDFs, references, and annotated bibliography files.
+# manuscripts/    Draft manuscripts, figure compositions, and LaTeX
+#                 sources.
+# releases/       Frozen release bundles produced by ``exonym freeze``.
+# scripts/        Candidate-specific analysis and plotting scripts.
+# tests/          Candidate-local validation and regression tests.
+# docs/           Narrative documentation, feasibility reports, and
+#                 technical notes.
+# tracking/       Gate-progress telemetry (Markdown checklists parsed by
+#                 ``exonym.tracking``).
+# scratch/        Temporary files not tracked by provenance or releases.
+# ---------------------------------------------------------------------------
 WORKSPACE_DIRECTORIES = (
     "config",
     "data/raw",
@@ -45,7 +150,13 @@ WORKSPACE_DIRECTORIES = (
     "scratch",
 )
 
+# Closed enumeration of lifecycle states.  Transitions are recorded with a
+# UTC timestamp and free-text reason in the metadata record.
 LIFECYCLE_STATES = ("active", "paused", "stopped", "published", "archived")
+# Ordered seven-phase workflow defined by ``methods/candidate-feasibility.md``
+# and ``methods/engine-execution-and-triage.md``.  Phase advancement requires
+# checked ``[MANDATORY]`` tracking items and a passing phase-specific gate.
+# The ``analysis`` gate is intentionally always blocked.
 WORKFLOW_PHASES = (
     "intake",
     "feasibility",
@@ -55,6 +166,11 @@ WORKFLOW_PHASES = (
     "analysis",
     "review",
 )
+# Scientific disposition taxonomy.  ``unvalidated_candidate`` is the
+# machine-produced label written by ``exonym vet``; ``validated`` and
+# ``confirmed`` require external review evidence not produced by the
+# pipeline alone.  ``false_positive`` may be assigned by a decisive
+# rejection record or an external adjudication.
 SCIENTIFIC_DISPOSITIONS = (
     "unknown",
     "candidate",
@@ -64,11 +180,26 @@ SCIENTIFIC_DISPOSITIONS = (
     "confirmed",
     "inconclusive",
 )
+# Publication lifecycle, independent of the scientific disposition.
 PUBLICATION_STATES = ("none", "draft", "submitted", "published")
+
+# Recognized survey missions for metadata tagging and ingestion routing.
 MISSIONS = ("tess", "kepler", "k2", "plato", "cheops")
 
+# NUMERICAL_GUARD: pattern enforces directory-safe candidate IDs.
+# Must start with alphanumeric, contain only lowercase letters, digits,
+# dots, hyphens, or underscores.  This prevents path traversal, shell
+# metacharacter injection, and directory separator injection.
 _CANDIDATE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
+# Per-signal fixed-width suffix: exactly a dot followed by two digits.
+# This deterministic length prevents glob ambiguity in per-signal paths.
 _SIGNAL_SUFFIX = re.compile(r"^\.\d{2}$")
+
+# NUMERICAL_GUARD: Windows filesystem reserves these names regardless
+# of extension.  Rejecting them at validation time prevents a candidate
+# workspace from being created at a path that Windows cannot access
+# reliably.
 _RESERVED_WINDOWS_NAMES = {
     "CON", "PRN", "AUX", "NUL",
     *(f"COM{i}" for i in range(1, 10)),
@@ -78,7 +209,26 @@ _RESERVED_WINDOWS_NAMES = {
 
 @dataclass(frozen=True)
 class CandidateWorkspace:
-    """A registered candidate and its workspace metadata."""
+    """A registered candidate and its workspace metadata.
+
+    This immutable record binds a candidate identifier to its filesystem
+    location and schema-v2 identity record.  It is produced by
+    ``create_candidate`` or ``load_candidate`` and consumed by every
+    downstream module that needs access to candidate-owned artifacts.
+
+    Parameters
+    ----------
+    repository_root : pathlib.Path
+        Absolute resolved path to the repository root.
+    candidate_id : str
+        Normalized lowercase directory-safe identifier.
+    path : pathlib.Path
+        Absolute path to the workspace directory
+        (``<repository_root>/candidate/<candidate_id>``).
+    metadata : dict
+        Schema-v2 identity record loaded from ``candidate.json``,
+        validated against the closed enumerations in this module.
+    """
 
     repository_root: Path
     candidate_id: str
@@ -87,7 +237,39 @@ class CandidateWorkspace:
 
 
 def validate_candidate_id(candidate_id: str) -> str:
-    """Normalize and validate a directory-safe candidate identifier."""
+    """Normalize and validate a directory-safe candidate identifier.
+
+    Applies three layers of defense:
+
+    1. **Normalization**: strips leading/trailing whitespace and lowercases
+       the entire string so that identifier lookup is case-insensitive
+       while the filesystem entry is always lowercase.
+    2. **Character-class gate**: rejects identifiers that contain characters
+       outside ``[a-z0-9._-]`` or that start with a non-alphanumeric
+       character.  This prevents path traversal via ``..``, shell
+       metacharacter injection, and directory separator embedding.
+    3. **Windows reserved-name check**: rejects identifiers whose first
+       dot-separated component collides with a reserved Windows device
+       name (``CON``, ``PRN``, ``AUX``, ``NUL``, ``COM1``-``COM9``,
+       ``LPT1``-``LPT9``) or that end with a dot or space --- both
+       illegal on Windows NTFS.
+
+    Parameters
+    ----------
+    candidate_id : str
+        Raw identifier string, possibly with mixed case or whitespace.
+
+    Returns
+    -------
+    str
+        Normalized lowercase identifier safe for use as a directory name.
+
+    Raises
+    ------
+    ValueError
+        If the identifier contains forbidden characters, collides with a
+        reserved name, or has an illegal terminal character.
+    """
     normalized = candidate_id.strip().lower()
     if not _CANDIDATE_ID.fullmatch(normalized):
         raise ValueError(
@@ -99,7 +281,35 @@ def validate_candidate_id(candidate_id: str) -> str:
 
 
 def validate_signal_suffix(signal: Optional[str]) -> Optional[str]:
-    """Validate one fixed-width per-signal suffix before it is used in a path."""
+    """Validate one fixed-width per-signal suffix before it is used in a path.
+
+    Per-signal artifact directories and filenames use a deterministic
+    ``.NN`` suffix (dot followed by exactly two digits, e.g. ``.01``,
+    ``.02``).  This fixed-width convention:
+
+    * Prevents lexicographic sorting artefacts (``.2`` would sort after
+      ``.10`` in a naive string sort).
+    * Makes glob patterns unambiguous: ``*.01.*`` uniquely selects the
+      first signal's artifacts.
+    * Avoids collision with the reserved Windows device-name rule applied
+      to candidate IDs (``.01`` is never a reserved component).
+
+    Parameters
+    ----------
+    signal : str or None
+        The raw signal suffix (e.g. ``".01"``) or ``None`` to indicate
+        the top-level (primary) signal.
+
+    Returns
+    -------
+    str or None
+        The validated suffix if non-``None``, otherwise ``None``.
+
+    Raises
+    ------
+    ValueError
+        If ``signal`` is not a string matching the ``.NN`` format.
+    """
     if signal is None:
         return None
     if not isinstance(signal, str) or _SIGNAL_SUFFIX.fullmatch(signal) is None:
@@ -108,15 +318,55 @@ def validate_signal_suffix(signal: Optional[str]) -> Optional[str]:
 
 
 def _candidate_path(repository_root: Path, candidate_id: str) -> Path:
-    """Return the one permitted direct workspace path for a candidate ID."""
+    """Return the one permitted direct workspace path for a candidate ID.
+
+    This enforces the directory ownership invariant: a candidate's
+    workspace is *always* ``<repository_root>/candidate/<candidate_id>/``.
+    No other location is valid for candidate-owned data.  The path is
+    resolved before return to eliminate any symlink indirection.
+    """
     return repository_root.resolve() / CANDIDATE_DIRECTORY / validate_candidate_id(candidate_id)
 
 
 def _created_at() -> str:
+    """Return the current UTC time as a compact ISO-8601 string with ``Z`` suffix.
+
+    The microsecond field is truncated so that timestamps are human-readable
+    and stable across round-trips.  The ``Z`` suffix (rather than ``+00:00``)
+    is chosen for terseness in metadata records.
+    """
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _placeholder_bindings(metadata: Dict[str, Any]) -> Dict[str, str]:
+    """Build the token-replacement map for template mirroring.
+
+    Every ``{{TOKEN}}`` in a template file is replaced with its bound value
+    before the file is written to the candidate workspace.  Tokens that
+    resolve to ``None`` (e.g. an unset survey-alert identifier) are replaced
+    with the literal string ``"TBD"`` so that the resulting file remains
+    syntactically valid and the operator can see what needs to be filled in.
+
+    The binding map is:
+
+    * ``{{CANDIDATE_ID}}`` → ``metadata["candidate_id"]``
+    * ``{{TOI}}`` → ``identifiers["toi"]`` or ``"TBD"``
+    * ``{{TIC}}`` → ``identifiers["tic"]`` or ``"TBD"``
+    * ``{{TIMESTAMP}}`` → ``metadata["created_at"]`` (UTC ISO-8601)
+    * ``{{STATUS}}`` → ``metadata["lifecycle"]["state"]``
+    * ``{{PHASE}}`` → ``metadata["workflow"]["phase"]``
+
+    Parameters
+    ----------
+    metadata : dict
+        Schema-v2 identity record with ``candidate_id``, ``identifiers``,
+        ``lifecycle``, ``workflow``, and ``created_at`` keys.
+
+    Returns
+    -------
+    dict
+        Mapping from template token string to replacement string.
+    """
     identifiers = metadata["identifiers"]
     return {
         "{{CANDIDATE_ID}}": metadata["candidate_id"],
@@ -135,11 +385,39 @@ def mirror_templates(
 ) -> List[Path]:
     """Clone the global template tree into a candidate workspace.
 
-    Template files are copied into their target directories (docs/, protocols/,
-    decisions/, tracking/) and placeholder tokens are bound to the candidate
-    identity record. Existing files are never overwritten.  Source checkouts
-    use their editable root ``templates/`` directory; installed wheels use the
-    bundled target-neutral template copy.
+    Template files are copied into their target directories (``docs/``,
+    ``protocols/``, ``decisions/``, ``tracking/``) and every ``{{TOKEN}}``
+    placeholder is bound to the candidate identity record.  Existing files
+    are *never* overwritten --- this protects operator-authored content from
+    accidental clobbering during re-provisioning.
+
+    Template resolution follows the priority chain implemented by
+    ``exonym.resources.iter_template_texts``:
+
+    1. A project-local editable ``templates/`` directory at the repository
+       root, if present and non-empty.
+    2. The bundled immutable template copy inside the installed wheel
+       (``exonym._resources/templates/``).
+
+    A missing or empty template source raises an error *before* the
+    candidate workspace tree is mutated, preventing a partial workspace
+    that can never pass its workflow gates.
+
+    Parameters
+    ----------
+    repository_root : pathlib.Path
+        Resolved repository root used to locate the ``templates/`` source.
+    workspace : CandidateWorkspace
+        Target workspace whose ``path`` receives the mirrored files.
+    template_texts : sequence of (Path, str) or None
+        Pre-fetched template payloads.  When ``None``, templates are
+        resolved via ``iter_template_texts(repository_root)``.
+
+    Returns
+    -------
+    list of pathlib.Path
+        Absolute paths of newly written template files (existing files
+        are excluded from this list).
     """
     if template_texts is None:
         template_texts = list(iter_template_texts(repository_root))
@@ -158,6 +436,24 @@ def mirror_templates(
 
 
 def _candidate_readme(metadata: Dict[str, Any]) -> str:
+    """Generate the workspace README.md from schema-v2 identity metadata.
+
+    The rendered README is a human-facing dashboard that displays the
+    current lifecycle state, workflow phase, scientific disposition,
+    publication status, and identifier bindings.  It is regenerated on
+    ``create_candidate`` but never overwritten automatically afterward ---
+    operators are expected to maintain it alongside their workspace.
+
+    Parameters
+    ----------
+    metadata : dict
+        Schema-v2 identity record.
+
+    Returns
+    -------
+    str
+        Markdown text for the workspace root README.
+    """
     identifiers = metadata["identifiers"]
     toi = identifiers.get("toi") or "pending verification"
     tic = identifiers.get("tic") or "pending verification"
@@ -204,7 +500,45 @@ def new_candidate_metadata(
     tags: Optional[Sequence[str]] = None,
     mission: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Return the standard schema v2 identity record for a new candidate."""
+    """Return the standard schema-v2 identity record for a new candidate.
+
+    The returned dictionary is the authoritative bootstrap record written
+    as ``candidate.json`` during ``create_candidate``.  It initialises:
+
+    * ``schema_version`` to 2 (the only version accepted by
+      ``validate_metadata``).
+    * ``lifecycle.state`` to ``"active"`` with an ISO-8601 UTC timestamp
+      and reason ``"Initial intake"``.
+    * ``workflow.phase`` to ``"intake"`` (the first of seven phases).
+    * ``scientific_disposition`` to ``"unknown"``.
+    * ``publication`` to ``"none"``.
+    * ``identifiers.aliases`` seeded with ``[candidate_id]``.
+
+    Parameters
+    ----------
+    candidate_id : str
+        Normalized lowercase directory-safe identifier (already validated).
+    toi : str or None
+        Optional survey-alert identifier; validated against the pattern
+        ``\\d{1,7}(\\.\\d{1,2})?`` (e.g. ``"1234.01"``).
+    tic : str or None
+        Optional catalog identifier; must be a positive integer string
+        matching ``[1-9]\\d{0,19}``.
+    tags : sequence of str or None
+        Optional metadata tags attached to ``identifiers.tags``.
+    mission : str or None
+        Survey mission tag; must be one of ``MISSIONS`` if provided.
+
+    Returns
+    -------
+    dict
+        Schema-v2 identity record ready for JSON serialization.
+
+    Raises
+    ------
+    ValueError
+        If ``toi``, ``tic``, or ``mission`` fail their format validations.
+    """
     if toi is not None and not re.fullmatch(r"\d{1,7}(\.\d{1,2})?", str(toi)):
         raise ValueError("toi must look like a TOI number, e.g. 1234.01")
     if tic is not None and not re.fullmatch(r"[1-9]\d{0,19}", str(tic)):
@@ -238,7 +572,39 @@ def new_candidate_metadata(
 
 
 def validate_metadata(metadata: Dict[str, Any], candidate_id: str) -> None:
-    """Minimally validate an identity record without external schema files."""
+    """Minimally validate a schema-v2 identity record without external schema files.
+
+    This inline validator enforces the core schema contract that every
+    downstream consumer depends on.  It checks:
+
+    1. **Schema version** --- must be exactly 2.  A mismatch indicates a
+       record from a different (possibly incompatible) EXONYM version.
+    2. **Candidate ID binding** --- ``metadata["candidate_id"]`` must match
+       the directory name, preventing identity/directory drift.
+    3. **Closed enumerations** --- ``lifecycle.state``, ``workflow.phase``,
+       ``scientific_disposition``, and ``publication`` must each be drawn
+       from the respective module-level tuple.  Unknown values are rejected.
+    4. **Identifiers shape** --- ``identifiers`` must be a dict, optional
+       ``tags`` must be a list of non-empty strings, and optional
+       ``mission`` must be a recognized value.
+
+    This function is intentionally self-contained (no JSON Schema library
+    dependency) so that it can gate workspace loading before any optional
+    dependencies are verified.
+
+    Parameters
+    ----------
+    metadata : dict
+        Parsed ``candidate.json`` contents.
+    candidate_id : str
+        Normalized identifier expected to match the enclosing directory.
+
+    Raises
+    ------
+    ValueError
+        If any validation check fails, with a message naming the violated
+        constraint.
+    """
     if not isinstance(metadata, dict):
         raise ValueError("candidate metadata must be a JSON object")
     if metadata.get("schema_version") != SCHEMA_VERSION:
@@ -269,7 +635,12 @@ def validate_metadata(metadata: Dict[str, Any], candidate_id: str) -> None:
 
 
 def _parse_finite_float(value: str) -> float:
-    """Parse one metadata number without allowing an infinite value."""
+    """Parse one metadata number without allowing an infinite value.
+
+    # NUMERICAL_GUARD: JSON's ``Infinity`` and ``-Infinity`` are not
+    # finite numeric values and would corrupt downstream arithmetic.
+    # Rejecting them at the parse level prevents silent propagation.
+    """
     parsed = float(value)
     if not math.isfinite(parsed):
         raise ValueError("non-finite JSON number")
@@ -277,12 +648,24 @@ def _parse_finite_float(value: str) -> float:
 
 
 def _reject_nonfinite_json_constant(value: str) -> object:
-    """Reject non-standard JSON constants in candidate metadata."""
+    """Reject non-standard JSON constants in candidate metadata.
+
+    # NUMERICAL_GUARD: JSON's ``NaN`` and signed ``Infinity`` constants
+    # are not valid numbers for metadata records.  They cannot be
+    # serialized losslessly, compared reliably, or used in downstream
+    # calculations.
+    """
     raise ValueError("non-finite JSON constant: {0}".format(value))
 
 
 def _reject_duplicate_json_keys(pairs: Sequence[Tuple[str, object]]) -> Dict[str, object]:
-    """Reject duplicate metadata keys rather than applying last-key-wins semantics."""
+    """Reject duplicate metadata keys rather than applying last-key-wins semantics.
+
+    Python's default ``json.loads`` silently keeps the last value when a
+    key appears more than once.  For candidate metadata this is dangerous:
+    a typo that duplicates a key could mask a stale or incorrect value.
+    Rejecting duplicates at parse time makes the error immediately visible.
+    """
     result: Dict[str, object] = {}
     for key, value in pairs:
         if key in result:
@@ -299,12 +682,69 @@ def create_candidate(
     tags: Optional[Sequence[str]] = None,
     mission: Optional[str] = None,
 ) -> CandidateWorkspace:
-    """Create a registered candidate workspace without overwriting existing work."""
+    """Create a registered candidate workspace without overwriting existing work.
+
+    This is the sole entry point for provisioning a new candidate workspace.
+    It executes the following ordered steps, each gated by the preceding one:
+
+    1. **Validate and normalize** the candidate ID (``validate_candidate_id``).
+    2. **Reject collision** --- if a workspace or case-insensitive ID match
+       already exists, raise ``FileExistsError``.
+    3. **Resolve template source** via ``iter_template_texts``.  This call
+       fails fast if the template tree is missing or empty, preventing
+       mutation of ``candidate/`` before the workspace's skeleton is known
+       to be complete.
+    4. **Build schema-v2 metadata** (``new_candidate_metadata``) and write
+       ``candidate.json`` with sorted keys and ``parse_constant``-safe
+       serialization.
+    5. **Provision the 23 standard subdirectories** defined by
+       ``WORKSPACE_DIRECTORIES``.
+    6. **Write README.md** from the metadata template.
+    7. **Mirror templates** --- clone every file from the resolved template
+       source, substituting ``{{TOKEN}}`` placeholders.  Existing files are
+       skipped.
+
+    The returned ``CandidateWorkspace`` is an immutable snapshot that can be
+    passed to every downstream consumer.
+
+    Parameters
+    ----------
+    repository_root : pathlib.Path
+        Absolute or relative path to the repository root (resolved before use).
+    candidate_id : str
+        Raw identifier; will be normalized and validated.
+    toi : str or None
+        Optional survey-alert identifier.
+    tic : str or None
+        Optional catalog identifier.
+    tags : sequence of str or None
+        Optional metadata tags.
+    mission : str or None
+        Survey mission key (e.g. ``"tess"``).
+
+    Returns
+    -------
+    CandidateWorkspace
+        The newly created workspace record.
+
+    Raises
+    ------
+    FileExistsError
+        If the workspace directory already exists or a case-insensitive
+        ID collision is detected.
+    FileNotFoundError
+        If the template source is missing or empty.
+    ValueError
+        If the candidate ID or any metadata field fails validation.
+    """
     repository_root = repository_root.resolve()
     normalized_id = validate_candidate_id(candidate_id)
     path = _candidate_path(repository_root, normalized_id)
     if path.exists():
         raise FileExistsError("candidate workspace already exists: {0}".format(path))
+    # Case-insensitive collision check across all discovered workspaces.
+    # A directory name "foo" and "FOO" would be the same on case-insensitive
+    # filesystems; pre-emptively rejecting prevents cross-platform drift.
     existing = [candidate.candidate_id for candidate in discover_candidates(repository_root)]
     if any(other.casefold() == normalized_id.casefold() for other in existing):
         raise FileExistsError("candidate ID collides with an existing workspace")
@@ -327,13 +767,59 @@ def create_candidate(
 
 
 def load_candidate(repository_root: Path, candidate_id: str) -> CandidateWorkspace:
-    """Load and validate a registered candidate workspace."""
+    """Load and validate a registered candidate workspace.
+
+    This is the primary entry point for opening an existing workspace.
+    It performs a sequence of safety checks before returning:
+
+    1. **Resolve and normalize** the repository root and candidate ID.
+    2. **Reject reparse points** --- symlinks, junctions, and mount points
+       on the workspace directory or its metadata file are disallowed.
+       This prevents workspace identity spoofing and cross-filesystem
+       boundary violations (see ``exonym.isolation.is_reparse_point``).
+    3. **Require metadata file** --- ``candidate.json`` must exist as a
+       regular file.
+    4. **Parse with guards** --- the JSON decoder uses
+       ``_parse_finite_float``, ``_reject_nonfinite_json_constant``, and
+       ``_reject_duplicate_json_keys`` to reject malformed or dangerous
+       input at the parse level.
+    5. **Validate** the parsed record against the closed enumerations and
+       candidate-ID/directory binding (``validate_metadata``).
+
+    Any failure in the chain is reported as a ``ValueError`` (parse,
+    validation, or reparse-point issues) or ``FileNotFoundError`` (missing
+    metadata file), with a message that includes the affected path.
+
+    Parameters
+    ----------
+    repository_root : pathlib.Path
+        Path to the repository root (resolved to absolute before use).
+    candidate_id : str
+        Raw identifier; normalized and validated internally.
+
+    Returns
+    -------
+    CandidateWorkspace
+        Immutable workspace record with parsed and validated metadata.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``candidate.json`` does not exist at the expected path.
+    ValueError
+        If the workspace is a reparse point, the metadata fails to parse,
+        or validation against the schema contract fails.
+    """
     repository_root = repository_root.resolve()
     normalized_id = validate_candidate_id(candidate_id)
     path = _candidate_path(repository_root, normalized_id)
     metadata_path = path / METADATA_FILENAME
     from .isolation import is_reparse_point
 
+    # NUMERICAL_GUARD: reparse points (symlinks, junctions, mount points)
+    # could alias a workspace to a different filesystem location, breaking
+    # the ownership invariant that candidate data lives only under
+    # candidate/<id>/.
     if (path.exists() and is_reparse_point(path)) or (
         metadata_path.exists() and is_reparse_point(metadata_path)
     ):
@@ -363,12 +849,36 @@ def discover_candidates(repository_root: Path) -> List[CandidateWorkspace]:
     ``candidate/<candidate-id>/candidate.json`` is a registered workspace.
     Collection directories beginning with an underscore are reserved for
     candidate-local cohorts and never represent individual candidates.
+
+    Discovery walks the ``candidate/`` top-level directory, filters to
+    non-underscore-prefixed subdirectories that contain a ``candidate.json``
+    file, and attempts to ``load_candidate`` on each.  Directories that
+    fail to load (missing metadata, parse errors, reparse points) are
+    silently skipped so that one broken workspace does not prevent
+    enumeration of the rest.
+
+    Returns are sorted lexicographically by candidate ID (case-sensitive
+    on the directory name), providing a stable ordering for CLI listing
+    and batch operations.
+
+    Parameters
+    ----------
+    repository_root : pathlib.Path
+        Repository root resolved before scanning.
+
+    Returns
+    -------
+    list of CandidateWorkspace
+        Loaded workspaces, ordered by identifier.  Empty list if
+        ``candidate/`` does not exist.
     """
     candidate_root = repository_root.resolve() / CANDIDATE_DIRECTORY
     if not candidate_root.is_dir():
         return []
     candidates = []
     for path in sorted(candidate_root.iterdir(), key=lambda item: item.name):
+        # _prefixed directories are reserved for candidate-local cohorts
+        # (e.g. _surveys/) and are never individual candidate workspaces.
         if not path.is_dir() or path.name.startswith("_"):
             continue
         cid = path.name.lower()
@@ -382,7 +892,29 @@ def discover_candidates(repository_root: Path) -> List[CandidateWorkspace]:
 
 
 def workspace_layout(candidate: CandidateWorkspace) -> Dict[str, Path]:
-    """Return named standard paths for a candidate workspace."""
+    """Return named standard paths for a candidate workspace.
+
+    Produces a flat dictionary mapping logical names to absolute paths.
+    The dictionary always includes:
+
+    * ``"workspace"`` → workspace root.
+    * ``"metadata"`` → ``candidate.json`` path.
+    * One entry per item in ``WORKSPACE_DIRECTORIES``, keyed by the
+      relative path string (e.g. ``"data/raw"``, ``"figures"``).
+
+    Callers can use this dictionary to locate standard directories without
+    hardcoding the ``candidate/<id>/`` prefix.
+
+    Parameters
+    ----------
+    candidate : CandidateWorkspace
+        A loaded workspace record.
+
+    Returns
+    -------
+    dict
+        Mapping from logical name (str) to absolute ``pathlib.Path``.
+    """
     paths = {"workspace": candidate.path, "metadata": candidate.path / METADATA_FILENAME}
     for relative_path in WORKSPACE_DIRECTORIES:
         paths[relative_path] = candidate.path / relative_path

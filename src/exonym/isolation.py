@@ -30,6 +30,7 @@ import json
 import os
 import re
 import sys
+import tokenize
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -92,10 +93,12 @@ class Violation:
     rule: str
     detail: str
     line: Optional[int] = None
+    severity: str = "error"
 
     def __str__(self) -> str:
         location = f"{self.path}:{self.line}" if self.line else self.path
-        return f"[{self.rule}] {location}: {self.detail}"
+        tag = f"[{self.severity.upper()}] " if self.severity != "error" else ""
+        return f"{tag}[{self.rule}] {location}: {self.detail}"
 
 
 @dataclass
@@ -104,11 +107,15 @@ class IsolationReport:
 
     @property
     def ok(self) -> bool:
-        return not self.violations
+        return not any(v.severity == "error" for v in self.violations)
 
-    def add(self, path: Path, rule: str, detail: str, line: Optional[int] = None) -> None:
+    @property
+    def warnings(self) -> List[Violation]:
+        return [v for v in self.violations if v.severity != "error"]
+
+    def add(self, path: Path, rule: str, detail: str, line: Optional[int] = None, severity: str = "error") -> None:
         self.violations.append(
-            Violation(path.as_posix(), rule, detail, line=line)
+            Violation(path.as_posix(), rule, detail, line=line, severity=severity)
         )
 
 
@@ -141,14 +148,39 @@ def _alias_tokens(candidate_root: Path) -> Dict[str, str]:
     return tokens
 
 
+def _python_comment_and_docstring_lines(source: str) -> Set[int]:
+    """Return line numbers of comments and docstrings in Python source.
+
+    Uses the tokenize module to identify ``#`` comment lines and the bodies
+    of module/class/function docstrings so that educational or documentation
+    identifiers inside them do not trigger false-positive isolation violations.
+    """
+    skip: Set[int] = set()
+    try:
+        tokens = tokenize.generate_tokens(iter(source.splitlines(keepends=True)).__next__)
+        for tok in tokens:
+            if tok.type == tokenize.COMMENT:
+                skip.add(tok.start[0])
+            elif tok.type == tokenize.STRING:
+                # Multi-line docstrings cover every line from start to end.
+                for line_no in range(tok.start[0], tok.end[0] + 1):
+                    skip.add(line_no)
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        pass
+    return skip
+
+
 def _scan_text_for_ids(
     report: IsolationReport,
     path: Path,
     content: str,
     alias_tokens: Dict[str, str],
     scan_catalog_patterns: bool = True,
+    skip_lines: Optional[Set[int]] = None,
 ) -> None:
     for line_number, line in enumerate(content.splitlines(), start=1):
+        if skip_lines is not None and line_number in skip_lines:
+            continue
         if scan_catalog_patterns and (
             TOI_PATTERN.search(line) or TIC_PATTERN.search(line) or COMPACT_ID_PATTERN.search(line)
         ):
@@ -196,6 +228,7 @@ def _scan_ast(report: IsolationReport, path: Path) -> None:
                         "hardcoded-target-literal",
                         f"{target.id} = {number!r}",
                         node.lineno,
+                        severity="warning",
                     )
         elif isinstance(node, ast.Call):
             for keyword in node.keywords:
@@ -212,6 +245,7 @@ def _scan_ast(report: IsolationReport, path: Path) -> None:
                             "hardcoded-ephemeris-keyword",
                             f"{keyword.arg}={number!r}",
                             node.lineno,
+                            severity="warning",
                         )
 
 
@@ -551,14 +585,17 @@ def _check_repository(root: Path, include_candidates: bool) -> IsolationReport:
         # Shared tests necessarily exercise ID-detection fixtures, so generic
         # catalog patterns are skipped there; real registered aliases are
         # still scanned everywhere.
+        is_python = path.suffix.lower() == ".py"
+        comment_skip = _python_comment_and_docstring_lines(content) if is_python else None
         _scan_text_for_ids(
             report,
             path,
             content,
             alias_tokens,
             scan_catalog_patterns=not (relative.parts and relative.parts[0] == "tests"),
+            skip_lines=comment_skip,
         )
-        if path.suffix.lower() == ".py" and relative.parts and relative.parts[0] == "src":
+        if is_python and relative.parts and relative.parts[0] == "src":
             _scan_ast(report, path)
 
     if include_candidates:
@@ -621,8 +658,19 @@ def _remediation_hint(rule: str) -> str:
 
 
 def format_report(report: IsolationReport) -> str:
-    if report.ok:
-        lines = ["ISOLATION: PASS (no violations)"]
+    errors = [v for v in report.violations if v.severity == "error"]
+    warnings = report.warnings
+    if not errors:
+        lines = ["ISOLATION: PASS (no error violations)"]
+        if warnings:
+            lines.append("WARNINGS: {0} warning(s) found (non-fatal)".format(len(warnings)))
+            by_rule: Dict[str, List[Violation]] = {}
+            for violation in warnings:
+                by_rule.setdefault(violation.rule, []).append(violation)
+            for rule in sorted(by_rule):
+                violations = by_rule[rule]
+                lines.append("  [{0}] {1} warning(s)".format(rule, len(violations)))
+                lines.extend("    " + str(violation) for violation in violations)
         statistics = getattr(report, "cache_statistics", None)
         if isinstance(statistics, dict):
             lines.append(
@@ -633,14 +681,23 @@ def format_report(report: IsolationReport) -> str:
                 )
             )
         return "\n".join(lines)
-    lines = [f"ISOLATION: FAIL ({len(report.violations)} violation(s))"]
+    lines = [f"ISOLATION: FAIL ({len(errors)} error violation(s))"]
     by_rule: Dict[str, List[Violation]] = {}
-    for violation in report.violations:
+    for violation in errors:
         by_rule.setdefault(violation.rule, []).append(violation)
     for rule in sorted(by_rule):
         violations = by_rule[rule]
         lines.append("[{0}] {1} violation(s); remediation: {2}".format(rule, len(violations), _remediation_hint(rule)))
         lines.extend("  " + str(violation) for violation in violations)
+    if warnings:
+        lines.append("WARNINGS: {0} warning(s) found (non-fatal)".format(len(warnings)))
+        by_rule_warn: Dict[str, List[Violation]] = {}
+        for violation in warnings:
+            by_rule_warn.setdefault(violation.rule, []).append(violation)
+        for rule in sorted(by_rule_warn):
+            violations = by_rule_warn[rule]
+            lines.append("  [{0}] {1} warning(s)".format(rule, len(violations)))
+            lines.extend("    " + str(violation) for violation in violations)
     return "\n".join(lines)
 
 

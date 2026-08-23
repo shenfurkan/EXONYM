@@ -3,9 +3,14 @@
 Target-neutral infrastructure for evidence-first exoplanet candidate
 research. Every candidate lives under ``candidate/<candidate-id>/``; shared
 code in this package never contains target constants.
+
+**Early beta** — v1.3.0 removes over-engineered bureaucracy: AST target-literals
+are warnings not errors, comment/docstring lines are excluded from isolation
+scans, the analysis gate is evidence-based (not unconditionally locked), and
+missing provenance sidecars are auto-generated.
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 from .workspace import (
     CandidateWorkspace,
