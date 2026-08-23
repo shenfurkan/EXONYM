@@ -44,8 +44,10 @@ NEUTRAL_EXTENSIONS = {
 
 # `.agents` and `.opencode` are host-injected tool state, not Exonym repository
 # content; their nested third-party repositories and dependencies are excluded
-# explicitly. Every other non-candidate directory is audited. Do not turn this
-# into an allowlist of project source folders.
+# explicitly. Every non-candidate *subdirectory* is audited. Loose files placed
+# directly at the repository root are the operator's unrestricted workspace:
+# extension and identifier rules apply only below the top level. Do not turn
+# this into an allowlist of project source folders.
 EXCLUDED_TOP_LEVEL_DIRECTORIES = {".agents", ".opencode"}
 EXCLUDED_DIRECTORY_NAMES = {".git", "__pycache__", ".pytest_cache"}
 
@@ -526,6 +528,11 @@ def _check_repository(root: Path, include_candidates: bool) -> IsolationReport:
             )
             continue
         relative = path.relative_to(root)
+        if len(relative.parts) == 1:
+            # Root-level loose files are the operator's unrestricted workspace.
+            # Any format is allowed and no identifier scanning runs here; the
+            # security checks above (reparse points, regular files) still apply.
+            continue
         if not _allowed_neutral_file(relative, path):
             report.add(
                 path,

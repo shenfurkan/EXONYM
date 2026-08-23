@@ -64,11 +64,39 @@ def test_neutral_audit_does_not_traverse_candidate_workspaces(tmp_path, monkeypa
 
 def test_catalog_identifier_outside_candidate_fails(tmp_path):
     repo = _make_repo(tmp_path)
-    _write(repo, "README.md", "Plan: study TOI-99999.01 next.\n")
+    _write(repo, "docs/note.md", "Plan: study TOI-99999.01 next.\n")
 
     report = check_repository(repo)
     assert not report.ok
     assert any(v.rule == "target-id-in-neutral-zone" for v in report.violations)
+
+
+def test_root_level_files_are_operator_workspace(tmp_path):
+    repo = _make_repo(tmp_path)
+    _write(repo, "notes.md", "Plan: study TOI-99999.01 next.\n")
+    _write(repo, "figure.pdf", "%PDF-1.7 simulated binary payload\n")
+    _write(
+        repo,
+        "docs/note.md",
+        "# Neutral\nSubdirectory documents remain fully audited.\n",
+    )
+
+    report = check_repository(repo)
+    assert report.ok, format_report(report)
+
+
+def test_root_level_symlink_still_rejected(tmp_path):
+    repo = _make_repo(tmp_path)
+    _write(repo, "docs/target.txt", "neutral")
+    link = repo / "link.txt"
+    try:
+        link.symlink_to(repo / "docs" / "target.txt")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable on this platform")
+
+    report = check_repository(repo)
+    assert not report.ok
+    assert any(v.rule == "symlink-or-reparse-point" for v in report.violations)
 
 
 def test_catalog_identifier_inside_candidate_passes(tmp_path):
@@ -189,7 +217,7 @@ def test_top_level_data_is_forbidden(tmp_path):
 
 def test_exception_registry_suppresses_matching_violation(tmp_path):
     repo = _make_repo(tmp_path)
-    _write(repo, "README.md", "Plan: study TOI-99999.01 next.\n")
+    _write(repo, "docs/note.md", "Plan: study TOI-99999.01 next.\n")
 
     violations_before = check_repository(repo).violations
     assert violations_before
@@ -229,7 +257,7 @@ def test_unlisted_neutral_directory_is_scanned(tmp_path):
 def test_expired_exception_does_not_suppress_a_violation(tmp_path):
     # Arrange
     repo = _make_repo(tmp_path)
-    _write(repo, "README.md", "Plan: study TOI-99999.01 next.\n")
+    _write(repo, "docs/note.md", "Plan: study TOI-99999.01 next.\n")
     target = check_repository(repo).violations[0]
     exception = {
         "path": Path(target.path).relative_to(repo.resolve()).as_posix(),
@@ -260,7 +288,7 @@ def test_expired_exception_does_not_suppress_a_violation(tmp_path):
 def test_malformed_exception_does_not_suppress_a_violation(tmp_path, entry_updates):
     # Arrange
     repo = _make_repo(tmp_path)
-    _write(repo, "README.md", "Plan: study TOI-99999.01 next.\n")
+    _write(repo, "docs/note.md", "Plan: study TOI-99999.01 next.\n")
     target = check_repository(repo).violations[0]
     exception = {
         "path": Path(target.path).relative_to(repo.resolve()).as_posix(),
