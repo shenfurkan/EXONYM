@@ -1,8 +1,11 @@
 <div align="center">
-  <img src="images/exonymbanner.gif" alt="EXONYM Banner" width="100%">
+  <img src="exonymbanner.gif" alt="EXONYM Banner" width="100%">
   <br><br>
-  <img src="images/logo.png" alt="EXONYM Logo" width="75">
-  <h1>EXONYM</h1>
+  <p>
+    <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg" alt="Python 3.9+"></a>
+    <img src="https://img.shields.io/badge/version-1.4.0--beta-green.svg" alt="Version 1.4.0-beta">
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-orange.svg" alt="License"></a>
+  </p>
 </div>
 
 EXONYM is a Python 3.9 command-line tool for working through TESS transit signals one candidate at a time. It creates an isolated workspace, downloads SPOC light curves and target-pixel files, and keeps the evidence, decisions, and outputs together. Shared code never contains a target identifier, sector choice, ephemeris, or research payload.
