@@ -52,6 +52,7 @@ candidate/*
 # -----------------------------------------------------------------------------
 # Keep project-local documentation private; the public README and the bundled
 # runtime templates required by installed wheels are deliberate exceptions.
+docs/
 *.md
 !/README.md
 !/plan.md
