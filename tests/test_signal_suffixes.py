@@ -58,6 +58,28 @@ def test_plotting_signal_suffix(tmp_path):
 def test_ttv_signal_suffix(tmp_path):
     workspace = create_candidate(tmp_path, "candidate-test-signal-ttv-suffix")
 
+    def write_transit_fit_artifact(signal):
+        suffix = f".{signal.lstrip('.')}" if signal else ""
+        path = workspace.path / "outputs" / f"mcmc_transit_fit{suffix}.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "work_package": "MCMC_TRANSIT_FIT",
+                    "source": "candidate-data",
+                    "signal": signal,
+                    "posterior": {
+                        "impact_parameter": {"median": 0.3},
+                        "q1": {"median": 0.3},
+                        "q2": {"median": 0.3},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    write_transit_fit_artifact(None)
+    write_transit_fit_artifact(".02")
+
     # Mock inputs so we don't need real lightkurve downloads in synthetic test
     synthetic_table = {
         "time": np.linspace(0, 30, 500),

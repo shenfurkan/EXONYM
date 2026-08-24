@@ -3,6 +3,7 @@ import pytest
 
 from exonym.lightcurve import (
     bin_phase_folded_flux,
+    calculate_contact_durations,
     parse_tess_sector,
     phase_hours,
     robust_transit_depth,
@@ -50,3 +51,28 @@ def test_bin_phase_folded_flux_produces_expected_bin_shapes():
 
     assert centers.shape == median.shape == error.shape == (4,)
     assert np.isfinite(median).sum() >= 1
+
+
+def test_contact_durations_distinguish_grazing_from_nontransiting_geometry():
+    common = {
+        "period_days": 3.0,
+        "r_star_solar": 1.0,
+        "m_star_solar": 1.0,
+        "r_planet_earth": 10.0,
+    }
+
+    grazing = calculate_contact_durations(**common, impact_parameter_b=1.0)
+    nontransiting = calculate_contact_durations(**common, impact_parameter_b=1.2)
+
+    assert grazing["geometry_status"] == "grazing"
+    assert grazing["grazing"] == 1.0
+    assert grazing["T14_hr"] > 0.0
+    assert grazing["T23_hr"] == 0.0
+    assert grazing["v_stat"] == pytest.approx(1.0)
+
+    assert nontransiting["geometry_status"] == "non-transiting"
+    assert nontransiting["grazing"] == 0.0
+    assert nontransiting["T14_hr"] == 0.0
+    assert nontransiting["T23_hr"] == 0.0
+    assert nontransiting["T12_hr"] == 0.0
+    assert nontransiting["v_stat"] is None

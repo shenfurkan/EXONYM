@@ -42,14 +42,38 @@ def _semantic_value(value: Any) -> Any:
 
 
 def semantic_json_sha256(path: Path) -> str:
-    """Hash JSON content after removing timestamps that do not change its meaning."""
+    """Hash JSON after removing known volatile timestamp fields.
+
+    Args:
+        path: JSON record whose semantic content is compared.
+
+    Returns:
+        SHA-256 digest of sorted, compact JSON after volatile timestamps are
+        removed.
+
+    Raises:
+        OSError: If the record cannot be read.
+        ValueError: If the record is not valid JSON.
+    """
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     encoded = json.dumps(_semantic_value(payload), separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def numerical_npz_sha256(path: Path) -> str:
-    """Hash NPZ arrays by numerical values, independent of archive container bytes."""
+    """Hash an NPZ archive by its arrays rather than container bytes.
+
+    Args:
+        path: NPZ artifact to canonicalize and hash.
+
+    Returns:
+        SHA-256 digest over sorted array names, dtypes, shapes, and contiguous
+        array bytes.
+
+    Raises:
+        OSError: If the artifact cannot be read.
+        ValueError: If the archive cannot be decoded without pickle support.
+    """
     digest = hashlib.sha256()
     with np.load(path, allow_pickle=False) as archive:
         for name in sorted(archive.files):
@@ -73,6 +97,19 @@ def _write_object(path: Path, payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _workspace_artifact_path(workspace: CandidateWorkspace, relative_path: object) -> Optional[Path]:
+    """Resolve one manifest path only when it remains candidate-local."""
+    if not isinstance(relative_path, str):
+        return None
+    try:
+        workspace_root = workspace.path.resolve()
+        artifact_path = (workspace_root / relative_path).resolve()
+        artifact_path.relative_to(workspace_root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return artifact_path
+
+
 def _refresh_detrending_manifests(workspace: CandidateWorkspace) -> List[str]:
     actions: List[str] = []
     for manifest_path in sorted((workspace.path / "outputs").glob("detrending_manifest.*.json")):
@@ -86,7 +123,9 @@ def _refresh_detrending_manifests(workspace: CandidateWorkspace) -> List[str]:
         expected_semantic = artifact.get("data_sha256")
         if not isinstance(relative, str) or not isinstance(expected_semantic, str):
             continue
-        artifact_path = workspace.path / relative
+        artifact_path = _workspace_artifact_path(workspace, relative)
+        if artifact_path is None:
+            continue
         try:
             semantically_unchanged = (
                 artifact_path.is_file()
@@ -115,7 +154,9 @@ def _refresh_search_manifests(workspace: CandidateWorkspace) -> List[str]:
         expected_semantic = manifest.get("result_semantic_sha256")
         if not isinstance(relative, str) or not isinstance(expected_semantic, str):
             continue
-        result_path = workspace.path / relative
+        result_path = _workspace_artifact_path(workspace, relative)
+        if result_path is None:
+            continue
         if not result_path.is_file() or semantic_json_sha256(result_path) != expected_semantic:
             continue
         current_digest = _sha256(result_path)
@@ -184,14 +225,38 @@ def _sync_triage(workspace: CandidateWorkspace) -> List[str]:
     triage_path = workspace.path / "decisions" / "automated_triage.json"
     if not triage_path.is_file():
         return []
+    triage = _read_object(triage_path)
+    policy_id = triage.get("policy_id") if triage is not None else None
+    policy_version = triage.get("policy_version") if triage is not None else None
+    if not (
+        isinstance(policy_id, str)
+        and policy_id
+        and isinstance(policy_version, str)
+        and policy_version
+    ):
+        return ["triage sync skipped: existing triage has no usable policy identity"]
     from .engines import run_automated_triage
 
-    run_automated_triage(workspace)
+    run_automated_triage(workspace, policy_id=policy_id, policy_version=policy_version)
     return ["synchronized decisions/automated_triage.json"]
 
 
 def remediate_candidate_drift(repository_root: Path) -> Dict[str, List[str]]:
-    """Repair derivation drift that preserves candidate-owned scientific values."""
+    """Repair only hash and derived-triage drift proven to be non-scientific.
+
+    Args:
+        repository_root: Repository containing candidate workspaces to inspect.
+
+    Returns:
+        Mapping of candidate identifiers to the safe repair actions performed.
+
+    Note:
+        This routine never edits raw products, candidate metadata, scientific
+        values, or claim status. It acts only after a semantic comparison
+        establishes that a derived artifact's content is unchanged.
+    """
+    # SCIENTIFIC_BOUNDARY: Repairable byte-level manifest drift is not evidence
+    # that a scientific result is correct or reproducible by an external service.
     actions: Dict[str, List[str]] = {}
     for workspace in discover_candidates(repository_root):
         candidate_actions = _refresh_detrending_manifests(workspace)

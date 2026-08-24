@@ -1,6 +1,8 @@
 import json
 import shutil
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from exonym.__main__ import main
@@ -99,6 +101,17 @@ def test_cli_verify_candidate_isolated_from_default_shared_audit(tmp_path):
 
     assert main(root + ["verify"]) == 0
     assert main(root + ["verify", "candidate"]) == 1
+
+
+@pytest.mark.parametrize("scope_flag", ("--source", "--candidates"))
+def test_cli_verify_rejects_legacy_scope_combined_with_explicit_scope(tmp_path, capsys, scope_flag):
+    repo = _repo(tmp_path)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--root", str(repo), "verify", scope_flag, "candidate"])
+
+    assert exc_info.value.code == 2
+    assert "legacy positional 'candidate' cannot be combined" in capsys.readouterr().err
 
 
 def test_cli_survey_sensitivity_dispatches_without_changing_candidate_state(
@@ -279,14 +292,120 @@ def test_cli_search_forwards_tls_engine(tmp_path, capsys, monkeypatch):
     assert calls == [
         {
             "candidate": "candidate-alpha",
-            "period_min": 0.5,
-            "period_max": 15.0,
+            "period_min": None,
+            "period_max": None,
             "signal": None,
             "engine": "tls",
             "detrending_method": None,
         }
     ]
     assert "tls_search_results.json" in capsys.readouterr().out
+
+
+def test_cli_detrend_derives_and_forwards_candidate_ephemeris_mask(tmp_path, capsys, monkeypatch):
+    repo = _repo(tmp_path)
+    root = ["--root", str(repo)]
+    assert main(root + ["init", "candidate-alpha"]) == 0
+    candidate_path = repo / "candidate" / "candidate-alpha"
+    time = np.array([0.75, 1.0, 1.25, 2.0, 3.0])
+    table = {
+        "time": time,
+        "flux": np.ones(time.size),
+        "flux_err": np.full(time.size, 0.0001),
+        "sector": np.ones(time.size, dtype=int),
+        "input_files": [candidate_path / "data" / "raw" / "source.fits"],
+        "input_sha256s": ["a" * 64],
+        "time_system": "BTJD_TDB",
+    }
+    ephemeris = {
+        "period_days": 2.0,
+        "epoch_btjd": 1.0,
+        "duration_days": 0.4,
+        "time_system": "BTJD_TDB",
+        "source": "candidate-config",
+        "field_sources": {
+            "period_days": "candidate-config",
+            "epoch_btjd": "candidate-config",
+            "duration_days": "candidate-config",
+        },
+    }
+    calls = []
+
+    def fake_detrend(candidate, time_btjd, flux, **kwargs):
+        calls.append(
+            {
+                "candidate": candidate.candidate_id,
+                "time": time_btjd,
+                "mask": kwargs["transit_mask"],
+                "ephemeris": kwargs["transit_mask_ephemeris"],
+            }
+        )
+        return SimpleNamespace(
+            artifact_path=candidate.path / "data" / "processed" / "detrended-running-median.npz",
+            manifest_path=candidate.path / "outputs" / "detrending_manifest.running-median.json",
+        )
+
+    monkeypatch.setattr(
+        "exonym.inputs.load_light_curve_table", lambda *_args, **_kwargs: table
+    )
+    monkeypatch.setattr(
+        "exonym.inputs.load_transit_ephemeris", lambda *_args, **_kwargs: ephemeris
+    )
+    monkeypatch.setattr("exonym.detrending.detrend_candidate", fake_detrend)
+
+    assert main(root + ["detrend", "candidate-alpha", "--window-days", "0.5"]) == 0
+    assert len(calls) == 1
+    assert calls[0]["candidate"] == "candidate-alpha"
+    assert np.array_equal(calls[0]["time"], time)
+    assert np.array_equal(calls[0]["mask"], np.array([False, True, False, False, True]))
+    assert calls[0]["ephemeris"] == ephemeris
+    assert "detrended-running-median.npz" in capsys.readouterr().out
+
+
+def test_cli_detrend_rejects_a_synthetic_ephemeris_before_writing_output(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    root = ["--root", str(repo)]
+    assert main(root + ["init", "candidate-alpha"]) == 0
+    candidate_path = repo / "candidate" / "candidate-alpha"
+    time = np.array([0.75, 1.0, 1.25, 2.0, 3.0])
+    table = {
+        "time": time,
+        "flux": np.ones(time.size),
+        "flux_err": np.full(time.size, 0.0001),
+        "sector": np.ones(time.size, dtype=int),
+        "input_files": [candidate_path / "data" / "raw" / "source.fits"],
+        "input_sha256s": ["a" * 64],
+        "time_system": "BTJD_TDB",
+    }
+    incomplete_ephemeris = {
+        "period_days": 2.0,
+        "epoch_btjd": 1.0,
+        "duration_days": 0.4,
+        "time_system": "BTJD_TDB",
+        "source": "partial-candidate-config",
+        "field_sources": {
+            "period_days": "candidate-config",
+            "epoch_btjd": "synthetic-demo",
+            "duration_days": "candidate-config",
+        },
+    }
+    called = []
+
+    monkeypatch.setattr(
+        "exonym.inputs.load_light_curve_table", lambda *_args, **_kwargs: table
+    )
+    monkeypatch.setattr(
+        "exonym.inputs.load_transit_ephemeris", lambda *_args, **_kwargs: incomplete_ephemeris
+    )
+    monkeypatch.setattr(
+        "exonym.detrending.detrend_candidate", lambda *_args, **_kwargs: called.append(True)
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(root + ["detrend", "candidate-alpha", "--window-days", "0.5"])
+
+    assert exc_info.value.code == 2
+    assert called == []
 
 
 def test_cli_fetch_priors_command(tmp_path, capsys, monkeypatch):

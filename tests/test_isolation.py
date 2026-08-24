@@ -50,16 +50,58 @@ def test_clean_repository_passes(tmp_path):
 
 
 def test_neutral_audit_does_not_traverse_candidate_workspaces(tmp_path, monkeypatch):
-    # A default shared-code audit must remain fast even when candidate data is large.
+    # Source audits read metadata for aliases but must not walk candidate payloads.
     repo = _make_repo(tmp_path)
 
     def fail_if_called(*args, **kwargs):
         raise AssertionError("candidate workspace was traversed")
 
-    monkeypatch.setattr(isolation, "_alias_tokens", fail_if_called)
     monkeypatch.setattr(isolation, "_scan_candidate_reparse_points", fail_if_called)
 
     assert check_neutral_repository(repo).ok
+
+
+def test_neutral_audit_detects_registered_alias_leaks(tmp_path):
+    repo = _make_repo(tmp_path)
+    metadata_path = repo / "candidate" / "candidate-alpha" / "candidate.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["identifiers"]["aliases"] = ["Synthetic Alias 42"]
+    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    _write(repo, "docs/note.md", "Synthetic Alias 42 must remain candidate-local.\n")
+
+    report = check_neutral_repository(repo)
+
+    assert not report.ok
+    assert any(violation.rule == "registered-alias-leak" for violation in report.violations)
+
+
+def test_shared_verify_dispatch_reports_unexpected_schema_errors(tmp_path, monkeypatch):
+    repo = _make_repo(tmp_path, with_candidate=False)
+
+    def fail_schema_validation(*args, **kwargs):
+        raise RuntimeError("synthetic schema validator failure")
+
+    monkeypatch.setattr("exonym.schemas.validate_schema_definitions", fail_schema_validation)
+
+    remediated, report = isolation.run_verify_command(repo, schemas_only=True)
+
+    assert remediated is None
+    assert not report.ok
+    assert any(
+        violation.rule == "schema-validation-error"
+        and "synthetic schema validator failure" in violation.detail
+        for violation in report.violations
+    )
+
+
+def test_standalone_verify_rejects_legacy_scope_combined_with_explicit_scope(tmp_path, capsys):
+    repo = _make_repo(tmp_path, with_candidate=False)
+
+    with pytest.raises(SystemExit) as exc_info:
+        isolation.main(["--root", str(repo), "--source", "candidate"])
+
+    assert exc_info.value.code == 2
+    assert "legacy positional 'candidate' cannot be combined" in capsys.readouterr().err
 
 
 def test_catalog_identifier_outside_candidate_fails(tmp_path):
@@ -134,6 +176,65 @@ def test_hardcoded_sectors_in_shared_source_produce_warnings(tmp_path):
     assert report.ok
     assert any(v.rule == "hardcoded-target-literal" for v in report.violations)
     assert all(v.severity == "warning" for v in report.violations if v.rule == "hardcoded-target-literal")
+
+
+def test_ast_scan_catches_dict_augassign_attribute_and_integer_keyword_literals(tmp_path):
+    repo = _make_repo(tmp_path)
+    _write(
+        repo,
+        "src/target_literals.py",
+        "period_days = load_period()\n"
+        "period_days += 3\n"
+        "settings.epoch_btjd = 2457000\n"
+        "payload = {'sector': 17, 'duration_days': 2}\n"
+        "run_screen(duration_days=2)\n",
+    )
+
+    report = check_neutral_repository(repo)
+
+    target_literals = [
+        violation.detail
+        for violation in report.violations
+        if violation.rule == "hardcoded-target-literal"
+    ]
+    keyword_literals = [
+        violation.detail
+        for violation in report.violations
+        if violation.rule == "hardcoded-ephemeris-keyword"
+    ]
+    assert any("period_days = 3.0" in detail for detail in target_literals)
+    assert any("epoch_btjd = 2457000.0" in detail for detail in target_literals)
+    assert any("sector = 17.0" in detail for detail in target_literals)
+    assert any("duration_days = 2.0" in detail for detail in target_literals)
+    assert keyword_literals == ["duration_days=2.0"]
+
+
+def test_banned_normalizations_require_the_canonical_constants_module(tmp_path):
+    repo = _make_repo(tmp_path)
+    _write(
+        repo,
+        "src/duplicate_normalization.py",
+        "rv_normalization = 0.0895\n"
+        "julian_year_days = 365.25\n",
+    )
+    _write(
+        repo,
+        "src/exonym/constants.py",
+        "RV_NORMALIZATION = 0.0895\n"
+        "JULIAN_YEAR_DAYS = 365.25\n",
+    )
+
+    report = check_neutral_repository(repo)
+
+    duplicated = [
+        violation
+        for violation in report.violations
+        if violation.rule == "duplicated-sensitive-normalization"
+    ]
+    assert not report.ok
+    assert len(duplicated) == 2
+    assert {violation.line for violation in duplicated} == {1, 2}
+    assert all("exonym.constants" in violation.detail for violation in duplicated)
 
 
 def test_generic_source_passes(tmp_path):

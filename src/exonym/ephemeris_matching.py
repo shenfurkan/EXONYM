@@ -2,9 +2,14 @@
 
 Only catalog records with an explicitly documented field contract are compared.
 The current implementation supports fresh NASA Exoplanet Archive ``pscomppars``
-snapshots retained by :mod:`exonym.catalog_federation`. It is a review
-diagnostic: an empty comparison does not establish novelty, while a period or
-epoch agreement never creates a scientific disposition or claim.
+snapshots retained by :mod:`exonym.catalog_federation`. Harmonic agreements are
+kept explicit, including an epoch-parity ambiguity that requires review rather
+than an implicit no-match result.
+
+Scientific boundary:
+    This is a review diagnostic. An empty comparison does not establish
+    novelty, while a period or epoch agreement never creates a scientific
+    disposition or claim.
 """
 
 from __future__ import annotations
@@ -35,7 +40,7 @@ RECORDED_EVIDENCE_SOURCE_KINDS = (
     "literature",
 )
 _RECORD_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-METHOD = "known-signal-ephemeris-period-epoch-duration-harmonic-v3"
+METHOD = "known-signal-ephemeris-period-epoch-duration-harmonic-v4"
 PERIOD_RELATIVE_TOLERANCE = 0.001
 EPOCH_TOLERANCE_DURATION_MULTIPLIER = 1.0
 DURATION_RELATIVE_TOLERANCE = 0.5
@@ -498,13 +503,13 @@ def _compare_record(
     epoch_match_raw = epoch_delta <= epoch_tolerance if epoch_delta is not None else None
     # Harmonic-parity ambiguity: candidate period matches a harmonic but the
     # epoch does not fold correctly → route to human review rather than
-    # silently falling through to "no-ephemeris-match".
+    # silently falling through to "no-ephemeris-match".  Keep ``epoch_match``
+    # as its declared boolean/null contract; the explicit flag carries the
+    # additional review state without making candidate artifacts schema-invalid.
     harmonic_parity_ambiguous = bool(
         period_harmonic_match and epoch_match_raw is False and harmonic != 1.0
     )
-    epoch_match: Any = epoch_match_raw
-    if harmonic_parity_ambiguous:
-        epoch_match = "harmonic-parity-ambiguous"
+    epoch_match = epoch_match_raw
     duration_ratio = duration_hours / candidate_duration if duration_hours is not None and candidate_duration > 0 else None
     duration_compatible = (
         abs(duration_ratio - 1.0) <= DURATION_RELATIVE_TOLERANCE
@@ -531,11 +536,12 @@ def _compare_record(
         "epoch_phase_delta_days": epoch_delta,
         "epoch_tolerance_days": epoch_tolerance if epoch_bjd is not None else None,
         "epoch_match": epoch_match,
+        "harmonic_parity_ambiguous": harmonic_parity_ambiguous,
         "duration_ratio_known_over_candidate": duration_ratio,
         "duration_compatible": duration_compatible,
         "review_required": bool(
             period_harmonic_match
-            and (epoch_match is True or epoch_match is None or epoch_match == "harmonic-parity-ambiguous")
+            and (epoch_match is True or epoch_match is None or harmonic_parity_ambiguous)
         ),
     }
 
@@ -575,7 +581,7 @@ def match_known_signal_ephemerides(
         entry
         for entry in comparisons
         if entry["period_harmonic_match"]
-        and (entry["epoch_match"] is None or entry["epoch_match"] == "harmonic-parity-ambiguous")
+        and (entry["epoch_match"] is None or entry["harmonic_parity_ambiguous"])
     ]
     if full_matches:
         status = "review-required-known-signal-match"

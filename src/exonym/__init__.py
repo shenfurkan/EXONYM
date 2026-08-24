@@ -1,16 +1,22 @@
-"""EXONYM - Exoplanet Naming, Observation, and Yield Verification Management.
+"""EXONYM: evidence-first infrastructure for exoplanet-candidate research.
 
-Target-neutral infrastructure for evidence-first exoplanet candidate
-research. Every candidate lives under ``candidate/<candidate-id>/``; shared
-code in this package never contains target constants.
+The package deliberately separates target-neutral implementation from
+candidate-owned observations, decisions, and products. ``CandidateWorkspace``
+provides the boundary used by every public command: shared code supplies
+validation and workflow machinery, while candidate-specific measurements remain
+below the corresponding workspace.
 
-**Early beta** — v1.3.0 removes over-engineered bureaucracy: AST target-literals
-are warnings not errors, comment/docstring lines are excluded from isolation
-scans, the analysis gate is evidence-based (not unconditionally locked), and
-missing provenance sidecars are auto-generated.
+Scientific boundary:
+    A structurally valid workflow record is not a scientific validation. The
+    analysis gate remains closed until provenance-bound observed photometry and
+    calibrated scene constraints can support an evidence-based claim path.
+
+The module re-exports the small workspace API intended for library consumers.
+It does not import optional scientific engines, so inspecting the package
+version or workspace helpers remains possible in a minimal installation.
 """
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 from .workspace import (
     CandidateWorkspace,

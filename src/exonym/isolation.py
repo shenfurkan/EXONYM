@@ -36,6 +36,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .workspace import discover_candidates
+from .constants import (
+    EARTH_MASS_ONE_JULIAN_YEAR_RV_SEMI_AMPLITUDE_M_PER_S,
+    JULIAN_YEAR_DAYS,
+)
 
 CANDIDATE_DIRECTORY = "candidate"
 
@@ -77,6 +81,16 @@ EPHEMERIS_KEYWORDS = {
     "duration_hours", "duration_days", "transit_time", "ephemeris",
 }
 TRIVIAL_VALUES = {0.0, 1.0, -1.0, 0.5, -0.5}
+CANONICAL_CONSTANTS_MODULE = "src/exonym/constants.py"
+# These values define the conventional Earth-mass/one-Julian-year RV scaling.
+# They are intentionally narrow: generic physical constants and ordinary
+# numerical thresholds remain outside this source-isolation lint's scope.
+# Keys are generated from the canonical constants module so the numeric
+# literals themselves do not appear in this file and trip the audit.
+BANNED_NORMALIZATION_LITERALS = {
+    str(EARTH_MASS_ONE_JULIAN_YEAR_RV_SEMI_AMPLITUDE_M_PER_S): "EARTH_MASS_ONE_JULIAN_YEAR_RV_SEMI_AMPLITUDE_M_PER_S",
+    str(JULIAN_YEAR_DAYS): "JULIAN_YEAR_DAYS",
+}
 
 EXCEPTIONS_PATH = Path("policy") / "isolation-exceptions.json"
 EXCEPTION_ENTRY_FIELDS = {"path", "line", "rule", "reason", "expires"}
@@ -89,6 +103,17 @@ EXCEPTION_REGISTRY_RULES = {
 
 @dataclass(frozen=True)
 class Violation:
+    """One auditable isolation or schema-validation finding.
+
+    Attributes:
+        path: Repository-relative path associated with the finding.
+        rule: Stable machine-readable rule identifier.
+        detail: Human-readable explanation of the failed condition.
+        line: Optional one-based source line number.
+        severity: ``"error"`` for a failing condition or another label for a
+            non-fatal finding.
+    """
+
     path: str
     rule: str
     detail: str
@@ -103,6 +128,12 @@ class Violation:
 
 @dataclass
 class IsolationReport:
+    """Mutable collection of audit findings and their derived status.
+
+    Attributes:
+        violations: Findings accumulated by isolation and schema checks.
+    """
+
     violations: List[Violation] = field(default_factory=list)
 
     @property
@@ -114,13 +145,31 @@ class IsolationReport:
         return [v for v in self.violations if v.severity != "error"]
 
     def add(self, path: Path, rule: str, detail: str, line: Optional[int] = None, severity: str = "error") -> None:
+        """Append a normalized finding to this report.
+
+        Args:
+            path: Path associated with the finding.
+            rule: Stable rule identifier.
+            detail: Explanation for an operator.
+            line: Optional one-based source line number.
+            severity: Finding severity; ``"error"`` causes :attr:`ok` to be
+                false.
+        """
         self.violations.append(
             Violation(path.as_posix(), rule, detail, line=line, severity=severity)
         )
 
 
 def is_reparse_point(path: Path) -> bool:
-    """Detect symlinks and junctions on Windows and POSIX."""
+    """Return whether a path is a symlink, junction, or Windows reparse point.
+
+    Args:
+        path: Filesystem path to inspect without following it.
+
+    Returns:
+        ``True`` when the path can redirect the audit outside its expected
+        ownership boundary.
+    """
     if path.is_symlink():
         return True
     if os.name != "nt":
@@ -201,52 +250,117 @@ def _scan_text_for_ids(
                 break
 
 
-def _scan_ast(report: IsolationReport, path: Path) -> None:
+def _numeric_literal(value: ast.AST) -> Optional[float]:
+    """Return one numeric literal, including a unary sign, or ``None``."""
+    if isinstance(value, ast.Constant) and not isinstance(value.value, bool):
+        try:
+            return float(value.value)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(value, ast.UnaryOp) and isinstance(value.op, (ast.UAdd, ast.USub)):
+        operand = _numeric_literal(value.operand)
+        if operand is not None:
+            return operand if isinstance(value.op, ast.UAdd) else -operand
+    return None
+
+
+def _assignment_target_names(target: ast.AST) -> Iterable[str]:
+    """Yield names assigned directly or through an attribute target."""
+    if isinstance(target, ast.Name):
+        yield target.id
+    elif isinstance(target, ast.Attribute):
+        yield target.attr
+    elif isinstance(target, (ast.List, ast.Tuple)):
+        for element in target.elts:
+            yield from _assignment_target_names(element)
+
+
+def _is_target_literal_name(name: str) -> bool:
+    """Return whether an identifier names a sector or ephemeris value."""
+    return bool(
+        name in EPHEMERIS_KEYWORDS
+        or SECTOR_NAME.fullmatch(name)
+        or EPHEMERIS_NAME.fullmatch(name)
+    )
+
+
+def _report_target_literal(
+    report: IsolationReport,
+    path: Path,
+    name: str,
+    number: float,
+    line: int,
+) -> None:
+    """Record a non-fatal target-specific numeric literal for source review."""
+    report.add(
+        path,
+        "hardcoded-target-literal",
+        f"{name} = {number!r}",
+        line,
+        severity="warning",
+    )
+
+
+def _scan_ast(
+    report: IsolationReport,
+    path: Path,
+    relative_path: Optional[Path] = None,
+) -> None:
+    """Find target-specific literal encodings and duplicate RV normalizations."""
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (SyntaxError, UnicodeDecodeError, OSError):
         return
 
+    relative_text = (
+        relative_path.as_posix()
+        if relative_path is not None
+        else path.as_posix().replace("\\", "/")
+    )
+    is_canonical_constants_module = relative_text.endswith(CANONICAL_CONSTANTS_MODULE)
     for node in ast.walk(tree):
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+        if not is_canonical_constants_module and isinstance(node, ast.Constant):
+            number = _numeric_literal(node)
+            literal_text = repr(number) if number is not None else None
+            if literal_text in BANNED_NORMALIZATION_LITERALS:
+                constant_name = BANNED_NORMALIZATION_LITERALS[literal_text]
+                report.add(
+                    path,
+                    "duplicated-sensitive-normalization",
+                    f"{literal_text} duplicates {constant_name}; import it from exonym.constants",
+                    node.lineno,
+                )
+
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            value = node.value
-            if not isinstance(value, ast.Constant) or isinstance(value.value, bool):
-                continue
-            try:
-                number = float(value.value)
-            except (TypeError, ValueError):
-                continue
-            if number in TRIVIAL_VALUES:
+            number = _numeric_literal(node.value)
+            if number is None or number in TRIVIAL_VALUES:
                 continue
             for target in targets:
-                if isinstance(target, ast.Name) and (
-                    SECTOR_NAME.fullmatch(target.id) or EPHEMERIS_NAME.fullmatch(target.id)
-                ):
+                for name in _assignment_target_names(target):
+                    if _is_target_literal_name(name):
+                        _report_target_literal(report, path, name, number, node.lineno)
+        elif isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                    continue
+                number = _numeric_literal(value)
+                if number is None or number in TRIVIAL_VALUES or not _is_target_literal_name(key.value):
+                    continue
+                _report_target_literal(report, path, key.value, number, value.lineno)
+        elif isinstance(node, ast.Call):
+            for keyword in node.keywords:
+                if keyword.arg is None or not _is_target_literal_name(keyword.arg):
+                    continue
+                number = _numeric_literal(keyword.value)
+                if number is not None and number not in TRIVIAL_VALUES:
                     report.add(
                         path,
-                        "hardcoded-target-literal",
-                        f"{target.id} = {number!r}",
+                        "hardcoded-ephemeris-keyword",
+                        f"{keyword.arg}={number!r}",
                         node.lineno,
                         severity="warning",
                     )
-        elif isinstance(node, ast.Call):
-            for keyword in node.keywords:
-                if keyword.arg in EPHEMERIS_KEYWORDS and isinstance(
-                    keyword.value, ast.Constant
-                ):
-                    try:
-                        number = float(keyword.value.value)
-                    except (TypeError, ValueError):
-                        continue
-                    if number not in TRIVIAL_VALUES and float(number).is_integer() is False:
-                        report.add(
-                            path,
-                            "hardcoded-ephemeris-keyword",
-                            f"{keyword.arg}={number!r}",
-                            node.lineno,
-                            severity="warning",
-                        )
 
 
 def _add_exception_violation(
@@ -531,7 +645,9 @@ def _check_repository(root: Path, include_candidates: bool) -> IsolationReport:
         )
     root = requested_root.resolve()
     exception_paths = _load_exceptions(root, report)
-    alias_tokens = _alias_tokens(root / CANDIDATE_DIRECTORY) if include_candidates else {}
+    # Source audits read registered metadata solely to enforce alias isolation;
+    # they still do not traverse candidate-owned payload trees.
+    alias_tokens = _alias_tokens(root / CANDIDATE_DIRECTORY)
 
     archive_root = root / "archive"
     if archive_root.exists() or archive_root.is_symlink():
@@ -596,7 +712,7 @@ def _check_repository(root: Path, include_candidates: bool) -> IsolationReport:
             skip_lines=comment_skip,
         )
         if is_python and relative.parts and relative.parts[0] == "src":
-            _scan_ast(report, path)
+            _scan_ast(report, path, relative)
 
     if include_candidates:
         _scan_candidate_reparse_points(report, root / CANDIDATE_DIRECTORY)
@@ -617,18 +733,43 @@ def _check_repository(root: Path, include_candidates: bool) -> IsolationReport:
 
 
 def check_neutral_repository(root: Path) -> IsolationReport:
-    """Audit shared code and repository files without traversing candidate data."""
+    """Audit the protected shared zone without reading candidate payloads.
+
+    Args:
+        root: Repository root to audit.
+
+    Returns:
+        Report containing neutral-zone ownership, identifier-leak, AST, and
+        reparse-point findings.
+    """
     return _check_repository(root, include_candidates=False)
 
 
 def check_repository(root: Path) -> IsolationReport:
-    """Run the full isolation check, including candidate metadata and workspaces."""
+    """Run the full isolation audit, including candidate workspaces.
+
+    Args:
+        root: Repository root to audit.
+
+    Returns:
+        Report with protected-zone findings plus candidate-workspace link and
+        ownership findings.
+    """
     return _check_repository(root, include_candidates=True)
 
 
 def run_audit(root: Path, *, use_cache: bool = True) -> IsolationReport:
-    """Run the full repository audit: isolation checks plus JSON schema
-    validation of candidate records, provenance sidecars, and claims."""
+    """Run isolation checks and candidate-record schema validation together.
+
+    Args:
+        root: Repository root to audit.
+        use_cache: Whether candidate JSON and hash validation may reuse the
+            verification cache.
+
+    Returns:
+        Combined isolation and schema-validation report. Unexpected schema
+        validation failures are captured as report findings rather than raised.
+    """
     report = check_repository(root)
     try:
         from .schemas import validate_schemas
@@ -640,6 +781,98 @@ def run_audit(root: Path, *, use_cache: bool = True) -> IsolationReport:
     except Exception as exc:  # pragma: no cover - defensive
         report.add(Path(root), "schema-validation-error", str(exc))
     return report
+
+
+def add_verify_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add the shared verify-scope arguments to one CLI parser.
+
+    Args:
+        parser: Parser for either the standalone audit command or the main
+            ``exonym verify`` subcommand.
+    """
+    parser.add_argument("scope", nargs="?", choices=("candidate",), help=argparse.SUPPRESS)
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument("--source", action="store_true", help="Audit target-neutral source and resources only.")
+    scope.add_argument("--candidates", action="store_true", help="Audit candidate data, records, and provenance.")
+    parser.add_argument(
+        "--schemas-only",
+        action="store_true",
+        help="Validate schema definitions only; combine with --candidates for candidate records.",
+    )
+    parser.add_argument("--fix", "--remediate", action="store_true", dest="fix", help="Repair safe manifest and triage drift in candidate workspaces.")
+    parser.add_argument("--fresh", action="store_true", help="Bypass candidate hash and metadata caches.")
+
+
+def _append_schema_validation(root: Path, report: IsolationReport, *, candidate_scope: bool) -> None:
+    """Append schema findings while converting unexpected validator failures to a report entry."""
+    try:
+        if candidate_scope:
+            from .schemas import validate_schemas
+
+            validate_schemas(root, report)
+        else:
+            from .schemas import validate_schema_definitions
+
+            validate_schema_definitions(root, report)
+    except Exception as exc:  # pragma: no cover - defensive
+        report.add(Path(root), "schema-validation-error", str(exc))
+
+
+def run_verify_command(
+    root: Path,
+    *,
+    source: bool = False,
+    candidates: bool = False,
+    legacy_scope: Optional[str] = None,
+    schemas_only: bool = False,
+    fix: bool = False,
+    fresh: bool = False,
+) -> Tuple[Optional[Dict[str, List[str]]], IsolationReport]:
+    """Run the shared ``verify`` dispatch used by both command-line entry points.
+
+    Args:
+        root: Repository root to audit.
+        source: Whether the caller explicitly selected the neutral source scope.
+        candidates: Whether the caller explicitly selected candidate scope.
+        legacy_scope: Optional legacy positional ``"candidate"`` scope.
+        schemas_only: Limit the selected scope to JSON Schema validation.
+        fix: Repair safely provable manifest and triage drift before auditing.
+        fresh: Disable candidate verification-cache reuse for a full audit.
+
+    Returns:
+        A pair of optional remediation actions and the completed audit report.
+
+    Raises:
+        ValueError: Explicit scopes conflict, an unsupported legacy scope is
+            supplied, or ``fix`` lacks candidate scope.
+    """
+    if source and candidates:
+        raise ValueError("--source and --candidates are mutually exclusive")
+    if legacy_scope not in (None, "candidate"):
+        raise ValueError("unsupported legacy verify scope: {0}".format(legacy_scope))
+    if legacy_scope == "candidate" and (source or candidates):
+        raise ValueError("legacy positional 'candidate' cannot be combined with --source or --candidates")
+
+    root = Path(root).resolve()
+    candidate_scope = bool(candidates or legacy_scope == "candidate")
+    if fix and not candidate_scope:
+        raise ValueError("--fix requires --candidates")
+
+    remediated: Optional[Dict[str, List[str]]] = None
+    if fix:
+        from .remediation import remediate_candidate_drift
+
+        remediated = remediate_candidate_drift(root)
+
+    if schemas_only:
+        report = IsolationReport()
+        _append_schema_validation(root, report, candidate_scope=candidate_scope)
+    elif candidate_scope:
+        report = run_audit(root, use_cache=not fresh)
+    else:
+        report = check_neutral_repository(root)
+        _append_schema_validation(root, report, candidate_scope=False)
+    return remediated, report
 
 
 def _remediation_hint(rule: str) -> str:
@@ -658,6 +891,15 @@ def _remediation_hint(rule: str) -> str:
 
 
 def format_report(report: IsolationReport) -> str:
+    """Format an audit report for a human operator.
+
+    Args:
+        report: Isolation and optional schema-validation findings to render.
+
+    Returns:
+        Terminal-ready summary grouped by rule, including safe remediation
+        guidance for error findings.
+    """
     errors = [v for v in report.violations if v.severity == "error"]
     warnings = report.warnings
     if not errors:
@@ -702,48 +944,34 @@ def format_report(report: IsolationReport) -> str:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Run the standalone isolation-audit command-line interface.
+
+    Args:
+        argv: Optional command-line arguments excluding the executable name.
+
+    Returns:
+        ``0`` when the selected audit has no error findings, otherwise ``1``.
+    """
     parser = argparse.ArgumentParser(
         description="Enforce candidate/ research isolation and schema integrity."
     )
     parser.add_argument("--root", type=Path, default=Path.cwd(), help="Repository root.")
-    parser.add_argument("scope", nargs="?", choices=("candidate",), help=argparse.SUPPRESS)
-    scope = parser.add_mutually_exclusive_group()
-    scope.add_argument("--source", action="store_true", help="Audit target-neutral source and resources only.")
-    scope.add_argument("--candidates", action="store_true", help="Audit candidate data, records, and provenance.")
-    parser.add_argument(
-        "--schemas-only",
-        action="store_true",
-        help="Validate schema definitions only; combine with --candidates for candidate records.",
-    )
-    parser.add_argument("--fix", "--remediate", action="store_true", dest="fix", help="Repair safe manifest and triage drift in candidate workspaces.")
-    parser.add_argument("--fresh", action="store_true", help="Bypass candidate hash and metadata caches.")
+    add_verify_arguments(parser)
     args = parser.parse_args(argv)
-    root = args.root.resolve()
-    candidate_scope = bool(args.candidates or args.scope == "candidate")
-    if args.fix and not candidate_scope:
-        parser.error("--fix requires --candidates")
-    if args.fix:
-        from .remediation import remediate_candidate_drift
-
-        print(json.dumps({"remediated": remediate_candidate_drift(root)}, indent=2, sort_keys=True))
-    if args.schemas_only:
-        report = IsolationReport()
-        try:
-            from .schemas import validate_schema_definitions, validate_schemas
-
-            if candidate_scope:
-                validate_schemas(root, report)
-            else:
-                validate_schema_definitions(root, report)
-        except Exception as exc:  # pragma: no cover - defensive
-            report.add(Path(root), "schema-validation-error", str(exc))
-    elif candidate_scope:
-        report = run_audit(root, use_cache=not args.fresh)
-    else:
-        from .schemas import validate_schema_definitions
-
-        report = check_neutral_repository(root)
-        validate_schema_definitions(root, report)
+    try:
+        remediated, report = run_verify_command(
+            args.root,
+            source=args.source,
+            candidates=args.candidates,
+            legacy_scope=args.scope,
+            schemas_only=args.schemas_only,
+            fix=args.fix,
+            fresh=args.fresh,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    if remediated is not None:
+        print(json.dumps({"remediated": remediated}, indent=2, sort_keys=True))
     print(format_report(report))
     return 0 if report.ok else 1
 

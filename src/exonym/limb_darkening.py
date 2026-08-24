@@ -1,8 +1,15 @@
-"""Candidate-local LDTk quadratic limb-darkening prior generation.
+"""Create candidate-local quadratic limb-darkening priors with LDTk.
 
-This module deliberately reads stellar parameters directly from the candidate
-workspace rather than using demonstration fallbacks.  A prior report is only
-written after LDTk has successfully produced finite coefficients.
+The stored coefficients parameterize the quadratic intensity law
+``I(mu) / I(1) = 1 - u1 (1 - mu) - u2 (1 - mu)**2``.  LDTk samples stellar
+atmosphere profiles using candidate-owned effective temperature, surface
+gravity, and metallicity measurements, then records the finite per-band
+``u1`` and ``u2`` coefficients with their uncertainties.
+
+The implementation follows the quadratic-law context documented in the
+project's Perryman transit-photometry note.  The artifact is a prior for later
+light-curve modelling, not a fitted stellar-intensity measurement, validation
+constraint, or candidate disposition.
 """
 
 from __future__ import annotations
@@ -123,17 +130,38 @@ def generate_ldtk_quadratic_prior(
 ) -> Path:
     """Generate LDTk quadratic limb-darkening priors for a candidate workspace.
 
+    Mathematical Formulation:
+        Each returned coefficient pair is for the dimensionless quadratic law
+        ``I(mu) / I(1) = 1 - u1 (1 - mu) - u2 (1 - mu)**2``.  LDTk derives
+        those coefficients from the supplied stellar-atmosphere-profile
+        distribution rather than from the transit data in this function.
+
+    Astrophysical Rationale:
+        Limb darkening changes ingress and egress shape.  Recording the
+        stellar-input digest and coefficient uncertainties preserves the
+        provenance needed for a later transit-fit prior.
+
     Args:
-        workspace: Candidate workspace that owns ``data/external/stellar_params.json``.
-        filters: Non-empty sequence of LDTk filter definitions for the observed bandpasses.
+        workspace (CandidateWorkspace): Workspace that owns
+            ``data/external/stellar_params.json`` with finite atmospheric
+            values and uncertainties.
+        filters (Sequence[Any]): Non-empty LDTk filter definitions for the
+            observed bandpasses.  Their labels become artifact band labels.
 
     Returns:
-        Path to ``outputs/ldtk_quadratic_limb_darkening_prior.json``.
+        Path: Candidate-local
+        ``outputs/ldtk_quadratic_limb_darkening_prior.json``.  The report is
+        consumed as provenance-bound prior evidence by fitting workflows.
 
     Raises:
-        FileNotFoundError: Candidate stellar parameters are absent.
-        ValueError: Parameters, uncertainties, filters, or LDTk output are invalid.
-        RuntimeError: LDTk cannot be imported.
+        FileNotFoundError: Candidate-owned stellar parameters are absent.
+        ValueError: Atmospheric inputs, filter labels, or LDTk coefficient
+            arrays are malformed or non-finite.
+        RuntimeError: LDTk is unavailable, so no prior artifact is written.
+
+    Note:
+        This generator does not infer limb darkening from an observed transit;
+        it only preserves an atmosphere-based prior for review.
     """
     if isinstance(filters, (str, bytes)) or not filters:
         raise ValueError("filters must be a non-empty sequence of LDTk filter definitions")

@@ -24,7 +24,11 @@ SCHEMA_DIRECTORY = "schemas"
 
 
 class ResourceUnavailableError(RuntimeError):
-    """Raised when a required bundled EXONYM resource cannot be loaded."""
+    """Raised when required templates or schemas are unavailable.
+
+    The error distinguishes a missing source-tree override from a broken or
+    incomplete installed package resource.
+    """
 
 
 def _bundled_directory(name: str) -> Any:
@@ -59,6 +63,16 @@ def iter_template_texts(repository_root: Path) -> Iterator[Tuple[Path, str]]:
     If it is absent, use templates embedded in the installed distribution.  A
     local but empty template directory is an invalid project configuration and
     is rejected rather than silently producing an incomplete workspace.
+
+    Args:
+        repository_root: Source checkout or caller workspace root.
+
+    Yields:
+        Pairs of template paths relative to the template root and UTF-8 text.
+
+    Raises:
+        FileNotFoundError: If a present local template path is invalid or empty.
+        ResourceUnavailableError: If no usable bundled template directory exists.
     """
     template_root = Path(repository_root).resolve() / TEMPLATE_DIRECTORY
     if template_root.exists():
@@ -88,6 +102,19 @@ def read_schema_text(repository_root: Path, filename: str) -> str:
     missing files are reported rather than being masked by the bundled copy.
     This keeps source-tree integrity checks strict while allowing a new
     workspace initialized by an installed wheel to validate itself.
+
+    Args:
+        repository_root: Source checkout or caller workspace root.
+        filename: Basename of the requested schema file.
+
+    Returns:
+        UTF-8 schema text from the local source tree or bundled resources.
+
+    Raises:
+        ValueError: If ``filename`` contains path components.
+        FileNotFoundError: If an authoritative local schema directory lacks the
+            requested file.
+        ResourceUnavailableError: If the installed package lacks the resource.
     """
     if Path(filename).name != filename:
         raise ValueError("schema filename must not contain path components")

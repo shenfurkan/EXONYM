@@ -18,6 +18,8 @@
     "rotation_period_days": {"type": "number", "exclusiveMinimum": 0},
     "rotation_period_std_days": {"type": "number", "minimum": 0},
     "rotation_period_posterior_days": {"$ref": "#/$defs/percentile_summary"},
+    "rotation_period_selection": {"enum": ["harmonic-reconciled", "unresolved-no-harmonic-comparisons", "unresolved-insufficient-compatible-segments"]},
+    "rotation_period_reconciled_segments": {"type": "array", "items": {"$ref": "#/$defs/reconciled_harmonic_segment"}},
     "modulation_amplitude_ppm": {"type": "number", "minimum": 0},
     "modulation_amplitude_posterior_ppm": {"$ref": "#/$defs/amplitude_posterior"},
     "uncertainty_method": {"type": "string", "minLength": 1},
@@ -151,6 +153,17 @@
         "frequency_residual_days_inverse": {"type": "number", "minimum": 0},
         "frequency_resolution_days_inverse": {"type": "number", "exclusiveMinimum": 0},
         "compatible_with_reference_or_first_harmonic": {"type": "boolean"}
+      }
+    },
+    "reconciled_harmonic_segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sector", "observed_peak_period_days", "harmonic_frequency_factor", "reference_family_period_days"],
+      "properties": {
+        "sector": {"type": "integer", "minimum": 1},
+        "observed_peak_period_days": {"type": "number", "exclusiveMinimum": 0},
+        "harmonic_frequency_factor": {"enum": [0.5, 1.0, 2.0]},
+        "reference_family_period_days": {"type": "number", "exclusiveMinimum": 0}
       }
     }
   }

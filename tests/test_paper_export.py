@@ -66,3 +66,19 @@ def test_paper_export_tiny_value_formatting():
     assert "0.00123" in moderate, (
         "0.00123 must be preserved: got {0!r}".format(moderate)
     )
+
+
+def test_paper_export_preserves_tiny_posterior_without_inventing_an_upper_limit():
+    """Tiny posterior values must render as valid TeX, not a data-free limit."""
+    from exonym.paper_export import _posterior_latex
+
+    # This is a fractional-flux representation of 5 +/- 50 ppm.  The
+    # posterior summary does not declare a nondetection or upper-limit
+    # semantic, so the export must preserve its asymmetric-summary contract.
+    rendered = _posterior_latex(
+        {"median": 5.0e-6, "plus": 50.0e-6, "minus": 50.0e-6}, digits=6
+    )
+
+    assert rendered == r"{5 \times 10^{-6}}^{+5 \times 10^{-5}}_{-5 \times 10^{-5}}"
+    assert "<" not in rendered
+    assert "{0}" not in rendered

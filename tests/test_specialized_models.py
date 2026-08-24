@@ -154,7 +154,7 @@ def test_invalid_applicability_stops_before_package_resolution_and_writes_nothin
         lambda *args: pytest.fail("package resolution ran before applicability validation"),
     )
 
-    with pytest.raises(ValueError, match="applicability"):
+    with pytest.raises(ValueError, match="adapter input schema violation"):
         run_planetsynth(workspace)
 
     assert not (workspace.path / "runs" / "planetsynth").exists()

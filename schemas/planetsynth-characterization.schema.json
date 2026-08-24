@@ -38,9 +38,9 @@
       "required": ["value", "unit"],
       "properties": { "value": { "type": "number", "exclusiveMinimum": 0 }, "unit": { "type": "string" } }
     },
-    "mjup": { "allOf": [{ "$ref": "#/$defs/quantity" }, { "properties": { "unit": { "const": "M_jup" } } }] },
-    "rjup": { "allOf": [{ "$ref": "#/$defs/quantity" }, { "properties": { "unit": { "const": "R_jup" } } }] },
-    "gyr": { "allOf": [{ "$ref": "#/$defs/quantity" }, { "properties": { "unit": { "const": "Gyr" } } }] },
-    "kelvin": { "allOf": [{ "$ref": "#/$defs/quantity" }, { "properties": { "unit": { "const": "K" } } }] }
+    "mjup": { "allOf": [{ "$ref": "#/$defs/quantity" }, { "properties": { "value": { "minimum": 0.1, "maximum": 20.0 }, "unit": { "const": "M_jup" } } }] },
+    "rjup": { "allOf": [{ "$ref": "#/$defs/quantity" }, { "properties": { "value": { "minimum": 0.5, "maximum": 2.5 }, "unit": { "const": "R_jup" } } }] },
+    "gyr": { "allOf": [{ "$ref": "#/$defs/quantity" }, { "properties": { "value": { "minimum": 0.001, "maximum": 20.0 }, "unit": { "const": "Gyr" } } }] },
+    "kelvin": { "allOf": [{ "$ref": "#/$defs/quantity" }, { "properties": { "value": { "minimum": 0, "maximum": 3000.0 }, "unit": { "const": "K" } } }] }
   }
 }

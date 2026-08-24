@@ -157,6 +157,29 @@ def test_vizier_backend_uses_service_timeout():
     vizier_class.assert_called_once_with(row_limit=-1, timeout=4.0)
 
 
+def test_vizier_backend_wraps_right_ascension_for_local_separation():
+    """A fallback source straddling the RA discontinuity stays nearby."""
+    from astropy.table import Table
+
+    service = ArchivalVettingService()
+    rows = Table(
+        {
+            "Source": ["synthetic-wrap-source"],
+            "RA_ICRS": [359.9999],
+            "DE_ICRS": [0.0],
+            "RUWE": [1.0],
+            "Gmag": [12.0],
+        }
+    )
+    with patch("astroquery.vizier.Vizier") as vizier_class:
+        vizier_class.return_value.query_region.return_value = [rows]
+
+        sources = service._gaia_sources_vizier(0.0001, 0.0, radius_arcsec=10.0)
+
+    assert len(sources) == 1
+    assert sources[0]["separation_arcsec"] == pytest.approx(0.72, abs=0.01)
+
+
 def test_archive_numeric_parser_ignores_masked_values_without_coercion_warning():
     assert _finite_float(np.ma.masked) is None
 

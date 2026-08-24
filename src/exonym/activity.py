@@ -19,6 +19,12 @@ Key Scientific Steps:
 
 Contains zero candidate-specific identifiers or constants; all searches operate
 strictly within candidate-provided photometric inputs.
+
+Scientific boundary:
+    Segment agreement, window proximity, and the reported white-noise
+    probability are descriptive diagnostics. They do not model evolving spots
+    or correlated noise and therefore cannot establish an activity cause,
+    candidate rejection, or validation claim without independent evidence.
 """
 
 from __future__ import annotations
@@ -290,6 +296,84 @@ def segment_harmonic_persistence(
     }
 
 
+def reconcile_harmonic_segment_periods(
+    segment_peaks: Sequence[Dict[str, Any]], harmonic_persistence: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Map compatible segment peaks onto one descriptive frequency family.
+
+    A segment whose peak is at a permitted harmonic is converted back to the
+    reference-family period before power weighting. This prevents a raw mean
+    of fundamental and harmonic periods from reporting an intermediate value
+    that no segment actually supports. The reconciliation remains descriptive:
+    it does not resolve spot evolution or establish a physical rotation period.
+
+    Returns:
+        A record containing compatible, reference-family periods and their
+        periodogram powers, or an explicit unresolved status.
+    """
+    comparisons = harmonic_persistence.get("segments")
+    if not isinstance(comparisons, list):
+        return {
+            "status": "unresolved-no-harmonic-comparisons",
+            "periods_days": [],
+            "powers": [],
+            "segments": [],
+        }
+    comparison_by_sector = {
+        int(item["sector"]): item
+        for item in comparisons
+        if isinstance(item, dict)
+        and item.get("compatible_with_reference_or_first_harmonic") is True
+        and isinstance(item.get("sector"), (int, float))
+    }
+    periods: List[float] = []
+    powers: List[float] = []
+    reconciled_segments: List[Dict[str, float]] = []
+    for peak in segment_peaks:
+        try:
+            comparison = comparison_by_sector[int(peak["sector"])]
+            observed_period = float(peak["best_period_days"])
+            power = float(peak["max_power"])
+            harmonic_factor = float(comparison["nearest_harmonic_frequency_factor"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (
+            math.isfinite(observed_period)
+            and observed_period > 0.0
+            and math.isfinite(power)
+            and math.isfinite(harmonic_factor)
+            and harmonic_factor > 0.0
+        ):
+            continue
+        # DIAGNOSTIC_REASONING: frequency = factor * reference_frequency, so
+        # its period must be multiplied by the same factor to recover the
+        # reference-family period before aggregation.
+        reference_period = observed_period * harmonic_factor
+        periods.append(reference_period)
+        powers.append(power)
+        reconciled_segments.append(
+            {
+                "sector": int(peak["sector"]),
+                "observed_peak_period_days": observed_period,
+                "harmonic_frequency_factor": harmonic_factor,
+                "reference_family_period_days": reference_period,
+            }
+        )
+    if len(periods) < 2:
+        return {
+            "status": "unresolved-insufficient-compatible-segments",
+            "periods_days": [],
+            "powers": [],
+            "segments": reconciled_segments,
+        }
+    return {
+        "status": "harmonic-reconciled",
+        "periods_days": periods,
+        "powers": powers,
+        "segments": reconciled_segments,
+    }
+
+
 def sinusoid_amplitude_ppm(
     time: Sequence[float], flux: Sequence[float], period_days: float
 ) -> float:
@@ -490,15 +574,24 @@ def run_stellar_activity(workspace: CandidateWorkspace) -> Path:
     if not segment_results:
         raise RuntimeError("no usable light curve segments for activity analysis")
 
-    summary = weighted_period_summary(period_peaks, power_peaks)
+    harmonic_persistence = segment_harmonic_persistence(segment_results)
+    reconciliation = reconcile_harmonic_segment_periods(
+        segment_results, harmonic_persistence
+    )
+    if reconciliation["status"] == "harmonic-reconciled":
+        selected_periods = reconciliation["periods_days"]
+        selected_powers = reconciliation["powers"]
+    else:
+        selected_periods = period_peaks
+        selected_powers = power_peaks
+    summary = weighted_period_summary(selected_periods, selected_powers)
     rotation_period = summary["weighted_mean_period_days"]
-    rotation_posterior = weighted_percentile_summary(period_peaks, power_peaks)
+    rotation_posterior = weighted_percentile_summary(selected_periods, selected_powers)
     amplitude_posterior = sinusoid_amplitude_posterior(time, flux, flux_err, rotation_period)
     best_analytic_white_noise_fap = min(
         segment["analytic_white_noise_false_alarm_probability"]
         for segment in segment_results
     )
-    harmonic_persistence = segment_harmonic_persistence(segment_results)
 
     payload = {
         "schema_version": "1.0",
@@ -513,6 +606,8 @@ def run_stellar_activity(workspace: CandidateWorkspace) -> Path:
         "rotation_period_days": round(rotation_period, 4),
         "rotation_period_std_days": summary["weighted_std_period_days"],
         "rotation_period_posterior_days": rotation_posterior,
+        "rotation_period_selection": reconciliation["status"],
+        "rotation_period_reconciled_segments": reconciliation["segments"],
         "modulation_amplitude_ppm": round(amplitude_posterior["median"], 2),
         "modulation_amplitude_posterior_ppm": amplitude_posterior,
         "uncertainty_method": (

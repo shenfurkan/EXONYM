@@ -1,9 +1,23 @@
-"""Opt-in, candidate-local light-curve detrending.
+"""Candidate-local, provenance-bound light-curve detrending.
 
-This module deliberately accepts arrays from the caller instead of changing the
-shared light-curve loader.  Every successful run writes a processed array
-artifact and a provenance manifest below the owning candidate workspace; raw
-inputs are never opened for writing.
+The public entry point accepts caller-supplied normalized flux instead of
+silently changing the shared light-curve loader. It supports a deterministic
+running median and opt-in Wotan or Celerite backends, then writes a processed
+array plus a manifest below the owning candidate workspace. Raw products are
+never opened for writing.
+
+Transit masks are derived from a complete candidate BTJD ephemeris and are
+hash-bound to the exact cadence array. This preserves an auditable separation
+between continuum estimation and the declared transit windows.
+
+Scientific Boundary:
+    Detrending can alter apparent transit depth and variability. Its products
+    are descriptive preprocessing inputs, not an independent detection,
+    completeness calibration, or validation result.
+
+References:
+    methods/detrending-and-transit-inference.md documents the backend models,
+    units, and limitations used by this module.
 """
 
 from __future__ import annotations
@@ -27,6 +41,16 @@ from .workspace import CandidateWorkspace, validate_candidate_id
 
 
 SUPPORTED_METHODS = ("running-median", "wotan", "celerite")
+_TRANSIT_MASK_FIELDS = ("period_days", "epoch_btjd", "duration_days")
+_CANDIDATE_TRANSIT_MASK_FIELD_SOURCES = frozenset(
+    {
+        "candidate-config",
+        "candidate-config-signal",
+        "candidate-data-bls",
+        "bls-search",
+    }
+)
+TRANSIT_MASK_DEFINITION = "nearest-ephemeris-centre-within-half-duration-v1"
 
 
 class OptionalBackendUnavailable(RuntimeError):
@@ -35,7 +59,13 @@ class OptionalBackendUnavailable(RuntimeError):
 
 @dataclass(frozen=True)
 class DetrendingArtifacts:
-    """Candidate-local files created by one successful detrending run."""
+    """Candidate-local files created by one successful detrending run.
+
+    Attributes:
+        artifact_path: Compressed processed cadence array below data/processed.
+        manifest_path: JSON manifest that binds configuration, input products,
+            transit-mask provenance, and artifact digests.
+    """
 
     artifact_path: Path
     manifest_path: Path
@@ -137,6 +167,184 @@ def _finite_series(
     return sorted_time, values[sorted_indices], sorted_errors, sorted_indices
 
 
+def _canonical_transit_mask_ephemeris(ephemeris: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return a canonical candidate-derived BTJD ephemeris for mask provenance."""
+    from .inputs import BTJD_TIME_SYSTEM
+
+    if not isinstance(ephemeris, Mapping):
+        raise ValueError("detrending requires a complete candidate-derived BTJD ephemeris")
+    if ephemeris.get("time_system") != BTJD_TIME_SYSTEM:
+        raise ValueError("detrending requires a BTJD_TDB candidate ephemeris")
+
+    field_sources = ephemeris.get("field_sources")
+    if not isinstance(field_sources, Mapping) or any(
+        not isinstance(field_sources.get(field), str)
+        or field_sources[field] not in _CANDIDATE_TRANSIT_MASK_FIELD_SOURCES
+        for field in _TRANSIT_MASK_FIELDS
+    ):
+        raise ValueError("detrending requires a complete candidate-derived BTJD ephemeris")
+    source = ephemeris.get("source")
+    if not isinstance(source, str) or not source:
+        raise ValueError("detrending requires a candidate ephemeris source label")
+
+    try:
+        period_days = float(ephemeris["period_days"])
+        epoch_btjd = float(ephemeris["epoch_btjd"])
+        duration_days = float(ephemeris["duration_days"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("detrending requires finite period, epoch, and duration values") from exc
+    if (
+        not np.isfinite(period_days)
+        or not np.isfinite(epoch_btjd)
+        or not np.isfinite(duration_days)
+        or period_days <= 0.0
+        or duration_days <= 0.0
+        or duration_days >= period_days
+    ):
+        raise ValueError(
+            "detrending requires a positive duration shorter than the candidate period"
+        )
+
+    return {
+        "schema_version": 1,
+        "mask_definition": TRANSIT_MASK_DEFINITION,
+        "time_system": BTJD_TIME_SYSTEM,
+        "source": source,
+        "period_days": period_days,
+        "epoch_btjd": epoch_btjd,
+        "duration_days": duration_days,
+        "field_sources": {
+            field: field_sources[field] for field in _TRANSIT_MASK_FIELDS
+        },
+    }
+
+
+def _canonical_json_sha256(payload: Mapping[str, Any]) -> str:
+    """Hash canonical JSON so equivalent ephemeris records have one digest."""
+    try:
+        encoded = json.dumps(
+            payload,
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("transit mask provenance is not canonical JSON") from exc
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _transit_mask_sha256(mask: np.ndarray) -> str:
+    """Hash one one-dimensional boolean cadence mask with its exact length."""
+    array = np.asarray(mask, dtype=bool)
+    if array.ndim != 1:
+        raise ValueError("transit mask provenance requires a one-dimensional mask")
+    digest = hashlib.sha256()
+    digest.update(b"exonym-transit-mask-v1\0")
+    digest.update(int(array.size).to_bytes(8, byteorder="big", signed=False))
+    digest.update(np.ascontiguousarray(array, dtype=np.uint8).tobytes())
+    return digest.hexdigest()
+
+
+def _transit_mask_from_canonical_ephemeris(
+    time_btjd: Sequence[float], canonical_ephemeris: Mapping[str, Any]
+) -> np.ndarray:
+    """Return in-transit flags after the ephemeris provenance has been checked."""
+    time = np.asarray(time_btjd, dtype=float)
+    if time.ndim != 1:
+        raise ValueError(
+            "time_btjd must be one-dimensional when deriving a transit mask"
+        )
+    period_days = float(canonical_ephemeris["period_days"])
+    epoch_btjd = float(canonical_ephemeris["epoch_btjd"])
+    duration_days = float(canonical_ephemeris["duration_days"])
+
+    phase_days = (
+        (time - epoch_btjd + 0.5 * period_days) % period_days
+    ) - 0.5 * period_days
+    return np.abs(phase_days) <= 0.5 * duration_days
+
+
+def transit_mask_from_ephemeris(
+    time_btjd: Sequence[float], ephemeris: Mapping[str, Any]
+) -> np.ndarray:
+    """Derive in-transit cadence flags from a complete candidate BTJD ephemeris.
+
+    Each cadence is assigned to its nearest declared transit centre modulo the
+    period. A flag is true when that separation is no more than half the
+    declared duration, so trend fitting can omit the expected transit window.
+
+    Args:
+        time_btjd: One-dimensional observation times in BTJD_TDB days.
+        ephemeris: Candidate-derived period, epoch, duration, time-system, and
+            field-source mapping.
+
+    Returns:
+        A one-dimensional boolean array aligned with time_btjd. True denotes
+        an in-transit cadence.
+
+    Raises:
+        ValueError: If times are not one-dimensional or the ephemeris is
+            incomplete, non-finite, non-BTJD, synthetic, or physically invalid.
+    """
+    return _transit_mask_from_canonical_ephemeris(
+        time_btjd, _canonical_transit_mask_ephemeris(ephemeris)
+    )
+
+
+def transit_mask_provenance_from_ephemeris(
+    time_btjd: Sequence[float], ephemeris: Mapping[str, Any]
+) -> Dict[str, Any]:
+    """Build canonical, hash-bound provenance for a derived transit mask.
+
+    The ephemeris digest covers BTJD period, epoch, duration, source labels,
+    and mask-definition version. The mask digest additionally binds those
+    values to the exact cadence sequence written into a processed artifact.
+
+    Args:
+        time_btjd: One-dimensional observation times in BTJD_TDB days.
+        ephemeris: Complete candidate-derived ephemeris used for the mask.
+
+    Returns:
+        A JSON-safe mapping containing canonical ephemeris values and SHA-256
+        digests for the ephemeris and resulting cadence mask.
+
+    Raises:
+        ValueError: If the inputs cannot form a complete canonical provenance
+            record.
+    """
+    canonical_ephemeris = _canonical_transit_mask_ephemeris(ephemeris)
+    mask = _transit_mask_from_canonical_ephemeris(time_btjd, canonical_ephemeris)
+    return {
+        "schema_version": 1,
+        "mask_definition": TRANSIT_MASK_DEFINITION,
+        "ephemeris": canonical_ephemeris,
+        "ephemeris_sha256": _canonical_json_sha256(canonical_ephemeris),
+        "mask_sha256": _transit_mask_sha256(mask),
+    }
+
+
+def validate_transit_mask_provenance(
+    time_btjd: Sequence[float], provenance: Mapping[str, Any], ephemeris: Mapping[str, Any]
+) -> None:
+    """Verify that a recorded detrending mask remains reproducible.
+
+    Args:
+        time_btjd: Processed artifact cadence times in BTJD_TDB days.
+        provenance: Recorded canonical ephemeris and cadence-mask digests.
+        ephemeris: Ephemeris expected to reproduce the recorded mask.
+
+    Raises:
+        ValueError: If provenance is absent, malformed, stale, or differs from
+            the deterministic reconstruction.
+    """
+    if not isinstance(provenance, Mapping):
+        raise ValueError("detrended input has no transit mask provenance")
+    expected = transit_mask_provenance_from_ephemeris(time_btjd, ephemeris)
+    if dict(provenance) != expected:
+        raise ValueError("detrended input transit mask provenance is stale or mismatched")
+
+
 def _running_median_trend(
     time: np.ndarray, values: np.ndarray, window_days: float,
     transit_mask: Optional[np.ndarray] = None,
@@ -158,6 +366,8 @@ def _running_median_trend(
         if mask.shape != values.shape:
             raise ValueError("transit_mask must match values shape")
         if mask.any():
+            if mask.all():
+                raise ValueError("transit_mask must retain at least one out-of-transit cadence")
             indices = np.arange(values.size)
             working[mask] = np.interp(
                 indices[mask], indices[~mask], values[~mask]
@@ -171,8 +381,9 @@ def _wotan_trend(
 ) -> np.ndarray:
     """Estimate a trend with the optional Wotan package.
 
-    When ``transit_mask`` is provided, masked cadences are passed to
-    wotan as ``mask`` (inverted boolean) so they are excluded from the fit.
+    Wotan's ``flatten`` API receives ``True`` for in-transit cadences and
+    excludes those cadences internally.  Pass the in-transit mask directly;
+    inverting it would instead remove the out-of-transit baseline.
     """
     try:
         wotan = importlib.import_module("wotan")
@@ -190,7 +401,7 @@ def _wotan_trend(
             mask = np.asarray(transit_mask, dtype=bool)
             if mask.shape != values.shape:
                 raise ValueError("transit_mask must match values shape")
-            wotan_kwargs["mask"] = ~mask
+            wotan_kwargs["mask"] = mask
         _, trend = wotan.flatten(time, values, **wotan_kwargs)
     except Exception as exc:
         raise RuntimeError("Wotan detrending failed") from exc
@@ -216,9 +427,18 @@ def _celerite_trend(
     """Estimate a Matern-3/2 GP trend with the optional celerite package.
 
     When ``transit_mask`` is provided, masked cadences are excluded from
-    the amplitude estimate and the GP fit; the resulting prediction is
-    linearly interpolated across the masked gaps before being subtracted.
+    the amplitude estimate and GP conditioning arrays.  The conditioned GP
+    then predicts the trend at every cadence, including transit windows.
     """
+    unmasked = np.ones(values.size, dtype=bool)
+    if transit_mask is not None:
+        mask = np.asarray(transit_mask, dtype=bool)
+        if mask.shape != values.shape:
+            raise ValueError("transit_mask must match values shape")
+        unmasked = ~mask
+    if not unmasked.any():
+        raise ValueError("transit_mask must retain at least one out-of-transit cadence")
+
     try:
         celerite = importlib.import_module("celerite")
     except ImportError as exc:
@@ -226,34 +446,24 @@ def _celerite_trend(
             "Celerite detrending was requested but the optional 'celerite' package is not installed"
         ) from exc
 
-    unmasked = np.ones(values.size, dtype=bool)
-    if transit_mask is not None:
-        mask = np.asarray(transit_mask, dtype=bool)
-        if mask.shape != values.shape:
-            raise ValueError("transit_mask must match values shape")
-        unmasked = ~mask
-
-    baseline = float(np.median(values[unmasked])) if unmasked.any() else float(np.median(values))
+    baseline = float(np.median(values[unmasked]))
     residuals = values - baseline
     unmasked_residuals = residuals[unmasked]
     amplitude = max(float(np.std(unmasked_residuals)), np.finfo(float).eps)
+    unmasked_errors = _resolved_errors(
+        values[unmasked], errors[unmasked] if errors is not None else None
+    )
     try:
         kernel = celerite.terms.Matern32Term(
             log_sigma=float(np.log(amplitude)), log_rho=float(np.log(window_days))
         )
         gp = celerite.GP(kernel, mean=0.0)
-        gp.compute(time, _resolved_errors(values, errors))
-        prediction = np.asarray(gp.predict(residuals, time, return_cov=False), dtype=float)
+        gp.compute(time[unmasked], unmasked_errors)
+        prediction = np.asarray(
+            gp.predict(unmasked_residuals, time, return_cov=False), dtype=float
+        )
     except Exception as exc:
         raise RuntimeError("Celerite detrending failed") from exc
-
-    # Interpolate trend across masked cadences so the final subtraction
-    # does not inject the GP prediction through transit windows.
-    if transit_mask is not None and mask.any():
-        indices = np.arange(values.size)
-        prediction[mask] = np.interp(
-            indices[mask], indices[unmasked], prediction[unmasked]
-        )
     return baseline + prediction
 
 
@@ -309,6 +519,7 @@ def detrend_candidate(
     sector: Optional[Sequence[int]] = None,
     input_products: Optional[Sequence[Mapping[str, str]]] = None,
     transit_mask: Optional[np.ndarray] = None,
+    transit_mask_ephemeris: Optional[Mapping[str, Any]] = None,
 ) -> DetrendingArtifacts:
     """Detrend caller-supplied normalized flux and write candidate-local artifacts.
 
@@ -323,7 +534,11 @@ def detrend_candidate(
         input_products: Hash-bound raw light-curve records used for the input.
         transit_mask: Boolean mask of in-transit cadences to protect from
             detrending bias. Cadences where ``transit_mask`` is True are
-            excluded from the trend estimate and interpolated over.
+            excluded from backend conditioning; each backend estimates or
+            predicts the corresponding continuum trend at those cadences.
+        transit_mask_ephemeris: Complete candidate-derived BTJD ephemeris
+            used to derive ``transit_mask``. It is required whenever a mask
+            is supplied and is hash-bound into the output manifest.
 
     Returns:
         Paths for a compressed processed array and its JSON provenance manifest.
@@ -349,13 +564,28 @@ def detrend_candidate(
         raise ValueError("detrending requires hash-bound raw input products")
     sorted_time, sorted_values, sorted_errors, sorted_indices = _finite_series(time, values, errors)
 
+    # SCIENTIFIC_BOUNDARY: Require a reproducible candidate ephemeris before
+    # treating a protected cadence mask as suitable for scientific consumers.
     # Validate and sort the transit mask alongside the flux arrays.
     sorted_transit_mask: Optional[np.ndarray] = None
+    mask_provenance: Optional[Dict[str, Any]] = None
     if transit_mask is not None:
         mask_arr = np.asarray(transit_mask, dtype=bool)
         if mask_arr.shape != values.shape:
             raise ValueError("transit_mask must be a boolean array matching flux shape")
         sorted_transit_mask = mask_arr[sorted_indices]
+        if sorted_transit_mask.all():
+            raise ValueError("transit_mask must retain at least one out-of-transit cadence")
+        if transit_mask_ephemeris is None:
+            raise ValueError("transit_mask requires its complete candidate-derived BTJD ephemeris")
+        expected_mask = transit_mask_from_ephemeris(time, transit_mask_ephemeris)
+        if not np.array_equal(mask_arr, expected_mask):
+            raise ValueError("transit_mask does not match its candidate-derived BTJD ephemeris")
+        mask_provenance = transit_mask_provenance_from_ephemeris(
+            time, transit_mask_ephemeris
+        )
+    elif transit_mask_ephemeris is not None:
+        raise ValueError("transit_mask_ephemeris requires a transit_mask")
 
     masked_fraction: float = 0.0
     transit_mask_applied: bool = False
@@ -413,7 +643,7 @@ def detrend_candidate(
     outputs_dir.mkdir(parents=True, exist_ok=True)
     _atomic_write(artifact_path, artifact_buffer.getvalue())
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "candidate_id": workspace.candidate_id,
         "generated_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "method": normalized_method,
@@ -422,6 +652,7 @@ def detrend_candidate(
             "window_days": float(window_days),
             "transit_mask_applied": transit_mask_applied,
             "masked_fraction": masked_fraction,
+            "transit_mask_provenance": mask_provenance,
         },
         "input": {
             "cadences": int(values.size),

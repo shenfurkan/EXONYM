@@ -1,8 +1,14 @@
-"""Candidate-local pre-TRICERATOPS statistical-vetting safeguards.
+"""Candidate-local routing safeguards before statistical vetting.
 
-This module records what each pre-vetting diagnostic can and cannot establish.
-It only routes work to pass, review-required, or blocked; it never writes a
-scientific claim or assigns a candidate disposition.
+This module translates hash-bound screening, archive, localization, activity,
+and dilution records into transparent routing states. The aggregate state is a
+conservative maximum over required diagnostics: a missing or unsuitable input
+must remain visible rather than being averaged into an apparently clean result.
+
+Scientific boundary:
+    The routing output records what each diagnostic can and cannot establish.
+    It never writes a scientific claim, assigns a disposition, calibrates a
+    false-positive probability, or substitutes for human review.
 """
 
 from __future__ import annotations
@@ -18,10 +24,24 @@ from .inputs import BTJD_TIME_SYSTEM, _read_json, is_manifest_bound_bls_result
 from .workspace import CandidateWorkspace, validate_signal_suffix
 
 
+# ASTROPHYSICAL_HEURISTIC: Below a detector-pixel-scale archive cone, a
+# crowding result cannot exclude sources relevant to the aperture.
 MINIMUM_CROWDING_SEARCH_RADIUS_ARCSEC: float = 21.0
 
 
-DIAGNOSTIC_NAMES = ("screening", "archive", "localization", "activity", "dilution")
+DIAGNOSTIC_NAMES = (
+    "screening",
+    "archive",
+    "localization",
+    "activity",
+    "dilution",
+    "radial-velocity",
+)
+
+# A descriptive model-comparison threshold only. Crossing it routes the
+# candidate-owned RV series to human review; it never establishes a companion
+# or a scientific claim.
+RV_REVIEW_DELTA_BIC = 10.0
 
 
 def _sha256(path: Path) -> str:
@@ -262,14 +282,51 @@ def _localization_record(workspace: CandidateWorkspace) -> Dict[str, Any]:
         if isinstance(summary, dict)
         else None
     )
+    modeled_competitor_count = (
+        _finite_number(summary.get("sectors_with_competing_sources_modeled"))
+        if isinstance(summary, dict)
+        else None
+    )
     if data.get("source") != "candidate-data" or not isinstance(summary, dict):
         status, reason = "blocked", "Localization lacks candidate-data PRF inputs or a usable summary."
     elif data.get("calibration_status") != "uncalibrated":
         status, reason = "blocked", "Localization declares an unsupported calibration status."
-    elif ratio is None or ratio >= 1.0 or summary.get("target_in_aperture") is True:
-        status, reason = "review-required", "Uncalibrated localization is consistent with the target but requires human review."
+    elif (
+        ratio is None
+        and modeled_competitor_count is not None
+        and modeled_competitor_count > 0.0
+    ):
+        status, reason = (
+            "blocked",
+            "Localization modeled competing sources but lacks a finite "
+            "target-to-strongest-other amplitude ratio.",
+        )
+    elif ratio is None and modeled_competitor_count == 0.0:
+        status, reason = (
+            "review-required",
+            "Uncalibrated localization modeled no competing sources, so no "
+            "target-to-other amplitude ratio is available; human review is required.",
+        )
+    elif ratio is None:
+        status, reason = (
+            "review-required",
+            "Uncalibrated localization lacks a reported competing-source amplitude "
+            "ratio and requires human review.",
+        )
+    # This is target amplitude divided by the strongest other-source amplitude;
+    # only values strictly above one favor the target.
+    elif ratio > 1.0:
+        status, reason = (
+            "review-required",
+            "Uncalibrated localization is target-favored by the difference-image "
+            "amplitude ratio but requires human review.",
+        )
     else:
-        status, reason = "review-required", "Current localization is an uncalibrated PRF/scene diagnostic and cannot route a source automatically."
+        status, reason = (
+            "review-required",
+            "Uncalibrated localization is competitor-favored or tied by the "
+            "difference-image amplitude ratio but requires human review.",
+        )
     return _record(
         "localization", status, reason, artifact,
         "Uncalibrated Gaussian-PRF difference-image screening with no scene-level FPP.",
@@ -296,6 +353,11 @@ def _activity_record(workspace: CandidateWorkspace, screen_record: Dict[str, Any
         aliases = any(math.isclose(rotation, factor * transit, rel_tol=0.02) for factor in (0.5, 1.0, 2.0))
     if data.get("source") != "candidate-data" or rotation is None:
         status, reason = "blocked", "Activity analysis lacks a finite candidate-data rotation diagnostic."
+    elif transit is None or transit <= 0.0:
+        status, reason = (
+            "blocked",
+            "Activity alias triage requires a finite screening ephemeris transit period.",
+        )
     elif aliases:
         status, reason = "review-required", "The activity peak is compatible with the transit period or a simple harmonic."
     else:
@@ -344,6 +406,110 @@ def _dilution_record(workspace: CandidateWorkspace) -> Dict[str, Any]:
     )
 
 
+def _radial_velocity_record(workspace: CandidateWorkspace) -> Optional[Dict[str, Any]]:
+    """Route an RV fit only when the workspace actually contains RV data.
+
+    RV remains optional for the broad workflow. Once a candidate owner adds
+    canonical observations, however, a missing, stale, or malformed fit must
+    stay visible in automated triage rather than leaving the RV path unused.
+    """
+    observations_path = workspace.path / "data" / "external" / "radial_velocity_observations.json"
+    report_path = workspace.path / "outputs" / "rv_keplerian_fit.json"
+    if not observations_path.is_file() and not report_path.is_file():
+        return None
+
+    report = _load_object(report_path)
+    artifact = _artifact(workspace, report_path)
+    if not observations_path.is_file() or report is None or artifact is None:
+        return _record(
+            "radial-velocity",
+            "blocked",
+            "Candidate-local RV observations require a current readable Keplerian comparison report.",
+            artifact,
+            "No RV model-comparison calibration is available until the canonical observations are fit.",
+            "Canonical BJD_TDB radial-velocity observations and an optional activity indicator.",
+            "delta_bic_constant_minus_keplerian",
+            None,
+            "BIC",
+            None,
+            ["RV observations are present but no current model-comparison artifact is available."],
+        )
+
+    try:
+        from .radial_velocity import load_radial_velocity_observations
+
+        load_radial_velocity_observations(workspace)
+    except (FileNotFoundError, RuntimeError, ValueError, OSError) as exc:
+        return _record(
+            "radial-velocity",
+            "blocked",
+            "Canonical RV observations cannot be revalidated: {0}".format(exc),
+            artifact,
+            "RV observations failed their canonical schema or ownership validation.",
+            "Candidate-local radial-velocity observations.",
+            "delta_bic_constant_minus_keplerian",
+            None,
+            "BIC",
+            None,
+            ["No RV interpretation is routed from malformed or untrusted observations."],
+        )
+
+    inputs = report.get("input_artifacts")
+    matching_input = (
+        isinstance(inputs, list)
+        and any(
+            isinstance(item, dict)
+            and item.get("path") == "data/external/radial_velocity_observations.json"
+            and item.get("sha256") == _sha256(observations_path)
+            for item in inputs
+        )
+    )
+    comparison = report.get("model_comparison")
+    delta_bic = (
+        _finite_number(comparison.get("delta_bic_constant_minus_keplerian"))
+        if isinstance(comparison, dict)
+        else None
+    )
+    if (
+        report.get("candidate_id") != workspace.candidate_id
+        or report.get("report_type") != "keplerian-rv-model-comparison"
+        or report.get("observation_time_standard") != "BJD_TDB"
+        or report.get("velocity_unit") != "m/s"
+        or not matching_input
+        or delta_bic is None
+    ):
+        status, reason = (
+            "blocked",
+            "RV comparison lacks matching candidate ownership, units, input digest, or finite BIC evidence.",
+        )
+    elif delta_bic >= RV_REVIEW_DELTA_BIC:
+        status, reason = (
+            "review-required",
+            "RV data favor the fixed-period Keplerian model at the recorded descriptive BIC threshold.",
+        )
+    else:
+        status, reason = (
+            "pass",
+            "RV comparison has no strong fixed-period Keplerian preference at the recorded descriptive threshold.",
+        )
+    return _record(
+        "radial-velocity",
+        status,
+        reason,
+        artifact,
+        "Fixed-period Keplerian-versus-nuisance BIC comparison; not a mass posterior or validation calibration.",
+        "Candidate-local BJD_TDB RV observations, quoted uncertainties, optional activity indicator, and fitted nuisance terms.",
+        "delta_bic_constant_minus_keplerian",
+        delta_bic,
+        "BIC",
+        None,
+        [
+            "The comparison is conditional on the fixed photometric period and does not prove a planetary companion.",
+            "Activity, sampling, eccentricity, and model-selection uncertainty require human review.",
+        ],
+    )
+
+
 def build_statistical_vetting_evidence(workspace: CandidateWorkspace, signal: Optional[str] = None) -> Path:
     """Write a complete pre-vetting evidence representation without a claim."""
     signal = validate_signal_suffix(signal)
@@ -355,6 +521,9 @@ def build_statistical_vetting_evidence(workspace: CandidateWorkspace, signal: Op
         _activity_record(workspace, screening, signal),
         _dilution_record(workspace),
     ]
+    radial_velocity = _radial_velocity_record(workspace)
+    if radial_velocity is not None:
+        diagnostics.append(radial_velocity)
     statuses = {record["status"] for record in diagnostics}
     overall = "blocked" if "blocked" in statuses else "review-required" if "review-required" in statuses else "pass"
     suffix = ".{0}".format(signal.lstrip(".")) if signal else ""
@@ -368,7 +537,10 @@ def build_statistical_vetting_evidence(workspace: CandidateWorkspace, signal: Op
     }
     path = workspace.path / "outputs" / "statistical_vetting_evidence{0}.json".format(suffix)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
     return path
 
 

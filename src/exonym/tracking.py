@@ -39,6 +39,14 @@ DOCUMENT_ORDER = (
 
 @dataclass(frozen=True)
 class ChecklistItem:
+    """One parsed Markdown checklist entry.
+
+    Attributes:
+        text: Checkbox content after the marker.
+        checked: Whether the source checkbox is marked complete.
+        mandatory: Whether the item contains the mandatory marker.
+    """
+
     text: str
     checked: bool
     mandatory: bool
@@ -46,6 +54,14 @@ class ChecklistItem:
 
 @dataclass
 class DocumentTelemetry:
+    """Checklist-derived progress state for one candidate-local document.
+
+    Attributes:
+        path: Display path for the source document.
+        exists: Whether the source document was available for parsing.
+        items: Parsed checklist items in source order.
+    """
+
     path: str
     exists: bool
     items: List[ChecklistItem] = field(default_factory=list)
@@ -78,7 +94,19 @@ class DocumentTelemetry:
 
 
 def parse_checklist(path: Path) -> DocumentTelemetry:
-    """Parse a Markdown document into checkbox telemetry."""
+    """Parse Markdown checkbox lines into document telemetry.
+
+    Missing or non-file paths produce empty telemetry rather than raising, so
+    callers can display incomplete workflow evidence alongside existing
+    documents.
+
+    Args:
+        path: Candidate-local Markdown document to parse.
+
+    Returns:
+        Telemetry containing the path, existence flag, and recognized
+        checkbox items.
+    """
     telemetry = DocumentTelemetry(path.name if path else "?", path.exists() if path else False)
     if not path or not path.is_file():
         return telemetry
@@ -93,6 +121,16 @@ def parse_checklist(path: Path) -> DocumentTelemetry:
 
 
 def phase_document_path(workspace: CandidateWorkspace, phase: str) -> Optional[Path]:
+    """Return the tracking document used by a workflow phase, if any.
+
+    Args:
+        workspace: Candidate workspace that owns the tracking document.
+        phase: Workflow phase to resolve.
+
+    Returns:
+        Candidate-local document path, or ``None`` for phases governed solely
+        by programmatic gates or unknown phases.
+    """
     relative = PHASE_DOCUMENTS.get(phase)
     if not relative:
         return None
@@ -100,7 +138,14 @@ def phase_document_path(workspace: CandidateWorkspace, phase: str) -> Optional[P
 
 
 def candidate_telemetry(workspace: CandidateWorkspace) -> Dict[str, DocumentTelemetry]:
-    """Return per-document telemetry for every phase gate document."""
+    """Return telemetry for every registered candidate gate document.
+
+    Args:
+        workspace: Candidate workspace whose tracking documents are read.
+
+    Returns:
+        Mapping from candidate-relative document path to parsed telemetry.
+    """
     telemetry: Dict[str, DocumentTelemetry] = {}
     for relative in DOCUMENT_ORDER:
         telemetry[relative] = parse_checklist(workspace.path / relative)
@@ -108,7 +153,16 @@ def candidate_telemetry(workspace: CandidateWorkspace) -> Dict[str, DocumentTele
 
 
 def overall_progress(telemetry: Sequence[DocumentTelemetry]) -> Tuple[int, int, float]:
-    """Return (mandatory_checked, mandatory_total, completion fraction)."""
+    """Summarize mandatory checklist completion across documents.
+
+    Args:
+        telemetry: Parsed document telemetry records.
+
+    Returns:
+        A tuple of mandatory items checked, mandatory items present, and a
+        zero-to-one completion fraction. The fraction is ``0.0`` when no
+        mandatory items exist.
+    """
     checked = sum(doc.mandatory_checked for doc in telemetry)
     total = sum(doc.mandatory_total for doc in telemetry)
     fraction = (checked / total) if total else 0.0
@@ -121,7 +175,16 @@ def _progress_bar(fraction: float, width: int = 40) -> str:
 
 
 def format_dashboard(workspace: CandidateWorkspace, telemetry: Dict[str, DocumentTelemetry]) -> str:
-    """Render the ANSI candidate telemetry dashboard."""
+    """Render an ANSI dashboard for candidate-local workflow evidence.
+
+    Args:
+        workspace: Candidate workspace represented by the dashboard.
+        telemetry: Per-document checklist telemetry, normally from
+            :func:`candidate_telemetry`.
+
+    Returns:
+        A newline-delimited ANSI text dashboard suitable for terminal output.
+    """
     metadata = workspace.metadata
     phase = metadata["workflow"]["phase"]
     phase_index = list(PHASE_DOCUMENTS).index(phase)

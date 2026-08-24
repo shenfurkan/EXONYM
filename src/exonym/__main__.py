@@ -26,6 +26,10 @@ Scientific analysis commands:
   dilution          Aperture robustness and dilution sensitivity
   archive           Query Gaia EDR3 and NASA ExoFOP for archival vetting
   rv                Ingest candidate-local RV data and fit a Keplerian model
+
+This module is intentionally a thin dispatcher. Candidate-specific inputs and
+outputs are delegated to candidate-owning modules; this entry point does not
+turn command success into a scientific claim.
 """
 
 from __future__ import annotations
@@ -38,7 +42,7 @@ from typing import Optional, Sequence
 from . import __version__
 from .freeze import freeze, verify_release
 from .gatekeeper import GateError, advance
-from .isolation import check_neutral_repository, format_report, run_audit
+from .isolation import add_verify_arguments, format_report, run_verify_command
 from .tagging import add_tags, filter_candidates
 from .tracking import candidate_telemetry, format_dashboard
 from .workspace import (
@@ -50,7 +54,12 @@ from .workspace import (
 
 
 def _default_repository_root() -> Path:
-    """Choose the source checkout root, or the caller's workspace when installed."""
+    """Choose a source checkout root or the caller's installed-workspace root.
+
+    Returns:
+        The checkout containing ``pyproject.toml`` when available; otherwise
+        the resolved current working directory.
+    """
     source_root = Path(__file__).resolve().parents[2]
     if (source_root / "pyproject.toml").is_file():
         return source_root
@@ -58,6 +67,12 @@ def _default_repository_root() -> Path:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build the complete ``exonym`` command-line argument parser.
+
+    Returns:
+        Parser with global options and all supported subcommands. Parsing and
+        command execution remain the responsibility of :func:`main`.
+    """
     parser = argparse.ArgumentParser(
         prog="exonym",
         description="EXONYM candidate framework: provision, gate, track, and freeze "
@@ -364,22 +379,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ds9_parser.add_argument("candidate_id")
 
     verify_parser = commands.add_parser("verify", help="Audit source isolation or candidate integrity.")
-    verify_parser.add_argument(
-        "scope",
-        nargs="?",
-        choices=("candidate",),
-        help=argparse.SUPPRESS,
-    )
-    verify_scope = verify_parser.add_mutually_exclusive_group()
-    verify_scope.add_argument("--source", action="store_true", help="Audit target-neutral source and resources only.")
-    verify_scope.add_argument("--candidates", action="store_true", help="Audit candidate data, records, and provenance.")
-    verify_parser.add_argument(
-        "--schemas-only",
-        action="store_true",
-        help="Validate schema definitions only; combine with --candidates for candidate records.",
-    )
-    verify_parser.add_argument("--fix", "--remediate", action="store_true", dest="fix", help="Repair safe manifest and triage drift in candidate workspaces.")
-    verify_parser.add_argument("--fresh", action="store_true", help="Bypass candidate hash and metadata caches.")
+    add_verify_arguments(verify_parser)
 
     export_paper_parser = commands.add_parser(
         "export-paper", help="Export candidate evidence into a candidate-local manuscript macro bundle."
@@ -391,8 +391,24 @@ def _build_parser() -> argparse.ArgumentParser:
 
     search_parser = commands.add_parser("search", help="Run a transit search on candidate data.")
     search_parser.add_argument("candidate_id")
-    search_parser.add_argument("--period-min", type=float, default=0.5, help="Minimum orbital period.")
-    search_parser.add_argument("--period-max", type=float, default=15.0, help="Maximum orbital period.")
+    search_parser.add_argument(
+        "--period-min",
+        type=float,
+        default=None,
+        help=(
+            "Minimum blind-search orbital period (default 0.5 d). With --signal, omit it "
+            "or match the prior-defined ±0.1 d window."
+        ),
+    )
+    search_parser.add_argument(
+        "--period-max",
+        type=float,
+        default=None,
+        help=(
+            "Maximum blind-search orbital period (default 15.0 d). With --signal, omit it "
+            "or match the prior-defined ±0.1 d window."
+        ),
+    )
     search_parser.add_argument(
         "--engine",
         choices=("bls", "tls"),
@@ -489,7 +505,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--n-samples",
         type=int,
         default=5000,
-        help="Emcee production steps per walker or dynesty maximum likelihood calls.",
+        help="Emcee production steps per walker; dynesty uses this to scale initial live points.",
     )
     fit_parser.add_argument(
         "--detrending-method",
@@ -588,11 +604,24 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _print_json(value: object) -> None:
+    """Print one value as deterministic, human-readable JSON.
+
+    Args:
+        value: JSON-serializable value to render to standard output.
+    """
     print(json.dumps(value, indent=2, sort_keys=True), flush=True)
 
 
 def _harvest_filters(args: argparse.Namespace):
-    """Build one explicit source-release filter contract from CLI arguments."""
+    """Build a survey-harvest filter contract from parsed CLI arguments.
+
+    Args:
+        args: Parsed command-line namespace for a harvest-capable survey
+            subcommand.
+
+    Returns:
+        ``TceFilters`` populated from the explicit source-release bounds.
+    """
     from .survey_harvest import TceFilters
 
     return TceFilters(
@@ -609,6 +638,25 @@ def _harvest_filters(args: argparse.Namespace):
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Parse CLI arguments and dispatch one EXONYM operation.
+
+    Args:
+        argv: Optional argument sequence excluding the executable name. When
+            omitted, arguments are read from the process command line.
+
+    Returns:
+        ``0`` for successful commands, or a command-specific nonzero status
+        for completed checks that report failure conditions.
+
+    Raises:
+        SystemExit: For parser errors and operational exceptions rendered by
+            ``argparse`` with exit status ``2``.
+
+    Note:
+        Dispatching an analysis command records or reports its implemented
+        operation. It does not by itself validate a candidate or establish a
+        scientific claim.
+    """
     import sys as _sys
 
     parser = _build_parser()
@@ -626,30 +674,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     try:
         if args.command == "verify":
-            candidate_scope = bool(args.candidates or args.scope == "candidate")
-            if args.fix and not candidate_scope:
-                raise ValueError("--fix requires --candidates")
-            if args.fix:
-                from .remediation import remediate_candidate_drift
-
-                _print_json({"remediated": remediate_candidate_drift(repository_root)})
-            if args.schemas_only:
-                from .isolation import IsolationReport
-
-                from .schemas import validate_schema_definitions, validate_schemas
-
-                report = IsolationReport()
-                if candidate_scope:
-                    validate_schemas(repository_root, report)
-                else:
-                    validate_schema_definitions(repository_root, report)
-            elif candidate_scope:
-                report = run_audit(repository_root, use_cache=not args.fresh)
-            else:
-                from .schemas import validate_schema_definitions
-
-                report = check_neutral_repository(repository_root)
-                validate_schema_definitions(repository_root, report)
+            remediated, report = run_verify_command(
+                repository_root,
+                source=args.source,
+                candidates=args.candidates,
+                legacy_scope=args.scope,
+                schemas_only=args.schemas_only,
+                fix=args.fix,
+                fresh=args.fresh,
+            )
+            if remediated is not None:
+                _print_json({"remediated": remediated})
             print(format_report(report))
             return 0 if report.ok else 1
 
@@ -961,39 +996,56 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 0
 
         if args.command == "ingest":
+            from contextlib import ExitStack
+
             from .ingest import fetch_tess_products, fetch_tess_tpfs, ingest_products
 
-            all_products = []
-            if args.products in ("lc", "both"):
-                all_products.extend(
-                    fetch_tess_products(
-                        candidate, sectors=args.sectors, exptime=args.exptime, provider=args.provider
+            with ExitStack() as staging_batches:
+                all_products = []
+                if args.products in ("lc", "both"):
+                    all_products.extend(
+                        staging_batches.enter_context(
+                            fetch_tess_products(
+                                candidate,
+                                sectors=args.sectors,
+                                exptime=args.exptime,
+                                provider=args.provider,
+                            )
+                        )
                     )
-                )
-            if args.products in ("tp", "both"):
-                all_products.extend(
-                    fetch_tess_tpfs(
-                        candidate, sectors=args.sectors, exptime=args.exptime, provider=args.provider
+                if args.products in ("tp", "both"):
+                    all_products.extend(
+                        staging_batches.enter_context(
+                            fetch_tess_tpfs(
+                                candidate,
+                                sectors=args.sectors,
+                                exptime=args.exptime,
+                                provider=args.provider,
+                            )
+                        )
                     )
+                if not all_products:
+                    print("no products found for the requested sectors")
+                    return 0
+                written = ingest_products(candidate, all_products)
+                _print_json(
+                    [str(path.relative_to(candidate.path)).replace("\\", "/") for path in written]
                 )
-            if not all_products:
-                print("no products found for the requested sectors")
                 return 0
-            written = ingest_products(candidate, all_products)
-            _print_json(
-                [str(path.relative_to(candidate.path)).replace("\\", "/") for path in written]
-            )
-            return 0
 
         if args.command == "detrend":
-            from .detrending import detrend_candidate
-            from .inputs import load_light_curve_table
+            from .detrending import detrend_candidate, transit_mask_from_ephemeris
+            from .inputs import BTJD_TIME_SYSTEM, load_light_curve_table, load_transit_ephemeris
 
             table = load_light_curve_table(
                 candidate, max_points=None, require_raw_provenance=True
             )
             if table is None:
                 raise ValueError("detrending requires readable candidate-local light-curve data")
+            if table.get("time_system") != BTJD_TIME_SYSTEM:
+                raise ValueError("detrending requires BTJD_TDB candidate photometry")
+            ephemeris = load_transit_ephemeris(candidate)
+            transit_mask = transit_mask_from_ephemeris(table["time"], ephemeris)
             artifact = detrend_candidate(
                 candidate,
                 table["time"],
@@ -1009,6 +1061,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     }
                     for path, digest in zip(table["input_files"], table["input_sha256s"])
                 ],
+                transit_mask=transit_mask,
+                transit_mask_ephemeris=ephemeris,
             )
             _print_json(
                 {

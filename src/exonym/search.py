@@ -981,8 +981,8 @@ def _input_manifest_records(
 
 def run_bls_on_candidate(
     workspace: CandidateWorkspace,
-    period_min: float = 0.5,
-    period_max: float = 15.0,
+    period_min: Optional[float] = None,
+    period_max: Optional[float] = None,
     n_periods: int = 2000,
     signal: Optional[str] = None,
     engine: str = "bls",
@@ -1003,7 +1003,9 @@ def run_bls_on_candidate(
     When ``signal`` is provided (e.g. ``""`` for the primary, ``".1"`` for a
     secondary), the search reads the matching per-signal prior from
     ``config/signals/transit_config<signal>.json``, uses its duration, and
-    restricts the period grid to ±0.1 days around the prior period.
+    restricts the period grid to ±0.1 days around the prior period. Explicit
+    period bounds must agree with that effective window; conflicting bounds
+    fail rather than being silently replaced.
     Targeted runs write to ``outputs/<engine>_search_results<signal>.json``
     so independent signals cannot overwrite one another.
 
@@ -1024,8 +1026,10 @@ def run_bls_on_candidate(
     Parameters
     ----------
     workspace : CandidateWorkspace
-    period_min, period_max : float
-        Blind-search period bounds in days.  Ignored in targeted mode.
+    period_min, period_max : float or None
+        Blind-search period bounds in days. When omitted, blind searches use
+        0.5 to 15.0 days. In targeted mode, supplied values must match the
+        prior-defined effective window.
     n_periods : int
         Minimum trial period density (BLS only; acts as floor).
     signal : Optional[str]
@@ -1061,10 +1065,6 @@ def run_bls_on_candidate(
         raise ValueError("search engine must be 'bls' or 'tls'")
     if duration_grid_hours is not None and engine != "bls":
         raise ValueError("duration_grid_hours is supported only by BLS searches")
-    # Validate frequency grid before any I/O to catch configuration errors early.
-    if engine == "bls":
-        _frequency_period_grid(period_min, period_max, n_periods)
-
     duration_grid: Optional[List[float]] = None
     if duration_grid_hours is not None:
         duration_grid = [float(value) for value in duration_grid_hours]
@@ -1105,10 +1105,38 @@ def run_bls_on_candidate(
         # ASTROPHYSICAL_HEURISTIC: ±0.1 d window around the prior period.
         # This is wide enough to capture the expected precision of a catalog
         # ephemeris on a multi-sector baseline while excluding unrelated peaks.
-        period_min = max(0.5, prior_p - 0.1)
-        period_max = prior_p + 0.1
-        if period_max <= period_min:
+        targeted_period_min = max(0.5, prior_p - 0.1)
+        targeted_period_max = prior_p + 0.1
+        if targeted_period_max <= targeted_period_min:
             raise ValueError("signal prior period is below the supported BLS range")
+        conflicting_bounds = []
+        for name, requested, effective in (
+            ("period_min", period_min, targeted_period_min),
+            ("period_max", period_max, targeted_period_max),
+        ):
+            if requested is None:
+                continue
+            try:
+                agrees = bool(
+                    np.isfinite(float(requested))
+                    and np.isclose(float(requested), effective, rtol=0.0, atol=1e-12)
+                )
+            except (TypeError, ValueError):
+                agrees = False
+            if not agrees:
+                conflicting_bounds.append(name)
+        if conflicting_bounds:
+            raise ValueError(
+                "targeted signal search bounds conflict with candidate prior window "
+                "[{0:.12g}, {1:.12g}] days ({2}); omit explicit bounds or use the "
+                "matching prior-defined window".format(
+                    targeted_period_min,
+                    targeted_period_max,
+                    ", ".join(conflicting_bounds),
+                )
+            )
+        period_min = targeted_period_min
+        period_max = targeted_period_max
         signal_provenance: Dict[str, Any] = {
             "mode": "targeted-prior",
             "signal": signal,
@@ -1123,6 +1151,14 @@ def run_bls_on_candidate(
             prior_epoch = float(ephem["epoch_btjd"])
             if np.isfinite(prior_epoch):
                 signal_provenance["prior_epoch_btjd"] = prior_epoch
+    else:
+        period_min = 0.5 if period_min is None else period_min
+        period_max = 15.0 if period_max is None else period_max
+
+    # Validate the effective grid before any photometry I/O. In targeted mode
+    # this is the candidate-prior window after explicit-bound reconciliation.
+    if engine == "bls":
+        _frequency_period_grid(period_min, period_max, n_periods)
 
     if result_suffix is not None:
         if signal is not None:

@@ -1,8 +1,18 @@
-"""Deterministic survey-search robustness primitives.
+"""Candidate-local robustness controls for bounded photometric searches.
 
-These functions produce diagnostics for candidate-local survey artifacts. They
-do not assign a scientific disposition or calibrate a population-level false
-alarm rate.
+These functions generate deterministic duration-grid, inverted-flux,
+sector-preserving scramble, and injection-recovery diagnostics for survey
+artifacts. They keep preprocessing choices and null controls inspectable
+without assigning a lifecycle state or astrophysical disposition.
+
+Scientific Boundary:
+    A recovery fraction, BLS ranking statistic, or null-control comparison is
+    configuration-specific evidence. It is not a survey selection function,
+    population false-alarm calibration, discovery claim, or validation result.
+
+References:
+    methods/tls_search.md and methods/detrending-and-transit-inference.md
+    describe the search and preprocessing limitations used by these controls.
 """
 
 from __future__ import annotations
@@ -23,17 +33,28 @@ def detrend_by_sector(
     window_days: float,
     gap_break_window_fraction: float = 0.5,
 ) -> np.ndarray:
-    """Divide each sector by a deterministic running median trend.
+    """Divide each contiguous sector visit by a running-median trend.
+
+    Large cadence gaps are split before filtering so edge extension cannot
+    borrow a baseline from a physically disconnected visit.
 
     Args:
-        time_btjd: Observation times in BTJD.
-        flux: Normalized flux values.
-        sectors: TESS sector label for each cadence.
-        window_days: Median-filter window width in days.
+        time_btjd: Observation times in BTJD_TDB days.
+        flux: Normalized relative flux values.
+        sectors: Positive mission-sector label for every cadence.
+        window_days: Positive median-filter window width in days.
+        gap_break_window_fraction: Positive fraction of window_days used when
+            defining a gap between contiguous visits.
 
     Returns:
-        Locally detrended normalized flux. The attenuation of transit signals
-        must be measured by injection recovery for each frozen configuration.
+        Locally detrended normalized flux aligned with the input cadence order.
+
+    Raises:
+        ValueError: If input shapes differ or detrending controls are invalid.
+
+    Notes:
+        Transit attenuation must be measured by injection recovery for each
+        frozen preprocessing configuration.
     """
     time = np.asarray(time_btjd, dtype=float)
     values = np.asarray(flux, dtype=float)
@@ -65,7 +86,7 @@ def detrend_by_sector(
         width = max(3, int(round(window_days / cadence_days))) if cadence_days > 0 else 3
         if width % 2 == 0:
             width += 1
-        # Filtering in sample index is acceptable only within a contiguous
+        # NUMERICAL_GUARD: Filtering in sample index is acceptable only within a contiguous
         # cadence run. Split large gaps so the edge extension of a median
         # filter cannot borrow values from a physically disconnected visit.
         gap_days = max(5.0 * float(cadence_days), gap_break_window_fraction * window_days)
@@ -111,7 +132,24 @@ def search_duration_grid(
     n_periods: int,
     flux_err: Optional[Sequence[float]] = None,
 ) -> Tuple[BLSSearchResult, List[Dict[str, Any]]]:
-    """Compatibility wrapper for the shared BLS duration-grid search."""
+    """Run the shared BLS duration-grid search with survey-style arguments.
+
+    Args:
+        time_btjd: Observation times in BTJD_TDB days.
+        flux: Normalized relative flux values.
+        duration_grid_hours: Trial transit durations in hours.
+        period_min_days: Inclusive lower search-period bound in days.
+        period_max_days: Inclusive upper search-period bound in days.
+        n_periods: Requested trial-grid density.
+        flux_err: Optional positive normalized-flux uncertainties.
+
+    Returns:
+        The best BLS result and JSON-safe records for all duration trials.
+
+    Notes:
+        This wrapper preserves one shared search implementation; ranking
+        statistics remain configuration-specific diagnostic quantities.
+    """
     return find_transits_duration_grid(
         time_btjd,
         flux,
@@ -124,7 +162,18 @@ def search_duration_grid(
 
 
 def inverted_flux(flux: Sequence[float]) -> np.ndarray:
-    """Reflect normalized flux about unity for an inverted-event control."""
+    """Reflect normalized flux about unity for an inverted-event control.
+
+    Args:
+        flux: Normalized relative flux values centered near unity.
+
+    Returns:
+        A float array in which dimmings become brightenings and vice versa.
+
+    Notes:
+        An inverted search is a null-control comparison, not a calibrated
+        false-alarm probability.
+    """
     values = np.asarray(flux, dtype=float)
     return 2.0 - values
 
@@ -132,13 +181,23 @@ def inverted_flux(flux: Sequence[float]) -> np.ndarray:
 def scrambled_flux(
     flux: Sequence[float], seed: int, sectors: Optional[Sequence[int]] = None
 ) -> np.ndarray:
-    """Return a deterministic null control that preserves sector noise structure.
+    """Create a deterministic null control while retaining sector structure.
 
-    Without sector labels this retains the historical full-series permutation
-    for small standalone tests.  Survey controls supply labels and apply an
-    independent non-zero circular time shift in each sector.  That preserves
-    each sector's cadence ordering and red-noise correlation while breaking
-    coherent phase alignment across sectors.
+    Without labels, this performs the historical full-series permutation used
+    by standalone tests. With labels, it applies an independent nonzero
+    circular shift within each sector, preserving cadence ordering and local
+    noise correlation while disrupting coherent cross-sector phase alignment.
+
+    Args:
+        flux: Normalized relative flux values.
+        seed: Seed used for deterministic control construction.
+        sectors: Optional sector label for every cadence.
+
+    Returns:
+        A flux array aligned with the original cadence order.
+
+    Raises:
+        ValueError: If supplied sector labels do not match flux shape.
     """
     values = np.asarray(flux, dtype=float)
     generator = np.random.default_rng(seed)
@@ -221,11 +280,28 @@ def inject_box_transit(
     depth_ppm: float,
     exposure_days: Optional[Sequence[float]] = None,
 ) -> np.ndarray:
-    """Inject a finite-exposure integrated box transit into candidate flux.
+    """Inject a finite-exposure-integrated box signal into normalized flux.
 
     The model is deliberately a box, not a limb-darkened transit. Each cadence
-    receives the exact overlap fraction of its finite exposure with the box so
-    ingress/egress attenuation is not represented as an instantaneous sample.
+    receives its finite-exposure overlap fraction so injection and recovery do
+    not treat every observation as an instantaneous sample.
+
+    Args:
+        time_btjd: Observation times in BTJD_TDB days.
+        flux: Normalized relative flux values.
+        period_days: Positive injected period in days.
+        epoch_btjd: Injected central epoch in BTJD_TDB days.
+        duration_hours: Positive injected box duration in hours.
+        depth_ppm: Positive injected relative depth in ppm.
+        exposure_days: Optional positive integration time for each cadence in
+            days; a robust cadence estimate is used when omitted.
+
+    Returns:
+        A new normalized-flux array containing the injected box signal.
+
+    Raises:
+        ValueError: If inputs have incompatible shapes or an injected physical
+            scale is non-finite, non-positive, or longer than its period.
     """
     if (
         not np.isfinite(period_days)
@@ -258,11 +334,28 @@ def mask_box_transit(
     duration_hours: float,
     exposure_days: Optional[Sequence[float]] = None,
 ) -> Tuple[np.ndarray, int]:
-    """Mask a detected box event before testing an injected replacement.
+    """Mask a declared box event before testing an injected replacement.
 
-    Masking prevents a recovery search from crediting the pre-existing BLS peak
-    instead of the injected event. NaN values are removed by the BLS loader,
-    retaining the original time sampling and its gaps.
+    Masking prevents a recovery search from crediting a pre-existing periodic
+    peak instead of the injected signal. The BLS loader later removes NaNs
+    while retaining the original cadence sampling and gaps.
+
+    Args:
+        time_btjd: Observation times in BTJD_TDB days.
+        flux: Normalized relative flux values.
+        period_days: Positive period of the event to mask in days.
+        epoch_btjd: Central epoch of the event to mask in BTJD_TDB days.
+        duration_hours: Positive box duration to mask in hours.
+        exposure_days: Optional positive integration time for each cadence in
+            days.
+
+    Returns:
+        A copied flux array with overlapping cadences set to NaN and the
+        number of masked cadences.
+
+    Raises:
+        ValueError: If arrays are incompatible or mask ephemeris values are
+            invalid.
     """
     if (
         not np.isfinite(period_days)
@@ -287,7 +380,21 @@ def mask_box_transit(
 
 
 def recovered_period(injected_period_days: float, recovered_period_days: float, tolerance: float) -> bool:
-    """Return whether a recovered period agrees with an injected period."""
+    """Test fractional agreement between injected and recovered periods.
+
+    Args:
+        injected_period_days: Positive injected period in days.
+        recovered_period_days: Positive recovered period in days.
+        tolerance: Positive fractional agreement tolerance.
+
+    Returns:
+        True when the recovered-to-injected period ratio lies within tolerance
+        of unity.
+
+    Raises:
+        ValueError: If either period or the tolerance is non-finite or
+            non-positive.
+    """
     if (
         not np.isfinite(injected_period_days)
         or not np.isfinite(recovered_period_days)
@@ -307,7 +414,21 @@ def recovered_epoch(
     recovered_epoch_btjd: float,
     tolerance_hours: float,
 ) -> bool:
-    """Return whether a recovered epoch is within the injected event window."""
+    """Test phase-wrapped epoch agreement against an injected event.
+
+    Args:
+        injected_period_days: Positive injected period in days.
+        injected_epoch_btjd: Injected central epoch in BTJD_TDB days.
+        recovered_epoch_btjd: Recovered central epoch in BTJD_TDB days.
+        tolerance_hours: Positive phase-wrapped agreement window in hours.
+
+    Returns:
+        True when the wrapped epoch offset is no greater than tolerance_hours.
+
+    Raises:
+        ValueError: If periods, epochs, or tolerance are non-finite, or if the
+            period or tolerance is non-positive.
+    """
     if (
         not np.isfinite(injected_period_days)
         or not np.isfinite(injected_epoch_btjd)
@@ -336,10 +457,36 @@ def robustness_diagnostics(
     flux_err: Optional[Sequence[float]] = None,
     gap_break_window_fraction: float = 0.5,
 ) -> Dict[str, Any]:
-    """Run frozen duration, detrending, and null-control diagnostics.
+    """Run frozen search variants and null controls for one light curve.
 
-    The returned result is diagnostic evidence. It does not estimate a
-    population false-alarm probability or validate an astrophysical source.
+    The routine compares normalized and per-sector running-median branches,
+    then runs inverted-flux and sector-preserving scramble controls through
+    the same duration-grid search. This makes preprocessing sensitivity and
+    common null peaks inspectable together.
+
+    Args:
+        time_btjd: Observation times in BTJD_TDB days.
+        flux: Normalized relative flux values.
+        sectors: Sector label for every cadence.
+        duration_grid_hours: Trial transit durations in hours.
+        period_min_days: Inclusive lower trial-period bound in days.
+        period_max_days: Inclusive upper trial-period bound in days.
+        n_periods: Requested number of trial periods.
+        detrend_window_days: Positive running-median window in days.
+        scramble_seeds: Deterministic seeds for sector-local null controls.
+        flux_err: Optional positive normalized-flux uncertainties.
+        gap_break_window_fraction: Positive fraction used to split large gaps.
+
+    Returns:
+        JSON-safe results for preprocessing variants and null controls.
+
+    Raises:
+        ValueError: If uncertainty or sector arrays are incompatible with flux,
+            or detrending controls are invalid.
+
+    Notes:
+        The maximum control statistic is diagnostic evidence only; it is not a
+        population false-alarm probability or validation result.
     """
     time = np.asarray(time_btjd, dtype=float)
     values = np.asarray(flux, dtype=float)
@@ -422,6 +569,47 @@ def robustness_diagnostics(
     }
 
 
+def _non_detection_best_record(
+    best: Optional[BLSSearchResult], attempted_period_trials: int
+) -> Dict[str, Any]:
+    """Serialize a no-detection result without discarding BLS grid metadata."""
+    if best is None:
+        payload = BLSSearchResult(
+            best_period=None,
+            best_epoch=None,
+            best_depth_ppm=None,
+            best_duration_hours=None,
+            snr=None,
+            n_distinct_transit_events=0,
+            n_period_trials=int(attempted_period_trials),
+            detection_status="no-detection",
+        ).to_dict()
+    else:
+        payload = best.to_dict()
+        # The caller reached this path because the result cannot support a
+        # recovery decision, regardless of a stale/default status label.
+        payload["detection_status"] = "no-detection"
+    return payload
+
+
+def _is_recoverable_detection(best: Optional[BLSSearchResult]) -> bool:
+    """Return whether a search result carries finite detected ephemeris values."""
+    if best is None or getattr(best, "detection_status", None) != "detected":
+        return False
+    try:
+        period_days = float(best.best_period)
+        epoch_btjd = float(best.best_epoch)
+        snr = float(best.snr)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        np.isfinite(period_days)
+        and period_days > 0.0
+        and np.isfinite(epoch_btjd)
+        and np.isfinite(snr)
+    )
+
+
 def injection_recovery_diagnostics(
     time_btjd: Sequence[float],
     flux: Sequence[float],
@@ -439,17 +627,47 @@ def injection_recovery_diagnostics(
     exposure_days: Optional[Sequence[float]] = None,
     gap_break_window_fraction: float = 0.5,
 ) -> List[Dict[str, Any]]:
-    """Measure recovery of declared synthetic transits in real candidate flux.
+    """Measure recovery of declared synthetic box signals in observed flux.
 
-    A recovered trial must match its injected period and epoch. When
-    ``minimum_snr`` is supplied, it must also clear that pre-registered BLS
-    threshold and contain at least two distinct transit events. This is an
-    internal search-sensitivity diagnostic, not a
-    completeness estimate or scientific disposition. When both ``sectors``
-    and ``detrend_window_days`` are supplied, every injection is made before
-    preprocessing and must recover from both the normalized and per-sector
-    running-median branches. This prevents a recovery from silently bypassing
-    the survey's alternate detrending path.
+    A recovered trial must agree in period and phase-wrapped epoch. When a
+    pre-registered minimum SNR is supplied, it must also clear that threshold
+    and contain multiple distinct transit events. With sectors and a detrending
+    window, each injection must recover from both normalized and per-sector
+    running-median branches.
+
+    Args:
+        time_btjd: Observation times in BTJD_TDB days.
+        flux: Observed normalized relative flux values.
+        injections: Declared box-signal mappings with period, duration, depth,
+            and optional epoch values in documented units.
+        duration_grid_hours: BLS trial durations in hours.
+        period_min_days: Inclusive lower trial-period bound in days.
+        period_max_days: Inclusive upper trial-period bound in days.
+        n_periods: Requested number of BLS period trials.
+        tolerance: Positive fractional period-recovery tolerance.
+        minimum_snr: Optional pre-registered BLS SNR requirement.
+        epoch_tolerance_duration_fraction: Positive multiple of injected
+            duration used for the epoch-recovery window.
+        sectors: Optional sector label for every cadence.
+        detrend_window_days: Required positive running-median window when
+            sectors are supplied.
+        flux_err: Optional positive normalized-flux uncertainties.
+        exposure_days: Optional positive cadence integration times in days.
+        gap_break_window_fraction: Positive gap-splitting fraction for the
+            running-median branch.
+
+    Returns:
+        One JSON-safe recovery record per declared injection, including
+        branch-level results when preprocessing is requested.
+
+    Raises:
+        ValueError: If input arrays, injection controls, or optional
+            preprocessing arguments are incompatible.
+
+    Notes:
+        These outcomes characterize only the declared grid and processing
+        branches. They do not estimate population completeness, a selection
+        function, or scientific disposition.
     """
     time = np.asarray(time_btjd, dtype=float)
     values = np.asarray(flux, dtype=float)
@@ -486,6 +704,8 @@ def injection_recovery_diagnostics(
         injected_period = float(injection["period_days"])
         injected_duration = float(injection["duration_hours"])
         injected_depth = float(injection["depth_ppm"])
+        # DIAGNOSTIC_REASONING: Inject before optional detrending so the
+        # alternate branch cannot receive an unrealistically preserved signal.
         injected = inject_box_transit(
             time,
             values,
@@ -516,13 +736,13 @@ def injection_recovery_diagnostics(
                 n_periods,
                 flux_err=errors,
             )
-            if best is None or getattr(best, "snr", None) is None:
+            if not _is_recoverable_detection(best):
                 branch_results[branch_name] = {
                     "period_match": False,
                     "epoch_match": False,
                     "snr_pass": False,
                     "recovered": False,
-                    "best": best.to_dict() if best is not None else {},
+                    "best": _non_detection_best_record(best, n_periods),
                 }
                 continue
             period_match = bool(recovered_period(injected_period, best.best_period, tolerance))

@@ -9,8 +9,14 @@ All inputs must be finite, and ``sigma_centroid`` must be positive. A missing,
 sentinel, or non-finite uncertainty is an unresolved source-location test, not
 an on-target result.
 
-Pass (on-target transit): Z < 3.0 sigma.
-Fail (background eclipsing binary): Z >= 3.0 sigma.
+The construction follows the difference-image displacement diagnostic in the
+project's false-positive-vetting note; the right-ascension component is scaled
+by declination before its quadrature combination with declination offset.
+
+Scientific boundary:
+    A finite significance is conditional on the supplied difference-image
+    uncertainty and reference frame. It is a source-location screen, not a
+    calibrated PRF localization result or a validation claim.
 """
 
 from __future__ import annotations
@@ -18,6 +24,8 @@ from __future__ import annotations
 import math
 from typing import Tuple
 
+# ASTROPHYSICAL_HEURISTIC: The threshold is a routing convention for a finite
+# offset uncertainty, never a replacement for a calibrated scene model.
 CENTROID_THRESHOLD = 3.0
 
 

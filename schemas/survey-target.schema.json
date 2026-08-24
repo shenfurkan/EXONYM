@@ -38,7 +38,7 @@
     },
     "search_result_path": { "type": ["string", "null"] },
     "reason": { "type": "string", "minLength": 1 },
-    "search_snr": { "type": "number" },
+    "search_snr": { "type": "number", "minimum": 0 },
     "review_snr": { "type": "number", "exclusiveMinimum": 0 },
     "robustness_result_path": { "type": "string", "minLength": 1 },
     "robustness_passed": { "type": "boolean" },

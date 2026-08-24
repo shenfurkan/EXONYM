@@ -14,7 +14,7 @@
     "validation_eligible": {"const": false},
     "validation_reason": {"type": "string", "minLength": 1},
     "method": {"type": "string", "minLength": 1},
-    "status": {"enum": ["unphysical_phase_harmonic_detected_systematics_limited", "no_significant_phase_curve_component", "component_above_three_sigma_requires_followup"]},
+    "status": {"enum": ["unphysical_phase_harmonic_detected_systematics_limited", "no_significant_phase_curve_component", "component_above_three_sigma_requires_followup", "undefined_component_significance"]},
     "period_days": {"type": "number", "exclusiveMinimum": 0},
     "epoch_btjd": {"type": "number"},
     "n_points_after_primary_transit_mask": {"type": "integer", "minimum": 100},
@@ -26,7 +26,8 @@
     "secondary_box_duration_hours": {"type": "number", "exclusiveMinimum": 0},
     "secondary_box_template_method": {"enum": ["fixed-secondary-box", "posterior-marginalized-eccentric-box"]},
     "components": {"$ref": "#/$defs/components"},
-    "maximum_absolute_significance_sigma": {"type": "number", "minimum": 0},
+    "maximum_absolute_significance_sigma": {"type": ["number", "null"], "minimum": 0},
+    "input_error_binning_convention": {"type": "string", "minLength": 1},
     "interpretation": {"type": "string", "minLength": 1}
   },
   "anyOf": [
@@ -120,8 +121,8 @@
       "properties": {
         "value_ppm": {"type": "number"},
         "block_robust_error_ppm": {"type": "number", "minimum": 0},
-        "significance_sigma": {"type": "number"},
-        "three_sigma_absolute_upper_bound_ppm": {"type": "number", "minimum": 0}
+        "significance_sigma": {"type": ["number", "null"]},
+        "three_sigma_absolute_upper_bound_ppm": {"type": ["number", "null"], "minimum": 0}
       }
     },
     "components": {

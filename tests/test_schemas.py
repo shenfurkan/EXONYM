@@ -723,13 +723,72 @@ def test_v2_novelty_audit_rejects_a_semantically_invalid_retained_response(tmp_p
     )
 
 
-def test_valid_engine_run_passes_schema_validation(tmp_path):
+def test_historic_engine_run_without_version_known_passes_schema_validation(tmp_path):
     # Arrange
     repo = _make_repo(tmp_path)
     _write_engine_run(repo, _valid_engine_run())
 
     # Act and assert
     assert _audit(repo).ok
+
+
+def test_engine_run_accepts_effective_auto_vet_sector_scope(tmp_path):
+    # Arrange
+    repo = _make_repo(tmp_path)
+    artifact = _valid_engine_run()
+    artifact["automation"] = {
+        "steps": [{"name": "ingest", "status": "succeeded"}],
+        "sectors_used": [2, 5],
+        "claim_eligible": False,
+        "disposition_changed": False,
+        "workflow_advanced": False,
+    }
+    _write_engine_run(repo, artifact)
+
+    # Act and assert
+    assert _audit(repo).ok
+
+
+def test_engine_run_allows_explicit_unknown_runtime_version(tmp_path):
+    # Arrange
+    repo = _make_repo(tmp_path)
+    artifact = _valid_engine_run()
+    artifact["runtime"] = {
+        "kind": "direct",
+        "version": None,
+        "version_known": False,
+    }
+    _write_engine_run(repo, artifact)
+
+    # Act and assert
+    assert _audit(repo).ok
+
+
+@pytest.mark.parametrize(
+    ("version", "version_known"),
+    (
+        (None, True),
+        ("test-version", False),
+    ),
+)
+def test_engine_run_rejects_inconsistent_runtime_version_metadata(
+    tmp_path, version, version_known
+):
+    # Arrange
+    repo = _make_repo(tmp_path)
+    artifact = _valid_engine_run()
+    artifact["runtime"] = {
+        "kind": "direct",
+        "version": version,
+        "version_known": version_known,
+    }
+    _write_engine_run(repo, artifact)
+
+    # Act
+    report = _audit(repo)
+
+    # Assert
+    assert any(violation.rule == "schema-violation" for violation in report.violations)
 
 
 def test_engine_run_requires_matching_directory_identity(tmp_path):
@@ -883,6 +942,11 @@ def test_detrending_manifest_schema_and_artifact_hash_are_verified(tmp_path):
         ],
     )
 
+    assert _audit(repo).ok
+    legacy_manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    legacy_manifest["schema_version"] = 1
+    legacy_manifest["configuration"] = {"window_days": 0.5}
+    result.manifest_path.write_text(json.dumps(legacy_manifest), encoding="utf-8")
     assert _audit(repo).ok
     result.artifact_path.write_bytes(b"tampered")
     report = _audit(repo)
@@ -1166,6 +1230,58 @@ def test_generated_survey_sensitivity_artifact_passes_schema_validation(tmp_path
 
     # Assert
     assert output.is_file()
+    assert _audit(repo).ok
+
+
+def test_survey_sensitivity_retains_literal_none_trials_as_schema_valid_non_detections(
+    tmp_path, monkeypatch
+):
+    """A missing BLS trial result must produce a valid zero-recovery artifact."""
+    repo = _make_repo(tmp_path)
+    survey = create_survey(repo, "test-survey", "tess", [17])
+    candidate = load_candidate(repo, "candidate-alpha")
+    _register_artifact_survey_target(repo)
+    raw_input = candidate.path / "data" / "raw" / "s0017_lc.fits"
+    raw_input.write_bytes(b"fits")
+
+    def fake_table(*args, **kwargs):
+        return {
+            "time": [index * 0.1 for index in range(100)],
+            "flux": [1.0] * 100,
+            "sector": [17] * 100,
+            "input_files": [raw_input],
+        }
+
+    monkeypatch.setattr("exonym.survey._current_eligible_audit", lambda candidate: True)
+    monkeypatch.setattr("exonym.survey.load_light_curve_table", fake_table)
+    monkeypatch.setattr(
+        "exonym.discovery.search_duration_grid", lambda *args, **kwargs: (None, [])
+    )
+    monkeypatch.setattr(
+        "exonym.survey._input_manifest_records",
+        lambda *args, **kwargs: [
+            {
+                "path": "data/raw/s0017_lc.fits",
+                "sha256": _sha256(raw_input),
+                "provenance_path": None,
+                "provenance": None,
+            }
+        ],
+    )
+
+    output = run_survey_sensitivity(survey, candidate)
+    artifact = json.loads(output.read_text(encoding="utf-8"))
+
+    assert artifact["summary"]["recovered_count"] == 0
+    assert artifact["summary"]["trial_count"] == 108
+    assert all(entry["recovered"] is False for entry in artifact["injection_recovery"])
+    assert all(
+        entry["best"]["detection_status"] == "no-detection"
+        and entry["best"]["best_period"] is None
+        and entry["branches"]["normalized"]["best"]["detection_status"] == "no-detection"
+        and entry["branches"]["running-median"]["best"]["detection_status"] == "no-detection"
+        for entry in artifact["injection_recovery"]
+    )
     assert _audit(repo).ok
 
 

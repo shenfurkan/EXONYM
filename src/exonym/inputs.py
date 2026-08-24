@@ -1,9 +1,18 @@
-"""Target-neutral input loading for scientific analysis modules.
+"""Target-neutral, candidate-local input loading for scientific modules.
 
 Every loader probes candidate workspace files and metadata only. Ephemerides,
-stellar parameters, photometry, light curves, and target pixel files are read
-dynamically; generic demonstration values are used only when no candidate data
-exists and are always labelled ``synthetic-demo``.
+stellar parameters, photometry, light curves, and target-pixel products are
+read dynamically; generic demonstration values are used only when no candidate
+data exists and are explicitly labelled synthetic-demo.
+
+Provenance-aware loaders reject stale or unbound BLS and detrending evidence
+before a downstream workflow treats it as candidate-derived. Light-curve and
+pixel loaders also retain mission time-system and sector provenance rather than
+inferring unavailable values.
+
+Scientific Boundary:
+    Loader output indicates availability and binding of input evidence. It does
+    not establish a detection, source association, or scientific claim.
 """
 
 from __future__ import annotations
@@ -161,7 +170,7 @@ def _is_candidate_photometry_input(
 
 
 def _is_bound_preprocessing(workspace: CandidateWorkspace, record: object) -> bool:
-    """Confirm the preprocessing record still names the derived product it used."""
+    """Confirm a preprocessing record names a current, mask-bound derived product."""
     if record == PIPELINE_NORMALIZATION:
         return True
     if not isinstance(record, dict) or record.get("kind") != "candidate-detrending":
@@ -188,14 +197,32 @@ def _is_bound_preprocessing(workspace: CandidateWorkspace, record: object) -> bo
         return False
     manifest = _read_json(manifest_path)
     artifact = manifest.get("artifact") if isinstance(manifest, dict) else None
-    return bool(
+    configuration = manifest.get("configuration") if isinstance(manifest, dict) else None
+    # SCIENTIFIC_BOUNDARY: A preprocessing label alone is not evidence; the
+    # artifact, raw inputs, and protected-transit provenance must still bind.
+    if not (
         isinstance(artifact, dict)
+        and isinstance(configuration, dict)
+        and manifest.get("schema_version") == 2
         and manifest.get("candidate_id") == workspace.candidate_id
         and manifest.get("method") == method
         and artifact.get("path") == expected_artifact_path
         and artifact.get("sha256") == artifact_record.get("sha256")
         and artifact.get("data_sha256") == artifact_record.get("data_sha256")
-    )
+        and configuration.get("transit_mask_applied") is True
+        and isinstance(configuration.get("transit_mask_provenance"), dict)
+    ):
+        return False
+    try:
+        with np.load(artifact_path, allow_pickle=False) as archive:
+            time = np.asarray(archive["time_btjd"], dtype=float)
+        from .detrending import validate_transit_mask_provenance
+
+        provenance = configuration["transit_mask_provenance"]
+        validate_transit_mask_provenance(time, provenance, provenance.get("ephemeris"))
+    except (KeyError, OSError, TypeError, ValueError):
+        return False
+    return True
 
 
 def is_manifest_bound_bls_result(
@@ -204,6 +231,23 @@ def is_manifest_bound_bls_result(
     payload: Dict[str, Any],
     signal: Optional[str],
 ) -> bool:
+    """Check whether a detected BLS result remains bound to its manifest.
+
+    The check verifies candidate ownership, result and manifest digests,
+    declared BTJD time system, detected ephemeris fields, raw-product inputs,
+    and any mask-bound preprocessing record. It returns false rather than
+    accepting incomplete or stale evidence.
+
+    Args:
+        workspace: Candidate workspace that owns result and manifest paths.
+        result_path: Candidate-local BLS result JSON path.
+        payload: Parsed BLS result mapping.
+        signal: Optional validated per-signal suffix expected by the manifest.
+
+    Returns:
+        True only when the result is detected, physically usable, and
+        provenance-bound to current candidate-local evidence.
+    """
     suffix = signal or ""
     manifest_path = workspace.path / "outputs" / ("bls_search_manifest" + suffix + ".json")
     try:
@@ -276,7 +320,18 @@ def is_bls_bound_transit_config(
     payload: Dict[str, Any],
     signal: Optional[str] = None,
 ) -> bool:
-    """Confirm a BLS-derived transit config still names the current BLS evidence."""
+    """Check that a BLS-derived transit configuration names current evidence.
+
+    Args:
+        workspace: Candidate workspace that owns configuration and BLS outputs.
+        config_path: Candidate-local transit-configuration path.
+        payload: Parsed configuration mapping to validate.
+        signal: Optional per-signal suffix expected by all linked records.
+
+    Returns:
+        True only when configuration values, result digest, manifest digest,
+        and current BLS evidence agree exactly at the recorded precision.
+    """
     if payload.get("source") != "candidate-data-bls":
         return False
     try:
@@ -332,13 +387,28 @@ def is_bls_bound_transit_config(
 def load_transit_ephemeris(
     workspace: CandidateWorkspace, signal: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Return the best-known transit ephemeris for a candidate workspace.
+    """Load the best available ephemeris and field-level provenance.
 
-    When ``signal`` is given (e.g. ``.01``) the per-signal config
-    ``config/signals/transit_config<signal>.json`` takes precedence. Otherwise
-    probes ``config/`` JSON files (``transit`` or top-level keys) first, then
-    ``outputs/bls_search_results.json``. Falls back to a generic demonstration
-    ephemeris labelled ``synthetic-demo`` when nothing readable exists.
+    A validated per-signal configuration has precedence when requested.
+    Otherwise, candidate configuration is considered before provenance-bound
+    BLS outputs. When neither source is readable, the result retains generic
+    demonstration values explicitly labelled synthetic-demo.
+
+    Args:
+        workspace: Candidate workspace whose configuration and outputs are
+            inspected.
+        signal: Optional validated per-signal suffix.
+
+    Returns:
+        Period in days, epoch in BTJD_TDB days, duration in days, depth in ppm,
+        time-system label, source label, and per-field provenance mapping.
+
+    Raises:
+        ValueError: If signal suffix syntax is invalid.
+
+    Notes:
+        Callers that require observed candidate evidence must reject
+        synthetic-demo or partial provenance explicitly.
     """
     signal = validate_signal_suffix(signal)
     result: Dict[str, Any] = {
@@ -515,21 +585,28 @@ def load_transit_ephemeris(
 
 
 def load_stellar_parameters(workspace: CandidateWorkspace) -> Dict[str, Any]:
-    """Return stellar parameters read from ``data/external/stellar_params.json``.
+    """Load stellar parameters with field availability and source labels.
 
-    Falls back to generic solar demonstration values labelled ``synthetic-demo``
-    when no file is present.  When the file exists but only partially populates
-    the required physics fields (``teff_k``, ``logg_cgs``, ``feh``,
-    ``mass_solar``, ``radius_solar``), the source is set to
-    ``"partial-candidate-data"`` and any missing physics field retains its
-    generic demonstration value.  Callers that require fully candidate-owned
-    stellar physics should reject ``source != "candidate-data"``.
+    Missing files yield generic solar-reference demonstration values labelled
+    synthetic-demo. A partly populated candidate file yields
+    partial-candidate-data; callers that require complete observed stellar
+    physics must require the candidate-data source label.
 
-    ``ra_deg``, ``dec_deg``, and ``parallax_mas`` are optional positional
-    fields; their presence or absence does not affect the source label.  The
-    optional ``mass_solar_err`` and ``radius_solar_err`` fields retain
-    candidate-supplied symmetric one-sigma uncertainties for inference modules
-    that must propagate stellar-density uncertainty.
+    Args:
+        workspace: Candidate workspace containing optional external stellar
+            parameter data.
+
+    Returns:
+        Effective temperature in K, surface gravity in log10(cgs), metallicity
+        in dex, mass and radius in solar units, optional astrometry and
+        uncertainties, plus a source label. A candidate-owned nested
+        ``dnu_correction`` record is retained for the asteroseismic diagnostic
+        to validate before use.
+
+    Notes:
+        Optional position and parallax fields do not determine the stellar
+        physics source label. Optional mass and radius errors represent
+        candidate-supplied symmetric one-sigma uncertainties.
     """
     _PHYSICS_FIELDS = ("teff_k", "logg_cgs", "feh", "mass_solar", "radius_solar")
     result: Dict[str, Any] = {
@@ -574,6 +651,11 @@ def load_stellar_parameters(workspace: CandidateWorkspace) -> Dict[str, Any]:
     for name, value in values.items():
         if value is not None:
             result[name] = value
+    dnu_correction = payload.get("dnu_correction")
+    if isinstance(dnu_correction, dict):
+        # SCIENTIFIC_BOUNDARY: This loader preserves candidate-owned evidence;
+        # asteroseismology validates its factor and applicability before use.
+        result["dnu_correction"] = dict(dnu_correction)
     physics_present = sum(1 for f in _PHYSICS_FIELDS if values.get(f) is not None)
     if physics_present == len(_PHYSICS_FIELDS):
         result["source"] = "candidate-data"
@@ -584,11 +666,19 @@ def load_stellar_parameters(workspace: CandidateWorkspace) -> Dict[str, Any]:
 
 
 def load_photometry(workspace: CandidateWorkspace) -> Optional[Dict[str, Any]]:
-    """Return broadband photometry from ``data/external/stellar_photometry.json``.
+    """Load optional candidate-local broadband stellar photometry.
 
-    Expected generic shape: ``{"2MASS": {"J": {"mag":.., "error":..}, ...},
-    "AllWISE": {"W1": ...}, "gaia": {"parallax_mas": .., "g_mag": ..}}``.
-    Returns None when no readable photometry file exists.
+    Args:
+        workspace: Candidate workspace containing an optional external
+            photometry JSON record.
+
+    Returns:
+        Parsed photometry mapping when readable, otherwise None. Band entries
+        are passed through for consumers that apply their own validation.
+
+    Notes:
+        Presence of a mapping does not establish calibration, extinction
+        treatment, or suitability for a particular inference model.
     """
     path = workspace.path / "data" / "external" / "stellar_photometry.json"
     return _read_json(path)
@@ -740,6 +830,10 @@ def _load_detrended_light_curve_table(
     manifest = _read_json(manifest_path)
     if not isinstance(manifest, dict):
         raise ValueError("detrended input requires a readable detrending manifest")
+    if manifest.get("schema_version") != 2:
+        raise ValueError(
+            "detrended input uses a legacy manifest; regenerate with `exonym detrend`"
+        )
     artifact = manifest.get("artifact")
     expected_path = "data/processed/detrended-{0}.npz".format(normalized_method)
     if (
@@ -749,6 +843,21 @@ def _load_detrended_light_curve_table(
         or artifact.get("path") != expected_path
     ):
         raise ValueError("detrending manifest does not match its candidate, method, or artifact path")
+    configuration = manifest.get("configuration")
+    if not isinstance(configuration, dict):
+        raise ValueError(
+            "detrended input lacks a mask-bound configuration; regenerate with `exonym detrend`"
+        )
+    transit_mask_applied = configuration.get("transit_mask_applied")
+    transit_mask_provenance = configuration.get("transit_mask_provenance")
+    if not isinstance(transit_mask_applied, bool):
+        raise ValueError(
+            "detrended input lacks a mask-bound configuration; regenerate with `exonym detrend`"
+        )
+    if not transit_mask_applied or not isinstance(transit_mask_provenance, dict):
+        raise ValueError(
+            "detrended input is not transit-mask-bound; regenerate with `exonym detrend`"
+        )
     artifact_path = workspace.path / expected_path
     if not artifact_path.is_file() or artifact.get("sha256") != _sha256(artifact_path):
         raise ValueError("detrended input artifact is missing or does not match its manifest digest")
@@ -819,6 +928,16 @@ def _load_detrended_light_curve_table(
         raise ValueError("detrended artifact arrays have incompatible shapes or invalid sectors")
     if flux_err is not None and (flux_err.ndim != 1 or flux_err.shape != flux.shape):
         raise ValueError("detrended artifact uncertainty array does not match its flux")
+    from .detrending import validate_transit_mask_provenance
+
+    try:
+        validate_transit_mask_provenance(
+            time, transit_mask_provenance, load_transit_ephemeris(workspace)
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "detrended input transit mask provenance is stale or mismatched"
+        ) from exc
     valid = np.isfinite(time) & np.isfinite(flux)
     if flux_err is not None:
         valid &= np.isfinite(flux_err) & (flux_err > 0)
@@ -881,20 +1000,37 @@ def load_light_curve_table(
     require_raw_provenance: bool = False,
     detrending_method: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Return a light curve table from candidate FITS products, or None.
+    """Load normalized candidate light curves with sector and input provenance.
 
-    The returned dict has ``time``, ``flux`` (normalized), ``flux_err``,
-    ``sector`` (int array), and ``input_files`` (the accepted products).
-    Products are read from ``data/processed/`` first, then ``data/raw/``.
-    When ``sectors`` is supplied, only products whose resolved TESS sector is
-    in that sequence are returned. Multiple products in one selected sector
-    are deduplicated by sorted filename, with the first product retained.
-    ``max_points`` is a per-product cap; accepted sectors are not globally
-    re-binned after concatenation because that would make effective cadence
-    depend on the number of observed sectors. Returns None when no readable
-    light curve exists after filtering. Set ``detrending_method`` to consume a
-    hash-bound `exonym detrend` product directly; it retains raw product
-    provenance and per-cadence sector labels without a FITS round trip.
+    Processed FITS products take precedence over same-named raw products unless
+    raw_only is requested. A named detrending method instead loads a
+    hash-bound processed array and validates its raw-input and transit-mask
+    provenance before returning it.
+
+    Args:
+        workspace: Candidate workspace that owns FITS or detrended inputs.
+        max_points: Optional per-product cadence cap after product-local
+            normalization and quality filtering.
+        sectors: Optional positive sector selection; products without a
+            resolved selected sector are excluded.
+        raw_only: Restrict loading to data/raw products.
+        require_raw_provenance: Require valid provenance sidecars and therefore
+            raw products.
+        detrending_method: Optional named mask-bound detrending product to
+            consume instead of FITS data.
+
+    Returns:
+        A mapping with BTJD_TDB time, normalized flux, uncertainties, per-
+        cadence sectors, and accepted input records, or None when no readable
+        product remains after filtering.
+
+    Raises:
+        ValueError: If detrending options conflict or a named processed product
+            is stale, unbound, malformed, or inconsistent with current inputs.
+
+    Notes:
+        Accepted sectors are concatenated without global rebinning so effective
+        cadence does not depend on the number of observed sectors.
     """
     if detrending_method is not None:
         if raw_only:
@@ -1093,13 +1229,30 @@ def load_tpf_cubes(
     workspace: CandidateWorkspace,
     raw_only: bool = False,
     require_raw_provenance: bool = False,
+    skipped_products: Optional[List[Dict[str, str]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Return TPF pixel cubes from candidate data, or an empty list.
+    """Load candidate target-pixel cubes with fail-closed quality filtering.
 
-    Each entry has ``path``, ``sector``, ``time``, ``quality``, ``flux``
-    (n_time x n_y x n_x), ``aperture`` and ``header`` (primary header dict).
-    TPFs without a positive sector in their primary header or canonical file
-    name are skipped rather than assigned an inferred sector number.
+    Every retained cube has a candidate-local path, resolved positive sector,
+    BTJD_TDB time, integral quality flags, pixel-flux cube, aperture mask, and
+    primary-header mapping. Products lacking quality information or unambiguous
+    sector provenance are skipped rather than guessed.
+
+    Args:
+        workspace: Candidate workspace that owns target-pixel products.
+        raw_only: Restrict loading to data/raw products.
+        require_raw_provenance: Require valid provenance sidecars and restrict
+            loading to raw products.
+        skipped_products: Optional list extended with candidate-relative paths
+            and reasons for products rejected before pixel analysis.
+
+    Returns:
+        Retained target-pixel cube mappings, or an empty list when no usable
+        products or optional FITS dependency are available.
+
+    Notes:
+        QUALITY flags support rejection of unsuitable cadences; they do not
+        calibrate pixel-level systematics or source localization.
     """
     if require_raw_provenance:
         raw_only = True
@@ -1139,6 +1292,16 @@ def load_tpf_cubes(
     import warnings as _warnings
 
     cubes: List[Dict[str, Any]] = []
+
+    def record_skipped_product(path: Path, reason: str) -> None:
+        if skipped_products is not None:
+            skipped_products.append(
+                {
+                    "path": path.relative_to(workspace.path).as_posix(),
+                    "reason": reason,
+                }
+            )
+
     for path in fits_files:
         try:
             if require_raw_provenance and not has_valid_raw_product_provenance(workspace, path):
@@ -1155,7 +1318,78 @@ def load_tpf_cubes(
                 pix_hdu, ap_hdu = hdul[1], hdul[2]
                 header = dict(hdul[0].header)
                 header.update(dict(pix_hdu.header))
-                quality = np.asarray(pix_hdu.data["QUALITY"], dtype=np.int64)
+                try:
+                    raw_quality = np.asarray(pix_hdu.data["QUALITY"])
+                except (AttributeError, KeyError):
+                    _warnings.warn(
+                        "skipped {0}: no QUALITY column; refusing unmasked TPF cadences".format(
+                            path.name
+                        ),
+                        stacklevel=2,
+                    )
+                    record_skipped_product(path, "missing-quality-column")
+                    continue
+                except (TypeError, ValueError) as exc:
+                    _warnings.warn(
+                        "skipped {0}: unusable QUALITY column: {1!r}".format(path.name, exc),
+                        stacklevel=2,
+                    )
+                    record_skipped_product(path, "unusable-quality-column")
+                    continue
+                # NUMERICAL_GUARD: Do not coerce ambiguous QUALITY shapes or
+                # values; a pixel product is safer to skip than reinterpret.
+                if raw_quality.ndim != 1:
+                    _warnings.warn(
+                        "skipped {0}: unusable QUALITY column; values must be one-dimensional integers".format(
+                            path.name
+                        ),
+                        stacklevel=2,
+                    )
+                    record_skipped_product(path, "unusable-quality-column")
+                    continue
+                int64_limits = np.iinfo(np.int64)
+                if np.issubdtype(raw_quality.dtype, np.integer):
+                    if (
+                        np.issubdtype(raw_quality.dtype, np.unsignedinteger)
+                        and np.any(raw_quality > int64_limits.max)
+                    ):
+                        _warnings.warn(
+                            "skipped {0}: unusable QUALITY column; values exceed int64 flags".format(
+                                path.name
+                            ),
+                            stacklevel=2,
+                        )
+                        record_skipped_product(path, "unusable-quality-column")
+                        continue
+                    quality = raw_quality.astype(np.int64)
+                elif np.issubdtype(raw_quality.dtype, np.floating):
+                    quality_values = np.asarray(raw_quality, dtype=np.float64)
+                    if (
+                        not np.all(np.isfinite(quality_values))
+                        or not np.all(quality_values == np.floor(quality_values))
+                        or np.any(quality_values < int64_limits.min)
+                        # ``float64`` cannot exactly represent int64.max, so
+                        # reject its rounded boundary before the narrowing cast.
+                        or np.any(quality_values >= float(int64_limits.max))
+                    ):
+                        _warnings.warn(
+                            "skipped {0}: unusable QUALITY column; values must be finite int64 flags".format(
+                                path.name
+                            ),
+                            stacklevel=2,
+                        )
+                        record_skipped_product(path, "unusable-quality-column")
+                        continue
+                    quality = quality_values.astype(np.int64)
+                else:
+                    _warnings.warn(
+                        "skipped {0}: unusable QUALITY column; values must be numeric flags".format(
+                            path.name
+                        ),
+                        stacklevel=2,
+                    )
+                    record_skipped_product(path, "unusable-quality-column")
+                    continue
                 flux = np.asarray(pix_hdu.data["FLUX"], dtype=float)
                 aperture = np.asarray(ap_hdu.data)
                 sector_value = None
@@ -1177,10 +1411,15 @@ def load_tpf_cubes(
                         stacklevel=2,
                     )
                     continue
-                time = _time_values_to_btjd_tdb(
-                    np.asarray(pix_hdu.data["TIME"], dtype=float),
-                    header,
-                )
+                time_values = np.asarray(pix_hdu.data["TIME"], dtype=float)
+                if quality.ndim != 1 or quality.size != time_values.size:
+                    _warnings.warn(
+                        "skipped {0}: unusable QUALITY cadence count".format(path.name),
+                        stacklevel=2,
+                    )
+                    record_skipped_product(path, "unusable-quality-column")
+                    continue
+                time = _time_values_to_btjd_tdb(time_values, header)
                 if flux.shape[0] == time.size and time.size >= 50:
                     cubes.append(
                         {

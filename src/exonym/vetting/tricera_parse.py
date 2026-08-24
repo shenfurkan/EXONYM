@@ -1,7 +1,14 @@
-"""Interface to TRICERATOPS FPP reports.
+"""Interface to candidate-local TRICERATOPS statistical-vetting reports.
 
-Parses a TRICERATOPS output JSON file and applies the statistical validation
-gate: FPP below the preregistered threshold.
+The parser validates a retained report, extracts finite model outputs, and
+applies preregistered routing criteria to the recorded false-positive terms.
+It preserves runtime and observed-input provenance so an unavailable or
+fallback execution cannot be mistaken for a completed Monte Carlo result.
+
+Scientific boundary:
+    A finite false-positive probability remains evidence from its recorded
+    assumptions. Claim creation is disabled until provenance-bound observed
+    photometry and calibrated scene constraints are integrated.
 """
 
 from __future__ import annotations
@@ -18,7 +25,12 @@ from typing import Any, Dict, Optional, Tuple
 
 from ..workspace import validate_signal_suffix
 
+# SCIENTIFIC_BOUNDARY: This threshold is retained for transparent routing; it
+# does not enable a claim while the calibrated scene-model prerequisite is open.
 FPP_THRESHOLD = 0.01
+# SCIENTIFIC_BOUNDARY: A report-aware routing pass requires both retained
+# TRICERATOPS false-positive terms; an FPP-only scalar is legacy utility input.
+NFPP_THRESHOLD = 0.01
 FPP_CLAIM_BLOCK_REASON = (
     "FPP claim creation is disabled until TRICERATOPS receives provenance-bound "
     "observed photometry and scene constraints."
@@ -87,6 +99,20 @@ def extract_fpp(report: Dict[str, Any]) -> float:
         if value is not None:
             return float(value)
     raise ValueError("no FPP value found in report")
+
+
+def extract_nfpp(report: Dict[str, Any]) -> float:
+    """Return the nearby-false-positive probability from a retained report.
+
+    The report-aware gate requires this value alongside FPP. A missing,
+    non-finite, or out-of-range value is not evidence that the nearby-source
+    contribution is small and therefore cannot pass the joint screen.
+    """
+    for key in ("nfpp", "NFPP", "nfpp_value"):
+        value = report.get(key)
+        if value is not None:
+            return float(value)
+    raise ValueError("no NFPP value found in report")
 
 
 def _sha256(path: Path) -> str:
@@ -246,10 +272,30 @@ def _prepare_observed_transit_input(workspace: Any, signal: Optional[str]) -> Di
 def fpp_gate(
     report_or_value: Dict[str, Any],
     threshold: float = FPP_THRESHOLD,
+    nfpp_threshold: float = NFPP_THRESHOLD,
 ) -> Tuple[bool, float]:
-    """Return (pass, fpp). Pass means FPP is below the threshold."""
+    """Return ``(passes, fpp)`` for an FPP or joint FPP/NFPP screen.
+
+    A scalar preserves the historical FPP-only utility behavior. A report is
+    stricter: both finite probabilities must lie in the unit interval and each
+    must be below its registered threshold. The function remains a transparent
+    routing helper; the global analysis claim gate is intentionally separate
+    and remains closed pending calibrated scene constraints.
+    """
     if isinstance(report_or_value, dict):
         fpp = extract_fpp(report_or_value)
+        try:
+            nfpp = extract_nfpp(report_or_value)
+        except (TypeError, ValueError):
+            return False, fpp
+        if not (
+            math.isfinite(fpp)
+            and math.isfinite(nfpp)
+            and 0.0 <= fpp <= 1.0
+            and 0.0 <= nfpp <= 1.0
+        ):
+            return False, fpp
+        return fpp < threshold and nfpp < nfpp_threshold, fpp
     else:
         fpp = float(report_or_value)
     return fpp < threshold, fpp

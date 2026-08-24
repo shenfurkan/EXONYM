@@ -1,24 +1,19 @@
-"""Target-neutral aperture robustness and dilution engine.
+"""Candidate-local aperture-depth and archival-neighbor sensitivity diagnostics.
 
-Evaluates transit depth stability and third-light flux contamination across spatial
-photometric extraction apertures on TESS Target Pixel Files (TPF):
+The module extracts several spatial apertures from observed target-pixel cubes,
+measures fixed-ephemeris depths, and summarizes catalog-neighbor flux ratios.
+Depth changes across apertures can make blend-sensitive behavior visible for
+review, while the neighbor sum reports a band-limited contamination context.
 
-1. Multi-Size Box Aperture Sensitivity (3x3, 5x5, 7x7 pixels):
-   Tests whether transit depth delta(r) varies with aperture size:
-   - On-target planetary transits maintain stable depth across expanding apertures.
-   - Off-target background blends (BEB/NEB) exhibit increasing depth in larger apertures
-     as the contaminating star enters the extraction mask.
+Scientific Boundary:
+    Aperture variation and catalog-band flux ratios are exploratory
+    diagnostics. They are not a calibrated instrument-band dilution correction,
+    source-localization result, or validation constraint.
 
-2. Gaia DR3 Neighborhood Contamination & Dilution Correction:
-   Computes the flux contamination ratio:
-       C_contam = (sum_k F_neighbor,k) / F_target
-   and the corresponding photometric dilution factor:
-       r_dil = F_target / (F_target + sum_k F_neighbor,k) = 1 / (1 + C_contam)
-   allowing conversion from observed depth to true undiluted depth:
-       delta_true = delta_observed * (1 + C_contam) = delta_observed / r_dil.
-
-Contains zero target-specific constants; all calculations operate dynamically on
-candidate TPF data cubes and archival neighbor tables.
+References:
+    methods/literature_notes/perryman_handbook/
+    04_false_positives_vetting_diagnostics.md describes dilution and
+    blend-related false-positive context.
 """
 
 from __future__ import annotations
@@ -59,10 +54,25 @@ def aperture_depth_ppm(
     flux_1d: np.ndarray,
     ephemeris: Dict[str, Any],
 ) -> Optional[Dict[str, float]]:
-    """Median in/out transit depth for a one-dimensional aperture light curve.
+    """Measure a robust fixed-ephemeris depth in one aperture light curve.
 
-    Aperture pixel sums are count-based, so the light curve is normalized to
-    its median before the fractional depth is computed.
+    Pixel sums are count-based, so the series is normalized by its finite
+    median before calculating the relative in-transit deficit.
+
+    Args:
+        time: Observation times in BTJD_TDB days.
+        flux_1d: One-dimensional aperture-summed flux values.
+        ephemeris: Candidate period in days, epoch in BTJD_TDB days, and
+            duration in days.
+
+    Returns:
+        Depth and scatter-based uncertainty in ppm plus in- and
+        out-of-transit cadence counts, or None when a measurement is
+        unavailable.
+
+    Notes:
+        The uncertainty describes sampled aperture scatter only; it does not
+        calibrate correlated noise or flux dilution.
     """
     duration_hours = float(ephemeris["duration_days"]) * 24.0
     if duration_hours <= 0:
@@ -126,10 +136,26 @@ def gaia_contamination_factor(
     search_radius_arcsec: float = 60.0,
     target_g_mag: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Flux contamination factor from Gaia G-band neighbor flux ratios.
+    """Summarize usable catalog-band neighbor flux ratios near the target.
 
-    Returns the summed contamination ratio C_contam = sum(neighbor_flux /
-    target_flux) over neighbors within the search radius.
+    A row can supply a direct non-negative flux ratio or a magnitude from
+    which a ratio is derived when the target magnitude is available. The
+    routine excludes the target row and neighbors outside the requested
+    angular radius.
+
+    Args:
+        neighbors: Archival neighbor rows with separation, target marker, and
+            either flux-ratio or magnitude information.
+        search_radius_arcsec: Maximum retained angular separation in arcsec.
+        target_g_mag: Optional target catalog magnitude used to derive ratios.
+
+    Returns:
+        A mapping with the dimensionless summed contamination factor, number
+        of included neighbors, and the requested search radius in arcsec.
+
+    Notes:
+        Catalog-band ratios are retained as sensitivity context, not exact
+        aperture- or instrument-band corrections.
     """
     total_ratio = 0.0
     included = 0
@@ -255,7 +281,24 @@ def _synthetic_tpf_cube() -> Dict[str, Any]:
 
 
 def run_dilution_sensitivity(workspace: CandidateWorkspace) -> Path:
-    """Run the aperture robustness analysis and write dilution_sensitivity_results.json."""
+    """Write a candidate-local aperture and neighbor sensitivity artifact.
+
+    Observed, provenance-validated target-pixel data and a complete
+    candidate-derived ephemeris are required. The output retains individual
+    aperture measurements, their descriptive spread, and archival-neighbor
+    context for later review.
+
+    Args:
+        workspace: Candidate workspace that owns observed inputs and the
+            resulting output record.
+
+    Returns:
+        Path to the dilution_sensitivity_results.json artifact.
+
+    Raises:
+        RuntimeError: If observed pixel data, a complete ephemeris, or
+            measurable aperture light curves are unavailable.
+    """
     outputs_dir = workspace.path / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -306,6 +349,8 @@ def run_dilution_sensitivity(workspace: CandidateWorkspace) -> Path:
             per_aperture_summary[key] = []
         per_aperture_summary[key].append(row["depth_ppm"])
 
+    # SCIENTIFIC_BOUNDARY: Preserve aperture and neighbor evidence without
+    # promoting a catalog-band estimate into a calibrated dilution correction.
     payload = {
         "schema_version": "1.0",
         "work_package": "DILUTION_SENSITIVITY",
@@ -343,5 +388,5 @@ def run_dilution_sensitivity(workspace: CandidateWorkspace) -> Path:
         ),
     }
     output_path = outputs_dir / "dilution_sensitivity_results.json"
-    output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    output_path.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     return output_path

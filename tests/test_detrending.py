@@ -7,7 +7,13 @@ import json
 import numpy as np
 import pytest
 
-from exonym.detrending import OptionalBackendUnavailable, detrend_candidate
+from exonym.detrending import (
+    OptionalBackendUnavailable,
+    detrend_candidate,
+    transit_mask_from_ephemeris,
+    transit_mask_provenance_from_ephemeris,
+    validate_transit_mask_provenance,
+)
 from exonym.workspace import create_candidate
 
 
@@ -140,25 +146,41 @@ def test_unavailable_optional_backend_writes_no_science_output(tmp_path, monkeyp
 
 def _synthetic_transit_light_curve():
     """Return time, flux, and transit_mask with an injected box transit (depth 0.01)."""
-    import numpy as np
-
     time = np.linspace(0.0, 8.0, 401)
     trend = 1.0 + 0.015 * np.sin(2.0 * np.pi * time / 8.0)
     depth = 0.01
-    transit_mask = np.abs(time - 4.0) < 0.06
+    ephemeris = {
+        "period_days": 20.0,
+        "epoch_btjd": 4.0,
+        "duration_days": 0.12,
+        "time_system": "BTJD_TDB",
+        "source": "candidate-config",
+        "field_sources": {
+            "period_days": "candidate-config",
+            "epoch_btjd": "candidate-config",
+            "duration_days": "candidate-config",
+        },
+    }
+    transit_mask = transit_mask_from_ephemeris(time, ephemeris)
     flux = trend * np.where(transit_mask, 1.0 - depth, 1.0)
-    return time, flux, transit_mask
+    return time, flux, transit_mask, depth, ephemeris
+
+
+def _assert_depth_preserved(detrended_flux, transit_mask, injected_depth):
+    in_transit = detrended_flux[transit_mask]
+    measured_depth = 1.0 - float(np.median(in_transit[np.isfinite(in_transit)]))
+    fractional_loss = abs(measured_depth - injected_depth) / injected_depth
+    assert fractional_loss <= 0.05, (
+        "masked detrending changed depth from {0:.6f} to {1:.6f} "
+        "({2:.1%} loss)".format(injected_depth, measured_depth, fractional_loss)
+    )
 
 
 def test_detrending_depth_preservation_running_median(tmp_path):
     """Running-median backend must preserve injected transit depth with a correct mask."""
-    import numpy as np
-
-    from exonym.detrending import detrend_candidate
-
     workspace = create_candidate(tmp_path, "depth-running-median")
     raw_product = _raw_input_product(workspace)
-    time, flux, transit_mask = _synthetic_transit_light_curve()
+    time, flux, transit_mask, depth, ephemeris = _synthetic_transit_light_curve()
 
     result = detrend_candidate(
         workspace,
@@ -169,40 +191,41 @@ def test_detrending_depth_preservation_running_median(tmp_path):
         sector=np.ones(time.size, dtype=int),
         input_products=[raw_product],
         transit_mask=transit_mask,
+        transit_mask_ephemeris=ephemeris,
     )
 
     data = np.load(result.artifact_path)
-    detrended = data["detrended_flux"]
-    in_transit = detrended[transit_mask]
-    measured_depth = 1.0 - float(np.median(in_transit[np.isfinite(in_transit)]))
-    assert 0.008 <= measured_depth <= 0.012, (
-        "running-median depth {0:.6f} outside [0.008, 0.012]".format(measured_depth)
-    )
+    _assert_depth_preserved(data["detrended_flux"], transit_mask, depth)
 
 
 def test_detrending_depth_preservation_wotan(tmp_path, monkeypatch):
-    """Wotan backend must preserve injected transit depth with a correct mask."""
+    """Wotan receives the true in-transit mask and preserves depth to five percent."""
     import sys
     from types import SimpleNamespace
 
-    import numpy as np
+    observed_masks = []
 
-    from exonym.detrending import detrend_candidate
-
-    # Mock wotan to return a simple running-median trend so the test is self-contained.
+    # Model Wotan's public mask polarity: True identifies in-transit points
+    # which the backend excludes internally before estimating its trend.
     def _mock_flatten(time, values, **kwargs):
         from scipy.ndimage import median_filter
+
+        mask = np.asarray(kwargs["mask"], dtype=bool)
+        observed_masks.append(mask.copy())
         width = max(3, int(round(0.5 / float(np.median(np.diff(time))))))
         if width % 2 == 0:
             width += 1
-        return None, median_filter(values, size=width, mode="nearest")
+        working = values.copy()
+        indices = np.arange(values.size)
+        working[mask] = np.interp(indices[mask], indices[~mask], values[~mask])
+        return None, median_filter(working, size=width, mode="nearest")
 
     fake_wotan = SimpleNamespace(flatten=_mock_flatten)
     monkeypatch.setitem(sys.modules, "wotan", fake_wotan)
 
     workspace = create_candidate(tmp_path, "depth-wotan")
     raw_product = _raw_input_product(workspace)
-    time, flux, transit_mask = _synthetic_transit_light_curve()
+    time, flux, transit_mask, depth, ephemeris = _synthetic_transit_light_curve()
 
     result = detrend_candidate(
         workspace,
@@ -213,25 +236,21 @@ def test_detrending_depth_preservation_wotan(tmp_path, monkeypatch):
         sector=np.ones(time.size, dtype=int),
         input_products=[raw_product],
         transit_mask=transit_mask,
+        transit_mask_ephemeris=ephemeris,
     )
 
     data = np.load(result.artifact_path)
-    detrended = data["detrended_flux"]
-    in_transit = detrended[transit_mask]
-    measured_depth = 1.0 - float(np.median(in_transit[np.isfinite(in_transit)]))
-    assert 0.008 <= measured_depth <= 0.012, (
-        "wotan depth {0:.6f} outside [0.008, 0.012]".format(measured_depth)
-    )
+    assert len(observed_masks) == 1
+    assert np.array_equal(observed_masks[0], transit_mask)
+    _assert_depth_preserved(data["detrended_flux"], transit_mask, depth)
 
 
 def test_detrending_depth_preservation_celerite(tmp_path, monkeypatch):
-    """Celerite GP backend must preserve injected transit depth with a correct mask."""
+    """Celerite conditions only on out-of-transit samples then predicts all cadences."""
     import sys
     from types import SimpleNamespace
 
-    import numpy as np
-
-    from exonym.detrending import detrend_candidate
+    observed = {}
 
     class _MockTerm:
         def __init__(self, log_sigma, log_rho):
@@ -242,21 +261,21 @@ def test_detrending_depth_preservation_celerite(tmp_path, monkeypatch):
             pass
 
         def compute(self, time, yerr):
-            pass
+            observed["condition_time"] = np.asarray(time).copy()
+            observed["condition_error"] = np.asarray(yerr).copy()
 
         def predict(self, y, t, return_cov=False):
-            from scipy.ndimage import median_filter
-            width = max(3, int(round(0.5 / float(np.median(np.diff(t))))))
-            if width % 2 == 0:
-                width += 1
-            return median_filter(y, size=width, mode="nearest")
+            observed["condition_residual"] = np.asarray(y).copy()
+            observed["prediction_time"] = np.asarray(t).copy()
+            return np.zeros_like(t, dtype=float)
 
     fake_celerite = SimpleNamespace(terms=SimpleNamespace(Matern32Term=_MockTerm), GP=_MockGP)
     monkeypatch.setitem(sys.modules, "celerite", fake_celerite)
 
     workspace = create_candidate(tmp_path, "depth-celerite")
     raw_product = _raw_input_product(workspace)
-    time, flux, transit_mask = _synthetic_transit_light_curve()
+    time, flux, transit_mask, depth, ephemeris = _synthetic_transit_light_curve()
+    flux_err = np.linspace(0.0001, 0.0002, time.size)
 
     result = detrend_candidate(
         workspace,
@@ -264,18 +283,95 @@ def test_detrending_depth_preservation_celerite(tmp_path, monkeypatch):
         flux,
         method="celerite",
         window_days=0.5,
+        flux_err=flux_err,
         sector=np.ones(time.size, dtype=int),
         input_products=[raw_product],
         transit_mask=transit_mask,
+        transit_mask_ephemeris=ephemeris,
     )
 
     data = np.load(result.artifact_path)
-    detrended = data["detrended_flux"]
-    in_transit = detrended[transit_mask]
-    measured_depth = 1.0 - float(np.median(in_transit[np.isfinite(in_transit)]))
-    assert 0.008 <= measured_depth <= 0.012, (
-        "celerite depth {0:.6f} outside [0.008, 0.012]".format(measured_depth)
-    )
+    unmasked = ~transit_mask
+    baseline = float(np.median(flux[unmasked]))
+    assert np.array_equal(observed["condition_time"], time[unmasked])
+    assert np.array_equal(observed["condition_error"], flux_err[unmasked])
+    assert np.allclose(observed["condition_residual"], (flux - baseline)[unmasked])
+    assert np.array_equal(observed["prediction_time"], time)
+    _assert_depth_preserved(data["detrended_flux"], transit_mask, depth)
+
+
+def test_detrending_rejects_an_all_transit_mask_before_running_a_backend(tmp_path):
+    workspace = create_candidate(tmp_path, "all-transit-mask")
+    raw_product = _raw_input_product(workspace)
+    time, flux, _transit_mask, _depth, _ephemeris = _synthetic_transit_light_curve()
+
+    with pytest.raises(ValueError, match="out-of-transit cadence"):
+        detrend_candidate(
+            workspace,
+            time,
+            flux,
+            method="celerite",
+            window_days=0.5,
+            sector=np.ones(time.size, dtype=int),
+            input_products=[raw_product],
+            transit_mask=np.ones(time.size, dtype=bool),
+        )
+
+
+def test_transit_mask_requires_complete_candidate_derived_btjd_ephemeris():
+    time = np.array([0.5, 1.0, 1.5, 2.0, 3.0])
+    ephemeris = {
+        "period_days": 2.0,
+        "epoch_btjd": 1.0,
+        "duration_days": 0.4,
+        "time_system": "BTJD_TDB",
+        "source": "candidate-config",
+        "field_sources": {
+            "period_days": "candidate-config",
+            "epoch_btjd": "candidate-config",
+            "duration_days": "candidate-config",
+        },
+    }
+
+    mask = transit_mask_from_ephemeris(time, ephemeris)
+
+    assert np.array_equal(mask, np.array([False, True, False, False, True]))
+    ephemeris["field_sources"]["epoch_btjd"] = "synthetic-demo"
+    with pytest.raises(ValueError, match="complete candidate-derived"):
+        transit_mask_from_ephemeris(time, ephemeris)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("period_days", 2.1),
+        ("epoch_btjd", 1.1),
+        ("duration_days", 0.5),
+        ("source", "candidate-config-revised"),
+    ),
+)
+def test_transit_mask_provenance_rejects_changed_ephemeris_values(field, replacement):
+    time = np.array([0.5, 1.0, 1.5, 2.0, 3.0])
+    ephemeris = {
+        "period_days": 2.0,
+        "epoch_btjd": 1.0,
+        "duration_days": 0.4,
+        "time_system": "BTJD_TDB",
+        "source": "candidate-config",
+        "field_sources": {
+            "period_days": "candidate-config",
+            "epoch_btjd": "candidate-config",
+            "duration_days": "candidate-config",
+        },
+    }
+    provenance = transit_mask_provenance_from_ephemeris(time, ephemeris)
+    changed = dict(ephemeris)
+    changed["field_sources"] = dict(ephemeris["field_sources"])
+    changed[field] = replacement
+
+    with pytest.raises(ValueError, match="stale or mismatched"):
+        validate_transit_mask_provenance(time, provenance, changed)
+
 
 def test_rejects_invalid_inputs_before_creating_outputs(tmp_path):
     # Arrange

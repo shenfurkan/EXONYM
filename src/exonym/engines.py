@@ -1,10 +1,14 @@
-"""Target-neutral engine registry, execution runner, and automated triage engine.
+"""Register optional engines and preserve candidate-local execution provenance.
 
-Provides capability descriptors, optional group mappings, runtime availability checks,
-reproducible run manifest generation, and pre-vetting decision triage for analytical
-and vetting engines used by EXONYM.
+The registry separates installed-runtime inspection from candidate-local runner
+execution.  A run manifest binds input and output artifacts to SHA-256 digests,
+runtime information, timestamps, and a terminal status.  Automated triage
+aggregates pre-vetting diagnostic records into routing evidence.
 
-Contains no candidate constants, sector numbers, or target identifiers.
+Neither registration, availability, provenance hashing, nor triage is a
+scientific estimator or validation operation.  A successful status means that
+the recorded workflow completed, not that its scientific assumptions are
+calibrated or its result is a claim.
 """
 
 from __future__ import annotations
@@ -19,12 +23,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
+from . import __version__
 from .workspace import CandidateWorkspace, load_candidate
 
 
 @dataclass(frozen=True)
 class EngineDescriptor:
-    """Static registration descriptor for an analytical or vetting engine."""
+    """Describe a registered analytical or vetting runtime without importing it.
+
+    Attributes:
+        name (str): Canonical engine name accepted by registry lookups.
+        capability (str): Broad analytical capability exposed by the runtime.
+        optional_group (str): Installation extra or dependency group associated
+            with the engine.
+        module_name (str): Importable module path used for availability checks.
+        description (str): Short user-facing capability summary.
+    """
 
     name: str
     capability: str
@@ -35,7 +49,18 @@ class EngineDescriptor:
 
 @dataclass(frozen=True)
 class EngineStatus:
-    """Resolved runtime status for an engine."""
+    """Describe the runtime availability resolved from an engine descriptor.
+
+    Attributes:
+        name (str): Canonical registry name.
+        capability (str): Registered analytical capability.
+        optional_group (str): Associated dependency group.
+        module_name (str): Module inspected for import availability.
+        description (str): Registered capability summary.
+        installed (bool): Whether the top-level module has an import spec.
+        version (Optional[str]): Installed package or module version when it
+            can be determined without treating absence as an error.
+    """
 
     name: str
     capability: str
@@ -198,25 +223,47 @@ _ENGINE_CATALOG: Tuple[EngineDescriptor, ...] = (
 )
 
 
+def _known_version(value: object) -> Optional[str]:
+    """Return a non-empty runtime version string, or None when it is unknown."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _runtime_version_fields(value: object) -> Dict[str, Any]:
+    """Build schema-valid runtime-version provenance without inventing a value."""
+    version = _known_version(value)
+    return {"version": version, "version_known": version is not None}
+
+
 def _get_module_version(module_name: str) -> Optional[str]:
-    """Retrieve installed version of a top-level package or module."""
+    """Retrieve an installed top-level package version when it is observable."""
     package_name = module_name.split(".")[0]
     try:
         from importlib.metadata import version
 
-        return version(package_name)
+        return _known_version(version(package_name))
     except Exception:
         pass
 
     try:
         mod = importlib.import_module(package_name)
-        return getattr(mod, "__version__", None)
+        return _known_version(getattr(mod, "__version__", None))
     except Exception:
         return None
 
 
 def get_engine_status(descriptor: EngineDescriptor) -> EngineStatus:
-    """Inspect system runtime to determine availability of an engine."""
+    """Resolve one descriptor to its currently observable runtime status.
+
+    Args:
+        descriptor (EngineDescriptor): Static registration data for the engine.
+
+    Returns:
+        EngineStatus: Import-spec availability and best-effort version metadata.
+        It does not execute the engine or validate its interface.
+    """
     package_name = descriptor.module_name.split(".")[0]
     spec = importlib.util.find_spec(package_name)
     installed = spec is not None
@@ -234,12 +281,25 @@ def get_engine_status(descriptor: EngineDescriptor) -> EngineStatus:
 
 
 def iter_engines() -> List[EngineStatus]:
-    """List all registered engines with their current runtime installation status."""
+    """List each registered engine with a fresh availability inspection.
+
+    Returns:
+        List[EngineStatus]: Registry-order statuses for display and dependency
+        diagnostics.  The result describes the local runtime only.
+    """
     return [get_engine_status(desc) for desc in _ENGINE_CATALOG]
 
 
 def get_engine(name: str) -> Optional[EngineStatus]:
-    """Look up a specific engine by canonical name or alias."""
+    """Find one canonical engine or supported alias and inspect its runtime.
+
+    Args:
+        name (str): Case-insensitive canonical name or documented alias.
+
+    Returns:
+        Optional[EngineStatus]: Current status for a known engine, or ``None``
+        when no registry entry accepts the supplied name.
+    """
     normalized = name.strip().lower()
     alias_map = {
         "screening": "screen",
@@ -256,10 +316,15 @@ def get_engine(name: str) -> Optional[EngineStatus]:
 
 
 def check_engine(name: str) -> Tuple[bool, str]:
-    """Validate runtime readiness of a named engine.
+    """Report whether a known engine module is currently importable.
+
+    Args:
+        name (str): Canonical engine name or supported alias.
 
     Returns:
-        Tuple of (is_ready: bool, message: str).
+        Tuple[bool, str]: Readiness flag and an operator-facing diagnostic.  A
+        ready result confirms module availability only, not candidate inputs,
+        package-interface compatibility, or scientific applicability.
     """
     status = get_engine(name)
     if status is None:
@@ -353,10 +418,37 @@ def run_engine(
     signal: Optional[str] = None,
     **kwargs: Any,
 ) -> Path:
-    """Execute a named analytical engine, preserving inputs, outputs, and manifest.
+    """Run a supported engine and write its candidate-local provenance manifest.
 
-    Complies with schemas/engine-run.schema.json.
-    Writes: candidate/<id>/runs/<engine>/<run_id>/engine-run.json
+    The runner reloads the registered workspace, hashes candidate-local inputs,
+    invokes the selected implementation, confines output references to that
+    workspace, and records succeeded, failed, or blocked status in the engine
+    manifest.  It does not reinterpret an engine output as a claim.
+
+    Args:
+        workspace (CandidateWorkspace): Registered candidate workspace that owns
+            all input artifacts, runner output, and manifest.
+        engine_name (str): Canonical name or supported alias for a runnable
+            analytical engine.
+        signal (Optional[str]): Optional validated signal suffix passed only to
+            engine implementations that support per-signal operation.
+        **kwargs (Any): Engine-specific arguments passed through to the selected
+            implementation.
+
+    Returns:
+        Path: Candidate-local ``engine-run.json`` recording digests, runtime,
+        timestamps, status, and eligible output artifacts.
+
+    Raises:
+        ValueError: The workspace path is unregistered, the engine is unknown,
+            or it has no supported candidate-local runner.
+        RuntimeError: The requested runtime is not installed before execution.
+        OSError: The run directory or manifest cannot be written.
+
+    Note:
+        Exceptions raised after dispatch are preserved as a failed manifest when
+        possible so an unavailable or failed engine never yields placeholder
+        scientific output.
     """
     workspace = _trusted_workspace(workspace)
     engine_status = get_engine(engine_name)
@@ -485,7 +577,7 @@ def run_engine(
         "completed_at": completed_at,
         "runtime": {
             "kind": "direct",
-            "version": engine_status.version or "1.0.0",
+            **_runtime_version_fields(engine_status.version),
             "executable": engine_status.module_name,
         },
         "inputs": input_artifacts,
@@ -500,7 +592,17 @@ def run_engine(
 
 
 def report_candidate_engines(workspace: CandidateWorkspace) -> List[Dict[str, Any]]:
-    """Discover and summarize all recorded engine runs for a candidate workspace."""
+    """Summarize readable engine-run manifests below one candidate workspace.
+
+    Args:
+        workspace (CandidateWorkspace): Workspace whose ``runs`` directory is
+            inspected without executing or modifying any engine.
+
+    Returns:
+        List[Dict[str, Any]]: Lightweight manifest summaries containing status,
+        timestamps, artifact counts, and workspace-relative paths.  Malformed
+        manifest files are omitted from the summary.
+    """
     runs: List[Dict[str, Any]] = []
     runs_dir = workspace.path / "runs"
     if not runs_dir.is_dir():
@@ -624,7 +726,11 @@ def _write_statistical_vetting_manifest(
         "status": "succeeded",
         "started_at": datetime.now(timezone.utc).isoformat(),
         "completed_at": datetime.now(timezone.utc).isoformat(),
-        "runtime": {"kind": "direct", "version": "1.0.0", "executable": "exonym.statistical_vetting"},
+        "runtime": {
+            "kind": "direct",
+            **_runtime_version_fields(__version__),
+            "executable": "exonym.statistical_vetting",
+        },
         "inputs": inputs,
         "outputs": [{
             "path": evidence_path.relative_to(workspace.path).as_posix(),
@@ -643,15 +749,39 @@ def run_automated_triage(
     policy_version: str = "1.0.0",
     signal: Optional[str] = None,
 ) -> Path:
-    """Aggregate all required pre-vetting diagnostics into a routing decision.
+    """Aggregate required pre-vetting diagnostics into a traceable routing record.
 
-    The candidate-local evidence representation records calibration limits,
-    input representations, scores, and uncertainty before triage routes work.
-    This is never a validation or claim-producing operation.
+    The routing policy orders diagnostic states from pass through review to
+    blocked, then preserves every diagnostic's evidence path and digest in a
+    candidate-local decision.  Its role is to route incomplete or conflicting
+    evidence for review before any later vetting step.
+
+    Args:
+        workspace (CandidateWorkspace): Registered workspace that owns the
+            diagnostic artifacts, evidence aggregation, and routing record.
+        policy_id (str): Identifier recorded for the triage policy.
+        policy_version (str): Version recorded for the triage policy.
+        signal (Optional[str]): Optional signal suffix passed to statistical
+            vetting evidence construction.
+
+    Returns:
+        Path: Candidate-local automated-triage JSON record with evidence and
+        manifest digests.
+
+    Raises:
+        ValueError: The supplied workspace is not the registered workspace.
+        RuntimeError: Statistical-vetting evidence cannot be read after writing.
+        OSError: Candidate-local triage artifacts cannot be written.
+
+    Note:
+        A pass is a narrow machine-readable routing state, not a validation,
+        false-positive probability, or conclusion about astrophysical origin.
     """
     workspace = _trusted_workspace(workspace)
     from .statistical_vetting import build_statistical_vetting_evidence
 
+    # SCIENTIFIC_BOUNDARY: Triage routes provenance-bound diagnostics; it does
+    # not calibrate or replace the scientific methods that produced them.
     evidence_path = build_statistical_vetting_evidence(workspace, signal=signal)
     evidence = _load_json_object(evidence_path)
     if evidence is None:

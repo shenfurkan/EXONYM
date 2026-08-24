@@ -1,11 +1,20 @@
-"""Target-neutral multi-archive vetting engine.
+"""Target-neutral multi-archive evidence collection for vetting.
 
-Queries Gaia EDR3/DR3 astrometry and NASA ExoFOP imaging/spectroscopy metadata
-to assess target binarity (Gaia RUWE > 1.4), visual crowding/contamination within
-a search radius, and existing ground-based follow-up observations.
+The service retrieves candidate-owned archival context such as astrometric
+quality, nearby-source geometry, and publicly reported follow-up metadata.
+Coordinates, identifiers, and query radii enter through the workspace or CLI;
+the shared implementation does not embed target-specific records.
 
-All target identifiers and positions are read dynamically from workspace data
-or external archival APIs; no target constants exist in this module.
+Astrophysical rationale:
+    Astrometric quality and nearby-source evidence can expose blends or an
+    unresolved companion, but neither is a direct measurement of transit
+    origin. Angular separations use a wrapped right-ascension difference so a
+    query close to the coordinate discontinuity retains local geometry.
+
+Scientific boundary:
+    Archive availability, crowding summaries, and quality flags are screening
+    evidence only. They neither calibrate a photometric scene model nor create
+    a novelty, disposition, or validation claim.
 """
 
 from __future__ import annotations
@@ -28,8 +37,8 @@ from .workspace import CandidateWorkspace
 ARCHIVAL_REPORT_RELATIVE_PATH = Path("outputs") / "archival_vetting_report.json"
 DEFAULT_HTTP_TIMEOUT_SECONDS = 8.0
 DEFAULT_HTTP_MAX_RETRIES = 2
-# One TESS detector pixel is about 21 arcsec. A smaller cone cannot support a
-# negative crowding assessment for a TESS photometric aperture.
+# ASTROPHYSICAL_HEURISTIC: A cone smaller than a detector pixel cannot support
+# a negative crowding assessment for the photometric aperture.
 DEFAULT_ARCHIVE_SEARCH_RADIUS_ARCSEC = 60.0
 MINIMUM_CROWDING_SEARCH_RADIUS_ARCSEC = 21.0
 
@@ -45,7 +54,16 @@ def _utc_timestamp() -> str:
 
 
 class ArchivalVettingService:
-    """Service for querying astronomical archives (Gaia, ExoFOP) and evaluating candidate vetting metrics."""
+    """Query archive providers and retain candidate-local screening evidence.
+
+    Args:
+        timeout: Positive network timeout in seconds for one request attempt.
+        max_retries: Positive number of bounded transport attempts.
+        retry_backoff_factor: Non-negative delay multiplier between attempts.
+
+    The class records provider outcomes instead of converting an unavailable
+    remote service into an absence-of-evidence conclusion.
+    """
 
     ESA_GAIA_TAP_URL = "https://gea.esac.esa.int/tap-server/tap/sync"
     MIRROR_GAIA_TAP_URL = "https://gaia.gec.asiaa.sinica.edu.tw/tap-server/tap/sync"
@@ -276,7 +294,6 @@ class ArchivalVettingService:
         )
         if not result or len(result) == 0:
             return []
-        cos_dec = math.cos(math.radians(dec))
         sources: List[Dict[str, Any]] = []
         for row in result[0]:
             try:
@@ -287,10 +304,10 @@ class ArchivalVettingService:
                 row_dec = None
             if row_ra is None or row_dec is None:
                 continue
-            sep_arcsec = math.hypot(
-                (row_ra - ra) * cos_dec * 3600.0, (row_dec - dec) * 3600.0
-            )
-            if not math.isfinite(sep_arcsec) or sep_arcsec < 0.0:
+            # NUMERICAL_GUARD: reuse the wrapped local-sky separation used by
+            # TAP responses so the VizieR fallback handles the RA discontinuity.
+            sep_arcsec = self._angular_separation_arcsec(row_ra, row_dec, ra, dec)
+            if sep_arcsec is None:
                 continue
             ruwe_val: Optional[float] = None
             try:

@@ -43,6 +43,9 @@
     "stellar_parameters": {
       "type": "object",
       "minProperties": 1,
+      "properties": {
+        "teff_k": { "$ref": "#/$defs/effective_temperature_k" }
+      },
       "additionalProperties": {
         "type": "object",
         "required": ["value", "uncertainty", "unit"],
@@ -69,6 +72,18 @@
           "u2_err": { "type": "number", "exclusiveMinimum": 0 },
           "unit": { "type": "string" }
         }
+      }
+    }
+  },
+  "$defs": {
+    "effective_temperature_k": {
+      "type": "object",
+      "required": ["value", "uncertainty", "unit"],
+      "additionalProperties": false,
+      "properties": {
+        "value": { "type": "number", "exclusiveMinimum": 0 },
+        "uncertainty": { "type": "number", "exclusiveMinimum": 0 },
+        "unit": { "const": "K" }
       }
     }
   }

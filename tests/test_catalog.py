@@ -191,6 +191,8 @@ def test_fetch_tess_products_writes_fits_and_ingests(tmp_path, monkeypatch):
     products = fetch_tess_products(candidate, exptime=120)
     assert len(products) == 1
     staged, source_uri = products[0]
+    fetch_staging = products.staging_path
+    assert fetch_staging is not None and fetch_staging.is_dir()
     assert staged.is_file()
     assert staged.read_bytes() == raw_bytes
     assert source_uri.startswith("https://mast.stsci.edu")
@@ -206,6 +208,72 @@ def test_fetch_tess_products_writes_fits_and_ingests(tmp_path, monkeypatch):
     record = json.loads(sidecar.read_text(encoding="utf-8"))
     assert record["source_uri"] == source_uri
     assert len(record["sha256"]) == 64
+    assert not fetch_staging.exists()
+
+
+@pytest.mark.parametrize(
+    "search_name, fetch_name",
+    [
+        ("search_lightcurve", "fetch_tess_products"),
+        ("search_targetpixelfile", "fetch_tess_tpfs"),
+    ],
+)
+def test_fetch_with_explicit_sectors_skips_rows_without_sector_metadata(
+    tmp_path, monkeypatch, search_name, fetch_name
+):
+    import lightkurve as lk
+    from astropy.table import Table
+
+    import exonym.ingest as ingest
+
+    create_candidate(tmp_path, "candidate-sector-filter", tic="123456789")
+    candidate = discover_candidates(tmp_path)[0]
+    table = Table(
+        rows=[("synthetic-product.fits",)],
+        names=("productFilename",),
+    )
+    fake_search = _FakeSearch(table, [object()])
+    monkeypatch.setattr(lk, search_name, lambda *args, **kwargs: fake_search)
+    monkeypatch.setattr(
+        ingest,
+        "_download_spoc_product",
+        lambda *args, **kwargs: pytest.fail("unknown-sector row must not download"),
+    )
+
+    products = getattr(ingest, fetch_name)(candidate, sectors=[1])
+
+    assert products == []
+    assert products.staging_path is None
+
+
+def test_fetch_cleans_partial_staging_after_download_failure(tmp_path, monkeypatch):
+    import lightkurve as lk
+    from astropy.table import Table
+
+    import exonym.ingest as ingest
+
+    create_candidate(tmp_path, "candidate-staging-cleanup", tic="123456789")
+    candidate = discover_candidates(tmp_path)[0]
+    table = Table(
+        rows=[("s0001", "synthetic-product.fits")],
+        names=("sequence_number", "productFilename"),
+    )
+    fake_search = _FakeSearch(table, [object()])
+    monkeypatch.setattr(lk, "search_lightcurve", lambda *args, **kwargs: fake_search)
+    staging_paths = []
+
+    def fail_download(row, staging):
+        staging_paths.append(staging)
+        (staging / "partial-product.fits").write_bytes(b"partial")
+        raise RuntimeError("simulated archive failure")
+
+    monkeypatch.setattr(ingest, "_download_spoc_product", fail_download)
+
+    with pytest.raises(RuntimeError, match="simulated archive failure"):
+        ingest.fetch_tess_products(candidate, sectors=[1])
+
+    assert staging_paths
+    assert not staging_paths[0].exists()
 
 
 def test_fetch_tesscut_is_rejected_before_network_access(tmp_path, monkeypatch):

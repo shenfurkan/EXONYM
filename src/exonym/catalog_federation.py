@@ -1,8 +1,14 @@
 """Candidate-local, append-only retrievals from reviewed public catalogs.
 
-This module captures catalog evidence without deriving priors, claims, workflow
-state, or survey-search inputs.  Provider URLs and query templates are fixed in
-``PROVIDERS``; callers can select only an allowlisted provider name.
+Each retrieval keeps the response bytes, request context, timestamp, and
+digest together so later consumers can distinguish retained evidence from a
+live query that may have changed. Provider URLs and query templates are fixed
+in ``PROVIDERS``; callers can select only an allowlisted provider name.
+
+Scientific boundary:
+    Catalog fields are provider-declared measurements with provider-specific
+    units and selection effects. This module preserves them for review; it does
+    not derive priors, claims, workflow state, or survey-search inputs.
 """
 
 from __future__ import annotations

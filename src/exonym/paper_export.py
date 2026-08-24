@@ -1,4 +1,15 @@
-"""Export candidate-owned analysis evidence into a manuscript macro bundle."""
+"""Export candidate-owned analysis evidence into a manuscript macro bundle.
+
+The exporter collects already-written, candidate-local artifacts and formats
+their declared values as TeX-safe macros together with an export manifest. It
+preserves scientific notation for small finite values rather than rounding a
+measurement into a different numerical statement.
+
+Scientific boundary:
+    The bundle is a convenience layer for manuscript drafting. It is explicitly
+    claim-ineligible and cannot upgrade incomplete, uncalibrated, or otherwise
+    unsuitable source evidence into a scientific conclusion.
+"""
 
 from __future__ import annotations
 
@@ -59,13 +70,24 @@ def _latex_text(value: object) -> str:
 
 
 def _number(value: object, digits: int = 5) -> Optional[str]:
+    """Format one finite scalar for use inside an already-mathematical TeX macro.
+
+    Nonzero values that Python emits with an ``e`` exponent are converted to
+    TeX scientific notation.  This preserves a tiny posterior value rather
+    than turning it into a rounded decimal zero, without assigning an
+    upper-limit interpretation that is absent from the source artifact.
+    """
     try:
         numeric = float(value)
     except (TypeError, ValueError):
         return None
     if not math.isfinite(numeric):
         return None
-    return f"{numeric:.{digits}g}"
+    rendered = f"{numeric:.{digits}g}"
+    mantissa, exponent_separator, exponent = rendered.lower().partition("e")
+    if not exponent_separator:
+        return rendered
+    return r"{0} \times 10^{{{1}}}".format(mantissa, int(exponent))
 
 
 def _posterior_latex(summary: object, digits: int = 5) -> str:
@@ -78,7 +100,10 @@ def _posterior_latex(summary: object, digits: int = 5) -> str:
         return "Not available"
     if plus is None or minus is None:
         return median
-    return r"%s^{+%s}_{-%s}" % (median, plus, minus)
+    # A scientific-notation median ends in ``10^{...}``.  Group it before
+    # attaching the posterior interval so TeX does not see two superscripts.
+    median_term = "{" + median + "}" if r"\times" in median else median
+    return r"%s^{+%s}_{-%s}" % (median_term, plus, minus)
 
 
 def _value_latex(value: object, digits: int = 5) -> str:

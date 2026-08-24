@@ -127,6 +127,12 @@ def test_rv_keplerian_fit_recovers_synthetic_amplitude_and_records_provenance(tm
         "tolerance_rad": 1e-12,
         "max_iterations": 64,
     }
+    eccentricity_parameterization = report["diagnostics"]["eccentricity_parameterization"]
+    assert eccentricity_parameterization["mapping"] == (
+        "e = 0.95 * (x^2 + y^2) / (1 + x^2 + y^2)"
+    )
+    assert eccentricity_parameterization["maximum_eccentricity_exclusive"] == 0.95
+    assert "numerical support restriction" in eccentricity_parameterization["scientific_limitation"]
     assert report["diagnostics"]["activity_regression"]["status"] == "not-provided"
     assert len(report["models"]["keplerian"]["parameters"]["instrument_jitters"]) == 1
 

@@ -10,7 +10,7 @@
     "generated_at": {"type": "string", "format": "date-time"},
     "source": {"const": "candidate-data"},
     "signal": {"type": ["string", "null"], "pattern": "^\\.[0-9]{2}$"},
-    "method": {"enum": ["nea-pscomppars-period-epoch-duration-harmonic-v1", "known-signal-ephemeris-period-epoch-duration-harmonic-v2", "known-signal-ephemeris-period-epoch-duration-harmonic-v3"]},
+    "method": {"enum": ["nea-pscomppars-period-epoch-duration-harmonic-v1", "known-signal-ephemeris-period-epoch-duration-harmonic-v2", "known-signal-ephemeris-period-epoch-duration-harmonic-v3", "known-signal-ephemeris-period-epoch-duration-harmonic-v4"]},
     "status": {"enum": ["review-required-known-signal-match", "review-required-period-harmonic", "no-ephemeris-match-in-current-supported-catalog", "insufficient-current-supported-catalog-evidence"]},
     "candidate_ephemeris": {"$ref": "#/$defs/candidate_ephemeris"},
     "configuration": {"$ref": "#/$defs/configuration"},
@@ -19,6 +19,12 @@
     "comparisons": {"type": "array", "items": {"$ref": "#/$defs/comparison"}},
     "limitations": {"type": "string", "minLength": 1}
   },
+  "allOf": [
+    {
+      "if": {"properties": {"method": {"const": "known-signal-ephemeris-period-epoch-duration-harmonic-v4"}}},
+      "then": {"properties": {"comparisons": {"items": {"required": ["harmonic_parity_ambiguous"]}}}}
+    }
+  ],
   "$defs": {
     "artifact": {
       "type": "object", "additionalProperties": false,
@@ -92,6 +98,7 @@
         "epoch_phase_delta_days": {"type": ["number", "null"], "minimum": 0},
         "epoch_tolerance_days": {"type": ["number", "null"], "exclusiveMinimum": 0},
         "epoch_match": {"type": ["boolean", "null"]},
+        "harmonic_parity_ambiguous": {"type": "boolean"},
         "duration_ratio_known_over_candidate": {"type": ["number", "null"], "exclusiveMinimum": 0},
         "duration_compatible": {"type": ["boolean", "null"]},
         "review_required": {"type": "boolean"}

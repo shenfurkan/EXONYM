@@ -27,7 +27,48 @@
   "allOf": [
     {
       "if": { "properties": { "parameter": { "const": "fpp" } } },
-      "then": { "required": ["candidate_id", "report_path", "report_sha256"] }
+      "then": {
+        "required": ["candidate_id", "report_path", "report_sha256"],
+        "properties": {
+          "value": { "type": "number", "minimum": 0, "maximum": 1 },
+          "uncertainty_upper": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+          "uncertainty_lower": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+          "unit": { "const": "dimensionless" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "parameter": { "const": "period_days" } } },
+      "then": {
+        "properties": {
+          "value": { "type": "number", "exclusiveMinimum": 0 },
+          "uncertainty_upper": { "type": ["number", "null"], "minimum": 0 },
+          "uncertainty_lower": { "type": ["number", "null"], "minimum": 0 },
+          "unit": { "const": "days" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "parameter": { "const": "radius_earth" } } },
+      "then": {
+        "properties": {
+          "value": { "type": "number", "exclusiveMinimum": 0 },
+          "uncertainty_upper": { "type": ["number", "null"], "minimum": 0 },
+          "uncertainty_lower": { "type": ["number", "null"], "minimum": 0 },
+          "unit": { "const": "R_earth" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "parameter": { "const": "mass_earth" } } },
+      "then": {
+        "properties": {
+          "value": { "type": "number", "exclusiveMinimum": 0 },
+          "uncertainty_upper": { "type": ["number", "null"], "minimum": 0 },
+          "uncertainty_lower": { "type": ["number", "null"], "minimum": 0 },
+          "unit": { "const": "M_earth" }
+        }
+      }
     }
   ]
 }

@@ -2,11 +2,17 @@
 
 import json
 import hashlib
+from pathlib import Path
 from urllib.error import URLError
 
 import pytest
 
-from exonym.autonomous import auto_vet_candidate
+from exonym import __version__
+from exonym.autonomous import (
+    _available_common_sectors,
+    _select_download_sectors,
+    auto_vet_candidate,
+)
 from exonym.gatekeeper import _gate_novelty_audit
 from exonym.survey import create_survey, load_survey
 from exonym.survey_harvest import (
@@ -101,6 +107,96 @@ def test_harvest_does_not_provision_when_a_registry_is_unavailable(tmp_path):
     assert not (tmp_path / "candidate" / "tce-123456789").exists()
 
 
+def test_harvest_does_not_count_unavailable_novelty_results_toward_candidate_cap(tmp_path):
+    # Arrange
+    survey = create_survey(tmp_path, "harvest-test", "tess", [17])
+    source = tmp_path / "tces.csv"
+    source.write_text(
+        "tic_id,snr,period_days,depth_ppm,planet_radius_earth,stellar_radius_solar,tmag\n"
+        "123456789,22,3.2,700,2.1,1.0,10.5\n"
+        "987654321,22,3.2,700,2.1,1.0,10.5\n",
+        encoding="utf-8",
+    )
+
+    def transport(url, _timeout):
+        if "123456789" in url:
+            raise OSError("synthetic registry outage")
+        if "target.php" in url:
+            return _eligible_exofop_response("987654321")
+        return b"toi,tid\n" if "from+toi" in url else b"pl_name,tic_id\n"
+
+    # Act
+    outcomes = harvest_tces(survey, str(source), _filters(), 1, transport=transport)
+
+    # Assert
+    assert [outcome["status"] for outcome in outcomes] == ["unavailable", "registered"]
+    assert outcomes[1]["candidate_id"] == "tce-987654321"
+
+
+def test_harvest_marks_incomplete_existing_workspace_as_rollback_leftover(tmp_path):
+    # Arrange
+    survey = create_survey(tmp_path, "harvest-test", "tess", [17])
+    create_candidate(
+        tmp_path,
+        "tce-123456789",
+        tic="123456789",
+        mission="tess",
+        tags=["survey-harvest"],
+    )
+    source = tmp_path / "tces.csv"
+    source.write_text(
+        "tic_id,snr,period_days,depth_ppm,planet_radius_earth,stellar_radius_solar,tmag\n"
+        "123456789,22,3.2,700,2.1,1.0,10.5\n",
+        encoding="utf-8",
+    )
+
+    def transport(url, _timeout):
+        if "target.php" in url:
+            return _eligible_exofop_response()
+        return b"toi,tid\n" if "from+toi" in url else b"pl_name,tic_id\n"
+
+    # Act
+    outcomes = harvest_tces(survey, str(source), _filters(), 1, transport=transport)
+
+    # Assert
+    assert outcomes == [
+        {
+            "candidate_id": "tce-123456789",
+            "status": "rollback-leftover",
+            "reason": (
+                "Existing candidate workspace has no valid matching survey target "
+                "record and requires operator inspection."
+            ),
+        }
+    ]
+
+
+def test_harvest_reports_completed_existing_registration_as_already_provisioned(tmp_path):
+    # Arrange
+    survey = create_survey(tmp_path, "harvest-test", "tess", [17])
+    source = tmp_path / "tces.csv"
+    source.write_text(
+        "tic_id,snr,period_days,depth_ppm,planet_radius_earth,stellar_radius_solar,tmag\n"
+        "123456789,22,3.2,700,2.1,1.0,10.5\n",
+        encoding="utf-8",
+    )
+
+    def transport(url, _timeout):
+        if "target.php" in url:
+            return _eligible_exofop_response()
+        return b"toi,tid\n" if "from+toi" in url else b"pl_name,tic_id\n"
+
+    # Act
+    first_outcomes = harvest_tces(survey, str(source), _filters(), 1, transport=transport)
+    second_outcomes = harvest_tces(survey, str(source), _filters(), 1, transport=transport)
+
+    # Assert
+    assert first_outcomes == [{"candidate_id": "tce-123456789", "status": "registered"}]
+    assert second_outcomes == [
+        {"candidate_id": "tce-123456789", "status": "already-provisioned"}
+    ]
+
+
 @pytest.mark.parametrize(
     ("nasa_response", "exofop_response"),
     [
@@ -182,6 +278,46 @@ def test_harvest_rolls_back_a_new_candidate_when_audit_write_fails(tmp_path, mon
     assert not (survey.path / "targets" / "tce-123456789").exists()
 
 
+def test_harvest_surfaces_rollback_leftovers_when_cleanup_cannot_remove_workspace(
+    tmp_path, monkeypatch
+):
+    # Arrange
+    from exonym import survey_harvest
+
+    survey = create_survey(tmp_path, "harvest-test", "tess", [17])
+    source = tmp_path / "tces.csv"
+    source.write_text(
+        "tic_id,snr,period_days,depth_ppm,planet_radius_earth,stellar_radius_solar,tmag\n"
+        "123456789,22,3.2,700,2.1,1.0,10.5\n",
+        encoding="utf-8",
+    )
+
+    def transport(url, _timeout):
+        if "target.php" in url:
+            return _eligible_exofop_response()
+        return b"toi,tid\n" if "from+toi" in url else b"pl_name,tic_id\n"
+
+    workspace_path = tmp_path / "candidate" / "tce-123456789"
+    monkeypatch.setattr(
+        "exonym.survey_harvest.write_novelty_audit",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("synthetic write failure")),
+    )
+    original_rmtree = survey_harvest.shutil.rmtree
+
+    def leave_new_workspace(path):
+        if Path(path) == workspace_path:
+            return
+        original_rmtree(path)
+
+    monkeypatch.setattr("exonym.survey_harvest.shutil.rmtree", leave_new_workspace)
+
+    # Act / Assert
+    with pytest.raises(RuntimeError, match="rollback left incomplete paths"):
+        harvest_tces(survey, str(source), _filters(), 1, transport=transport)
+
+    assert workspace_path.is_dir()
+
+
 def test_live_catalog_transport_retries_transient_https_failure(monkeypatch):
     from exonym import survey_harvest
 
@@ -244,7 +380,7 @@ def test_auto_vet_records_blocked_steps_without_state_or_claim_changes(tmp_path,
     monkeypatch.setattr("exonym.vetting.tricera_parse.run_triceratops_simulation", write_output("triceratops.json"))
 
     # Act
-    manifest_path = auto_vet_candidate(candidate, download=False)
+    manifest_path = auto_vet_candidate(candidate, sectors=[5, 2, 5], download=False)
 
     # Assert
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -252,10 +388,30 @@ def test_auto_vet_records_blocked_steps_without_state_or_claim_changes(tmp_path,
     assert manifest["automation"]["claim_eligible"] is False
     assert manifest["automation"]["disposition_changed"] is False
     assert manifest["automation"]["workflow_advanced"] is False
+    assert manifest["automation"]["sectors_used"] == [2, 5]
     assert next(step for step in manifest["automation"]["steps"] if step["name"] == "search")["status"] == "blocked"
     assert candidate.metadata["workflow"]["phase"] == "intake"
     assert candidate.metadata["scientific_disposition"] == "unknown"
     assert fit_samples == [3000]
+    assert manifest["runtime"] == {
+        "kind": "direct",
+        "version": __version__,
+        "version_known": True,
+        "executable": "exonym.autonomous",
+    }
+
+
+def test_auto_vet_intersects_requested_sectors_with_common_archive_products():
+    common = _available_common_sectors(
+        ["s0002", "s0005", "unusable"],
+        [2, 5, 8],
+    )
+
+    assert common == [2, 5]
+    assert _select_download_sectors(common, [5, 9]) == [5]
+    assert _select_download_sectors(common, None) == [2]
+    with pytest.raises(RuntimeError, match="No requested sectors"):
+        _select_download_sectors(common, [9])
 
 
 @pytest.mark.parametrize("value", (0, -1, True))

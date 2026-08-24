@@ -85,12 +85,14 @@ def test_fpp_gate_dict_and_value():
     report = {"fpp": 0.005, "nfpp": 0.0}
     passed, fpp = fpp_gate(report)
     assert passed and fpp == pytest.approx(0.005)
+    assert fpp_gate({"FPP": 0.005, "NFPP": 0.02})[0] is False
+    assert fpp_gate({"FPP": 0.005})[0] is False
     assert fpp_gate(0.02)[0] is False
 
 
 def test_fpp_report_probes_common_keys(tmp_path):
     path = tmp_path / "triceratops.json"
-    path.write_text(json.dumps({"FPP_specific": 0.008}), encoding="utf-8")
+    path.write_text(json.dumps({"FPP_specific": 0.008, "NFPP": 0.0}), encoding="utf-8")
     report = load_fpp_report(path)
     assert fpp_gate(report)[0] is True
 
@@ -782,7 +784,7 @@ def test_solar_analog_dnu_recovery():
     import numpy as np
 
     from exonym.asteroseismology import (
-        MICROHZ_PER_CPD,
+        CPD_PER_UHZ,
         estimate_oscillation_envelope,
     )
 
@@ -797,7 +799,7 @@ def test_solar_analog_dnu_recovery():
         amplitude = 120e-6 * math.exp(
             -((harmonic * dnu_demo_uhz) ** 2) / (2.0 * envelope_sigma_uhz**2)
         )
-        frequency_cpd = (numax_demo_uhz + harmonic * dnu_demo_uhz) * MICROHZ_PER_CPD
+        frequency_cpd = (numax_demo_uhz + harmonic * dnu_demo_uhz) * CPD_PER_UHZ
         flux = flux + amplitude * np.sin(2.0 * np.pi * frequency_cpd * time)
     flux = flux + rng.normal(0.0, 30e-6, size=time.shape)
 
@@ -805,6 +807,163 @@ def test_solar_analog_dnu_recovery():
     assert result["dnu_candidate_uhz"] == pytest.approx(135.1, abs=10.0), (
         "solar analog Δν recovery must succeed within 10 µHz"
     )
+
+
+def test_spacing_correlation_captures_a_120_uhz_comb():
+    from exonym.asteroseismology import DNU_MAX_UHZ, spacing_correlation
+
+    frequency_uhz = np.linspace(700.0, 1300.0, 6001)
+    whitened = np.ones_like(frequency_uhz)
+    for peak_uhz in (760.0, 880.0, 1000.0, 1120.0, 1240.0):
+        whitened += 5.0 * np.exp(-0.5 * ((frequency_uhz - peak_uhz) / 1.5) ** 2)
+
+    dnu_uhz, correlation, lag_grid = spacing_correlation(
+        frequency_uhz,
+        whitened,
+        numax_uhz=1000.0,
+    )
+
+    assert DNU_MAX_UHZ == pytest.approx(200.0)
+    assert lag_grid[-1] == pytest.approx(DNU_MAX_UHZ)
+    assert dnu_uhz == pytest.approx(120.0, abs=1.0)
+    assert correlation > 0.5
+
+
+def test_spacing_correlation_reports_no_dnu_for_a_flat_spectrum():
+    from exonym.asteroseismology import DNU_MAX_UHZ, spacing_correlation
+
+    frequency_uhz = np.linspace(700.0, 1300.0, 6001)
+    dnu_uhz, correlation, lag_grid = spacing_correlation(
+        frequency_uhz,
+        np.ones_like(frequency_uhz),
+        numax_uhz=1000.0,
+    )
+
+    assert dnu_uhz is None
+    assert correlation is None
+    assert lag_grid[-1] == pytest.approx(DNU_MAX_UHZ)
+
+
+def test_numax_clipping_reports_requested_and_effective_bounds(monkeypatch):
+    import exonym.asteroseismology as asteroseismology
+
+    def fake_power_spectrum(_time, _flux, frequency_min_uhz, frequency_max_uhz):
+        assert frequency_min_uhz == pytest.approx(asteroseismology.PSD_MIN_UHZ)
+        assert frequency_max_uhz == pytest.approx(asteroseismology.PSD_MAX_UHZ)
+        frequency = np.linspace(frequency_min_uhz, frequency_max_uhz, 32)
+        return frequency, np.ones_like(frequency), np.ones_like(frequency), frequency
+
+    monkeypatch.setattr(asteroseismology, "compute_power_spectrum", fake_power_spectrum)
+    monkeypatch.setattr(
+        asteroseismology,
+        "spacing_correlation",
+        lambda *_args: (120.0, 0.9, np.array([120.0])),
+    )
+
+    with pytest.warns(UserWarning) as warnings:
+        result = asteroseismology.estimate_oscillation_envelope(
+            np.linspace(0.0, 10.0, 100),
+            np.ones(100),
+            50.0,
+            9000.0,
+        )
+
+    assert len(warnings) == 2
+    assert result["numax_min_requested_uhz"] == pytest.approx(50.0)
+    assert result["numax_max_requested_uhz"] == pytest.approx(9000.0)
+    assert result["numax_min_used"] == pytest.approx(asteroseismology.PSD_MIN_UHZ)
+    assert result["numax_max_used"] == pytest.approx(asteroseismology.PSD_MAX_UHZ)
+    assert result["numax_min_clipped"] is True
+    assert result["numax_max_clipped"] is True
+
+
+def test_asteroseismic_artifact_retains_numax_bound_provenance(tmp_path, monkeypatch):
+    import exonym.asteroseismology as asteroseismology
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "asteroseismic-bound-test")
+    time = np.linspace(0.0, 10.0, 200)
+    table = {
+        "time": time,
+        "flux": np.ones_like(time),
+        "flux_err": np.full_like(time, 1e-4),
+        "sector": np.ones(time.size, dtype=int),
+    }
+    ephemeris = {
+        "period_days": 2.0,
+        "epoch_btjd": 1.0,
+        "duration_days": 0.1,
+        "source": "candidate-data",
+        "field_sources": {
+            "period_days": "candidate-data",
+            "epoch_btjd": "candidate-data",
+            "duration_days": "candidate-data",
+        },
+    }
+    stellar = {
+        "teff_k": 5700.0,
+        "teff_k_err": 75.0,
+        "mass_solar": 1.0,
+        "radius_solar": 1.0,
+        "source": "candidate-data",
+    }
+    envelope = {
+        "numax_candidate_uhz": 1000.0,
+        "dnu_candidate_uhz": 120.0,
+        "dnu_correlation": 0.9,
+        "envelope_peak_ratio": 2.0,
+        "rayleigh_uhz": 1.0,
+        "baseline_days": 10.0,
+        "numax_min_requested_uhz": 50.0,
+        "numax_max_requested_uhz": 9000.0,
+        "numax_min_used": 100.0,
+        "numax_max_used": 2000.0,
+        "numax_min_clipped": True,
+        "numax_max_clipped": True,
+    }
+    unavailable_pysyd = {
+        "status": "unavailable",
+        "manifest_path": workspace.path / "runs" / "pysyd" / "manifest.json",
+        "crosscheck": None,
+    }
+    unavailable_tess_atl = {
+        "status": "unavailable",
+        "manifest_path": workspace.path / "runs" / "tess-atl" / "manifest.json",
+    }
+
+    monkeypatch.setattr(asteroseismology, "load_light_curve_table", lambda *_args, **_kwargs: table)
+    monkeypatch.setattr(asteroseismology, "load_transit_ephemeris", lambda *_args, **_kwargs: ephemeris)
+    monkeypatch.setattr(asteroseismology, "load_stellar_parameters", lambda *_args, **_kwargs: stellar)
+    monkeypatch.setattr(
+        asteroseismology,
+        "_highpass_segments",
+        lambda source_time, source_flux, *_args, **_kwargs: (source_time, source_flux),
+    )
+    monkeypatch.setattr(asteroseismology, "estimate_oscillation_envelope", lambda *_args: envelope)
+    monkeypatch.setattr(
+        asteroseismology,
+        "seismic_mass_radius",
+        lambda *_args, **_kwargs: {"mass_solar": 1.0, "radius_solar": 1.0, "method": "test"},
+    )
+    monkeypatch.setattr(asteroseismology, "seismic_sanity_check", lambda *_args, **_kwargs: {"plausible": True})
+    monkeypatch.setattr(
+        asteroseismology,
+        "seismic_uncertainty_summary",
+        lambda *_args, **_kwargs: {"status": "unavailable"},
+    )
+    monkeypatch.setattr(asteroseismology, "_run_pysyd_adapter", lambda *_args, **_kwargs: unavailable_pysyd)
+    monkeypatch.setattr(asteroseismology, "_record_tess_atl_adapter", lambda *_args, **_kwargs: unavailable_tess_atl)
+
+    output = asteroseismology.run_asteroseismology(workspace, 50.0, 9000.0)
+    payload = json.loads(output.read_text(encoding="utf-8"))
+
+    assert payload["search_range_uhz"] == [100.0, 2000.0]
+    assert payload["requested_search_range_uhz"] == [50.0, 9000.0]
+    assert payload["numax_search_bounds"] == {
+        "supported_range_uhz": [100.0, 2000.0],
+        "lower_clipped": True,
+        "upper_clipped": True,
+    }
 
 
 def test_seismic_scaling_relations():
@@ -1004,6 +1163,28 @@ def test_prf_localization_requires_a_competing_source_for_target_dominance(tmp_p
     assert report["sector_results"] == []
 
 
+def test_prf_localization_retains_skipped_tpf_diagnostics(tmp_path):
+    from exonym.localization import run_prf_localization
+
+    workspace = type("Workspace", (), {"path": tmp_path, "candidate_id": "test-target"})()
+
+    def fake_tpf_loader(*args, **kwargs):
+        kwargs["skipped_products"].append(
+            {"path": "data/raw/s0031_tp.fits", "reason": "missing-quality-column"}
+        )
+        return []
+
+    with patch("exonym.localization.load_transit_ephemeris", return_value={}), patch(
+        "exonym.localization.load_tpf_cubes", side_effect=fake_tpf_loader
+    ):
+        output = run_prf_localization(workspace)
+    report = json.loads(output.read_text(encoding="utf-8"))
+
+    assert report["skipped_tpf_products"] == [
+        {"path": "data/raw/s0031_tp.fits", "reason": "missing-quality-column"}
+    ]
+
+
 def test_tpf_loader_skips_unverified_sector_and_uses_canonical_sector_name(tmp_path):
     from astropy.io import fits
 
@@ -1042,6 +1223,99 @@ def test_tpf_loader_skips_unverified_sector_and_uses_canonical_sector_name(tmp_p
     assert cubes[0]["sector"] == 30
 
 
+def test_tpf_loader_skips_missing_quality_with_a_retained_diagnostic(tmp_path):
+    from astropy.io import fits
+
+    from exonym.inputs import load_tpf_cubes
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "tpf-quality-test")
+    raw = workspace.path / "data" / "raw"
+    cadence_count = 60
+    pixels = fits.BinTableHDU.from_columns(
+        [
+            fits.Column(name="TIME", format="D", array=np.arange(cadence_count, dtype=float)),
+            fits.Column(
+                name="FLUX",
+                format="4E",
+                dim="(2,2)",
+                array=np.ones((cadence_count, 2, 2), dtype=np.float32),
+            ),
+        ]
+    )
+    aperture = fits.ImageHDU(data=np.ones((2, 2), dtype=np.int16))
+    primary = fits.PrimaryHDU()
+    primary.header["TELESCOP"] = "TESS"
+    primary.header["TIMESYS"] = "TDB"
+    primary.header["TIMEUNIT"] = "d"
+    primary.header["BJDREFI"] = 2457000
+    product = raw / "s0031_tp.fits"
+    fits.HDUList([primary, pixels, aperture]).writeto(product)
+    skipped_products = []
+
+    with pytest.warns(UserWarning, match="no QUALITY column"):
+        cubes = load_tpf_cubes(workspace, skipped_products=skipped_products)
+
+    assert cubes == []
+    assert skipped_products == [
+        {
+            "path": "data/raw/s0031_tp.fits",
+            "reason": "missing-quality-column",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "quality_values",
+    (
+        np.full(60, 0.5, dtype=float),
+        np.full(60, np.nan, dtype=float),
+    ),
+    ids=("fractional", "non-finite"),
+)
+def test_tpf_loader_skips_nonintegral_or_nonfinite_quality_values(tmp_path, quality_values):
+    from astropy.io import fits
+
+    from exonym.inputs import load_tpf_cubes
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "tpf-quality-values")
+    raw = workspace.path / "data" / "raw"
+    cadence_count = quality_values.size
+    pixels = fits.BinTableHDU.from_columns(
+        [
+            fits.Column(name="TIME", format="D", array=np.arange(cadence_count, dtype=float)),
+            fits.Column(
+                name="FLUX",
+                format="4E",
+                dim="(2,2)",
+                array=np.ones((cadence_count, 2, 2), dtype=np.float32),
+            ),
+            fits.Column(name="QUALITY", format="D", array=quality_values),
+        ]
+    )
+    aperture = fits.ImageHDU(data=np.ones((2, 2), dtype=np.int16))
+    primary = fits.PrimaryHDU()
+    primary.header["TELESCOP"] = "TESS"
+    primary.header["TIMESYS"] = "TDB"
+    primary.header["TIMEUNIT"] = "d"
+    primary.header["BJDREFI"] = 2457000
+    product = raw / "s0031_tp.fits"
+    fits.HDUList([primary, pixels, aperture]).writeto(product)
+    skipped_products = []
+
+    with pytest.warns(UserWarning, match="unusable QUALITY column"):
+        cubes = load_tpf_cubes(workspace, skipped_products=skipped_products)
+
+    assert cubes == []
+    assert skipped_products == [
+        {
+            "path": "data/raw/s0031_tp.fits",
+            "reason": "unusable-quality-column",
+        }
+    ]
+
+
 def test_prf_nnls_assigns_difference_flux_to_target():
     from exonym.localization import fit_difference_image_prf, gaussian_prf_kernel
 
@@ -1056,6 +1330,27 @@ def test_prf_nnls_assigns_difference_flux_to_target():
     assert n_pixels > 5
     assert amplitudes[0] > 10.0 * amplitudes[1]
     assert residual is not None
+
+
+def test_prf_scene_injection_recovers_detector_scale_gaussian_amplitudes():
+    """The default screening template recovers a broad injected two-source scene."""
+    from exonym.localization import PRF_FWHM_PIXELS, fit_difference_image_prf, gaussian_prf_kernel
+
+    shape = (15, 15)
+    yy, xx = np.indices(shape, dtype=float)
+    injected = np.array([12.0, 4.0])
+    difference_image = (
+        injected[0] * gaussian_prf_kernel(xx, yy, 6.0, 7.0, fwhm_pixels=2.0)
+        + injected[1] * gaussian_prf_kernel(xx, yy, 8.5, 7.0, fwhm_pixels=2.0)
+    )
+
+    amplitudes, residual, _ = fit_difference_image_prf(
+        difference_image, np.ones(shape, dtype=bool), [6.0, 8.5], [7.0, 7.0]
+    )
+
+    assert PRF_FWHM_PIXELS == pytest.approx(2.0)
+    assert amplitudes == pytest.approx(injected, rel=0.02)
+    assert residual == pytest.approx(0.0, abs=1e-8)
 
 
 # ---------------------------------------------------------------------------
@@ -1081,6 +1376,114 @@ def test_sed_recovers_synthetic_photometry():
     assert posterior["teff_k"]["median"] == pytest.approx(5772.0, abs=250.0)
     assert posterior["radius_solar"]["median"] == pytest.approx(1.0, abs=0.35)
     assert posterior["logg_cgs"]["median"] == pytest.approx(4.438, abs=0.3)
+
+
+def test_sed_blackbody_uses_single_catalog_temperature_prior(monkeypatch):
+    import exonym.sed as sed
+
+    stellar = {
+        "teff_k": 5700.0,
+        "logg_cgs": 4.4,
+        "feh": 0.0,
+        "mass_solar": 1.0,
+        "radius_solar": 1.0,
+        "parallax_mas": 10.0,
+        "parallax_mas_err": 0.05,
+    }
+    captured = {}
+
+    def fake_run(log_probability, start, n_walkers, burn_in, production, seed):
+        captured["log_probability"] = log_probability
+        captured["start"] = np.asarray(start, dtype=float)
+        samples = np.tile(np.asarray(start, dtype=float), (4, 1))
+        return samples, SimpleNamespace(acceptance_fraction=np.full(n_walkers, 0.5))
+
+    monkeypatch.setattr(sed, "_run_emcee", fake_run)
+    monkeypatch.setattr(
+        sed,
+        "blackbody_model_magnitudes",
+        lambda teff_k, log_radius_over_distance, av_mag, band_data: np.zeros(len(band_data)),
+    )
+
+    sed._fit_blackbody([("J", 0.0, 0.1)], stellar, n_walkers=4, burn_in=1, production=1)
+
+    log_probability = captured["log_probability"]
+    start = captured["start"]
+    center = float(log_probability(start))
+    lower = float(log_probability(start + np.array([-100.0, 0.0, 0.0])))
+    upper = float(log_probability(start + np.array([100.0, 0.0, 0.0])))
+
+    assert center - lower == pytest.approx(0.125)
+    assert center - upper == pytest.approx(0.125)
+
+
+def test_sed_blackbody_rejects_invalid_parallax_draws_before_summaries(monkeypatch):
+    import exonym.sed as sed
+
+    stellar = {
+        "teff_k": 5772.0,
+        "logg_cgs": 4.438,
+        "feh": 0.0,
+        "mass_solar": 1.0,
+        "radius_solar": 1.0,
+        "parallax_mas": 10.0,
+        "parallax_mas_err": 0.05,
+    }
+
+    def fake_run(log_probability, start, n_walkers, burn_in, production, seed):
+        samples = np.tile(np.asarray(start, dtype=float), (4, 1))
+        return samples, SimpleNamespace(acceptance_fraction=np.full(n_walkers, 0.5))
+
+    fake_rng = SimpleNamespace(
+        normal=lambda mean, sigma, size: np.array([10.0, 0.0, -1.0, np.nan])
+    )
+    monkeypatch.setattr(sed, "_run_emcee", fake_run)
+    monkeypatch.setattr(sed.np.random, "default_rng", lambda seed: fake_rng)
+    monkeypatch.setattr(
+        sed,
+        "blackbody_model_magnitudes",
+        lambda teff_k, log_radius_over_distance, av_mag, band_data: np.zeros(len(band_data)),
+    )
+
+    result = sed._fit_blackbody([("J", 0.0, 0.1)], stellar, n_walkers=4, burn_in=1, production=1)
+
+    diagnostics = result["fit_quality"]["parallax_draws"]
+    assert diagnostics == {
+        "proposed_count": 4,
+        "accepted_positive_finite_count": 1,
+        "rejected_nonpositive_or_nonfinite_count": 3,
+        "rejection_rate": pytest.approx(0.75),
+        "policy": "non-positive or non-finite draws are rejected before distance-derived summaries",
+    }
+    posterior = result["posterior"]
+    assert posterior["distance_pc"]["median"] == pytest.approx(100.0)
+    for key in ("distance_pc", "radius_solar", "luminosity_solar", "logg_cgs"):
+        assert np.isfinite(posterior[key]["median"])
+
+
+def test_sed_blackbody_fails_closed_when_all_parallax_draws_are_invalid(monkeypatch):
+    import exonym.sed as sed
+
+    stellar = {
+        "teff_k": 5772.0,
+        "logg_cgs": 4.438,
+        "feh": 0.0,
+        "mass_solar": 1.0,
+        "radius_solar": 1.0,
+        "parallax_mas": 10.0,
+        "parallax_mas_err": 0.05,
+    }
+
+    def fake_run(log_probability, start, n_walkers, burn_in, production, seed):
+        samples = np.tile(np.asarray(start, dtype=float), (3, 1))
+        return samples, SimpleNamespace(acceptance_fraction=np.full(n_walkers, 0.5))
+
+    fake_rng = SimpleNamespace(normal=lambda mean, sigma, size: np.array([0.0, -1.0, np.nan]))
+    monkeypatch.setattr(sed, "_run_emcee", fake_run)
+    monkeypatch.setattr(sed.np.random, "default_rng", lambda seed: fake_rng)
+
+    with pytest.raises(RuntimeError, match="rejected every parallax draw"):
+        sed._fit_blackbody([("J", 0.0, 0.1)], stellar, n_walkers=4, burn_in=1, production=1)
 
 
 def test_sed_percentile_summary():
@@ -1159,12 +1562,26 @@ def test_transit_fit_recovers_synthetic_parameters(tmp_path, monkeypatch):
     assert posterior["rho_star_solar"]["median"] == pytest.approx(1.0, rel=0.3)
     assert posterior["q1"]["median"] == pytest.approx(0.35, abs=0.05)
     assert posterior["q2"]["median"] == pytest.approx(0.3, abs=0.05)
+    assert payload["parameter_names"] == [
+        "rp_rs",
+        "log_rho_star",
+        "impact_parameter",
+        "baseline",
+        "log_jitter",
+        "q1",
+        "q2",
+    ]
     assert payload["source"] == "candidate-data"
     assert payload["likelihood"]["cadence"] == "native"
     assert payload["likelihood"]["exposure_seconds_by_sector"] == {"1": pytest.approx(120.0)}
     assert payload["density_prior"]["log10_sigma"] == pytest.approx(
         np.sqrt(0.1**2 + 0.15**2) / np.log(10.0)
     )
+    jitter_prior = payload["assumptions"]["jitter_prior"]
+    assert jitter_prior["distribution"] == "half-cauchy-on-jitter"
+    assert jitter_prior["scale_normalized_flux"] == pytest.approx(1e-3)
+    assert jitter_prior["data_dependent"] is False
+    assert jitter_prior["empirical_bayes"] is False
 
 
 def test_native_transit_window_preserves_sector_cadence_and_baselines():
@@ -1253,7 +1670,6 @@ def test_dynesty_fit_writes_evidence_and_reproducible_compatibility_chain(tmp_pa
                 logz=np.array([-5.0, -2.5, -0.5, 0.0]),
                 logzerr=np.array([0.5, 0.3, 0.2, 0.1]),
                 niter=4,
-stop_iteration="dlogz",
                 ncall=np.array([3, 3, 3, 3]),
                 eff=75.0,
             )
@@ -1261,23 +1677,68 @@ stop_iteration="dlogz",
         def run_nested(self, **kwargs):
             assert kwargs["print_progress"] is False
             assert kwargs["nlive_init"] > 0
+            assert kwargs["dlogz_init"] == pytest.approx(0.25)
+            assert "dlogz" not in kwargs
+            assert "maxcall" not in kwargs
 
     workspace = create_candidate(tmp_path, "fit-dynesty-test")
     _mock_candidate_fit_inputs(monkeypatch)
     fake_dynesty = SimpleNamespace(DynamicNestedSampler=FakeDynamicNestedSampler, __version__="test")
 
     with patch.dict(sys.modules, {"dynesty": fake_dynesty}):
-        output = run_mcmc_transit_fit(workspace, n_samples=40, sampler="dynesty", seed=5)
+        output = run_mcmc_transit_fit(
+            workspace,
+            n_samples=40,
+            sampler="dynesty",
+            seed=5,
+            dlogz_tolerance=0.25,
+        )
         first_chain = np.load(workspace.path / "outputs" / "mcmc_transit_fit_chain.npy")
-        run_mcmc_transit_fit(workspace, n_samples=40, sampler="dynesty", seed=5)
+        run_mcmc_transit_fit(
+            workspace,
+            n_samples=40,
+            sampler="dynesty",
+            seed=5,
+            dlogz_tolerance=0.25,
+        )
 
     payload = json.loads(output.read_text(encoding="utf-8"))
     chain = np.load(workspace.path / "outputs" / "mcmc_transit_fit_chain.npy")
     assert output.name == "mcmc_transit_fit.json"
     assert payload["sampler"] == "dynesty"
+    assert payload["parameter_names"] == [
+        "rp_rs",
+        "log_rho_star",
+        "impact_parameter",
+        "baseline",
+        "log_jitter",
+        "q1",
+        "q2",
+    ]
     assert payload["evidence"]["log_z"] == pytest.approx(0.0)
     assert payload["diagnostics"]["resampling"] == "systematic equal-weight resampling"
     assert payload["diagnostics"]["resampling_seed"] == 5
+    assert payload["diagnostics"]["dlogz_init_tolerance"] == pytest.approx(0.25)
+    assert payload["diagnostics"]["dlogz_tolerance"] == pytest.approx(0.25)
+    configuration = payload["diagnostics"]["dynesty_run_configuration"]
+    assert configuration["initial_baseline"] == {
+        "nlive_init": 50,
+        "criterion": "dlogz_init",
+        "dlogz_init": 0.25,
+    }
+    assert configuration["final_dynamic_stopping"]["criterion"] == (
+        "dynesty-default-stopping-function"
+    )
+    assert configuration["final_dynamic_stopping"]["result_criterion"] is None
+    assert payload["diagnostics"]["sampler_stop_criterion"] is None
+    jitter_prior = payload["assumptions"]["jitter_prior"]
+    assert jitter_prior["distribution"] == "half-cauchy-on-jitter"
+    assert jitter_prior["scale_normalized_flux"] == pytest.approx(1e-3)
+    assert jitter_prior["data_dependent"] is False
+    assert jitter_prior["empirical_bayes"] is False
+    assert payload["diagnostics"]["sampler_stop_criterion_status"] == (
+        "not-reported-by-dynesty-results"
+    )
     assert chain.shape == (4, 7)
     assert np.array_equal(chain, first_chain)
 
@@ -1294,8 +1755,75 @@ def test_dynesty_dependency_failure_writes_no_fit_output(tmp_path):
     assert not (workspace.path / "outputs" / "mcmc_transit_fit.json").exists()
     assert not (workspace.path / "outputs" / "mcmc_transit_fit_chain.npy").exists()
 
-def test_dynesty_stopping_criteria_recorded(tmp_path, monkeypatch):
-    """Assert that the dynesty payload records sampler_niter and a stopping criterion."""
+
+def test_transit_likelihood_rejects_an_invalid_batman_forward_model(monkeypatch):
+    from exonym.transit_fit import _initial_fit_parameters, _log_likelihood
+
+    monkeypatch.setattr(
+        "exonym.transit_fit.batman_transit_flux",
+        lambda *_args, **_kwargs: None,
+    )
+    theta = _initial_fit_parameters(1200.0, 1.0, 1e-4, eccentric=False)
+    result = _log_likelihood(
+        theta,
+        np.linspace(-0.1, 0.1, 32),
+        np.ones(32),
+        np.full(32, 1e-4),
+        {"period_days": 3.2},
+        eccentric=False,
+    )
+
+    assert result == -np.inf
+
+
+def test_posterior_summaries_refuse_a_missing_batman_model(monkeypatch):
+    from exonym.transit_fit import _initial_fit_parameters, _posterior_summaries
+
+    monkeypatch.setattr(
+        "exonym.transit_fit.batman_transit_flux",
+        lambda *_args, **_kwargs: None,
+    )
+    chain = np.tile(_initial_fit_parameters(1200.0, 1.0, 1e-4, eccentric=False), (4, 1))
+
+    with pytest.raises(RuntimeError, match="posterior-derived mid-transit depths"):
+        _posterior_summaries(chain, {"period_days": 3.2}, eccentric=False)
+
+
+def test_posterior_summaries_report_inclination_geometry_clipping(monkeypatch):
+    from exonym.transit_fit import _initial_fit_parameters, _posterior_summaries
+
+    monkeypatch.setattr(
+        "exonym.transit_fit.batman_transit_flux",
+        lambda time, *_args, **_kwargs: np.ones_like(time),
+    )
+    initial = _initial_fit_parameters(1200.0, 1.0, 1e-4, eccentric=False)
+    chain = np.tile(initial, (4, 1))
+    chain[2:, 2] = 100.0
+
+    summaries = _posterior_summaries(chain, {"period_days": 3.2}, eccentric=False)
+
+    assert summaries["inclination_deg"]["conjunction_distance_clip_fraction"] == pytest.approx(0.5)
+
+
+def test_transit_fit_fails_loudly_when_batman_is_unavailable(tmp_path, monkeypatch):
+    from exonym.transit_fit import run_mcmc_transit_fit
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "fit-batman-unavailable")
+
+    def missing_batman():
+        raise RuntimeError("batman-package is required for transit fitting")
+
+    monkeypatch.setattr("exonym.transit_fit._require_batman", missing_batman)
+    with pytest.raises(RuntimeError, match="batman-package"):
+        run_mcmc_transit_fit(workspace)
+
+    assert not (workspace.path / "outputs" / "mcmc_transit_fit.json").exists()
+    assert not (workspace.path / "outputs" / "mcmc_transit_fit_chain.npy").exists()
+
+
+def test_dynesty_stopping_configuration_is_recorded_without_a_results_stop_field(tmp_path, monkeypatch):
+    """Record configured initial/dynamic stopping without inventing result metadata."""
     import json
     import sys
 
@@ -1317,7 +1845,6 @@ def test_dynesty_stopping_criteria_recorded(tmp_path, monkeypatch):
                 logz=np.array([-5.0, -2.5, -0.5, 0.0]),
                 logzerr=np.array([0.5, 0.3, 0.2, 0.1]),
                 niter=4,
-                stop_iteration="dlogz",
                 ncall=np.array([3, 3, 3, 3]),
                 eff=75.0,
             )
@@ -1325,6 +1852,9 @@ def test_dynesty_stopping_criteria_recorded(tmp_path, monkeypatch):
         def run_nested(self, **kwargs):
             assert kwargs["print_progress"] is False
             assert kwargs["nlive_init"] > 0
+            assert kwargs["dlogz_init"] == pytest.approx(0.5)
+            assert "dlogz" not in kwargs
+            assert "maxcall" not in kwargs
 
     workspace = create_candidate(tmp_path, "fit-dynesty-stopping")
     _mock_candidate_fit_inputs(monkeypatch)
@@ -1336,8 +1866,25 @@ def test_dynesty_stopping_criteria_recorded(tmp_path, monkeypatch):
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert isinstance(payload["diagnostics"]["sampler_niter"], int), "sampler_niter must be recorded"
     assert payload["diagnostics"]["sampler_niter"] > 0, "sampler_niter must be a positive integer"
-    assert isinstance(payload["diagnostics"]["sampler_stop_criterion"], str), "sampler_stop_criterion must be recorded"
-    assert payload["diagnostics"]["sampler_stop_criterion"] == "dlogz"
+    configuration = payload["diagnostics"]["dynesty_run_configuration"]
+    assert configuration["initial_baseline"]["criterion"] == "dlogz_init"
+    assert configuration["initial_baseline"]["dlogz_init"] == pytest.approx(0.5)
+    assert configuration["final_dynamic_stopping"] == {
+        "criterion": "dynesty-default-stopping-function",
+        "custom_stop_function": None,
+        "custom_stop_kwargs": {},
+        "use_stop": {
+            "value": True,
+            "source": "dynesty API default; not overridden by this run",
+        },
+        "configured_hard_stop_kwargs": {},
+        "result_criterion": None,
+        "result_criterion_status": "not-reported-by-dynesty-results",
+    }
+    assert payload["diagnostics"]["sampler_stop_criterion"] is None
+    assert payload["diagnostics"]["sampler_stop_criterion_status"] == (
+        "not-reported-by-dynesty-results"
+    )
 
 def test_stellar_density_a_rs_monotonic():
     from exonym.transit_fit import stellar_density_a_rs
@@ -1440,6 +1987,36 @@ def test_phase_curve_recovers_injected_reflection():
     assert result["maximum_absolute_significance_sigma"] >= 2.0
 
 
+def test_phase_curve_marks_zero_covariance_error_as_undefined(monkeypatch):
+    """Do not turn an undefined covariance error into a zero-ppm limit."""
+    import exonym.phasecurve as phasecurve
+
+    table = phasecurve._synthetic_phase_curve_table()
+    ephemeris = {
+        "period_days": table.pop("_period_days"),
+        "epoch_btjd": table.pop("_epoch_btjd"),
+        "duration_days": table.pop("_duration_days"),
+    }
+    monkeypatch.setattr(
+        phasecurve,
+        "cluster_sandwich_covariance",
+        lambda design, *_args: (np.zeros((design.shape[1], design.shape[1])), 2),
+    )
+
+    result = phasecurve.fit_phase_curve_components(
+        table["time"], table["flux"], table["flux_err"], table["sector"], ephemeris
+    )
+
+    assert result["status"] == "undefined_component_significance"
+    assert result["maximum_absolute_significance_sigma"] is None
+    assert all(
+        component["significance_sigma"] is None
+        and component["three_sigma_absolute_upper_bound_ppm"] is None
+        for component in result["components"].values()
+    )
+    json.dumps(result, allow_nan=False)
+
+
 def test_phase_curve_eccentric_secondary_control_uses_candidate_posterior(tmp_path):
     from exonym.phasecurve import (
         _secondary_eclipse_geometry_samples,
@@ -1484,6 +2061,41 @@ def test_phase_curve_eccentric_secondary_control_uses_candidate_posterior(tmp_pa
     assert report["duration_hours"]["median"] == pytest.approx(2.4)
     assert arguments["secondary_eclipse_template_total_samples"] == 16
     assert arguments["secondary_eclipse_phase_samples"].size == 16
+
+
+def test_phase_curve_uses_declared_transit_chain_parameter_contract(tmp_path):
+    """Named eccentric coordinates prevent a later chain-layout drift."""
+    from exonym.phasecurve import resolve_secondary_eclipse_control
+    from exonym.transit_fit import PARAMETER_NAMES_ECCENTRIC
+    from exonym.workspace import create_candidate
+
+    assert tuple(PARAMETER_NAMES_ECCENTRIC[-2:]) == ("sqe_cosw", "sqe_sinw")
+    workspace = create_candidate(tmp_path, "phase-chain-contract")
+    outputs = workspace.path / "outputs"
+    parameter_names = list(PARAMETER_NAMES_ECCENTRIC) + ["future_trailing_parameter"]
+    (outputs / "mcmc_transit_fit.json").write_text(
+        json.dumps(
+            {
+                "source": "candidate-data",
+                "model": "batman quadratic limb darkening, stellar-density locked, eccentric orbit",
+                "ephemeris": {"period_days": 3.0, "epoch_btjd": 100.0},
+                "parameter_names": parameter_names,
+            }
+        ),
+        encoding="utf-8",
+    )
+    chain = np.tile(
+        np.array([0.1, 0.0, 0.2, 1.0, -8.0, 0.3, 0.3, 0.2**0.5, 0.0, 99.0]),
+        (16, 1),
+    )
+    np.save(str(outputs / "mcmc_transit_fit_chain.npy"), chain)
+
+    _, report = resolve_secondary_eclipse_control(
+        workspace, {"period_days": 3.0, "epoch_btjd": 100.0, "duration_days": 0.1}
+    )
+
+    assert report["mode"] == "eccentric-posterior-marginalized-box-control"
+    assert report["phase"]["median"] == pytest.approx(0.5 + 0.4 / np.pi, abs=0.003)
 
 
 def test_phase_curve_run_records_eccentric_secondary_control(tmp_path, monkeypatch):
@@ -1744,7 +2356,12 @@ def test_localization_ignores_unvalidated_external_gaia_csv(tmp_path):
 def test_ttv_linear_ephemeris_has_small_residuals():
     from exonym.search import calculate_ttv_super_period
     from exonym.transit_fit import stellar_density_a_rs
-    from exonym.ttv import _synthetic_timing_table, transit_timing_analysis
+    from exonym.ttv import (
+        _synthetic_timing_table,
+        enumerate_companion_super_periods,
+        transit_template_parameters,
+        transit_timing_analysis,
+    )
 
     table = _synthetic_timing_table(ttv_amplitude_minutes=0.0)
     ephemeris = {
@@ -1754,13 +2371,32 @@ def test_ttv_linear_ephemeris_has_small_residuals():
         "depth_ppm": table.pop("_depth_ppm"),
     }
     a_rs = stellar_density_a_rs(1.0, ephemeris["period_days"])
+    template = transit_template_parameters(
+        ephemeris, a_rs, impact_parameter=0.3, q1=0.3, q2=0.3
+    )
     analysis = transit_timing_analysis(
-        table["time"], table["flux"], table["flux_err"], ephemeris, a_rs
+        table["time"], table["flux"], table["flux_err"], ephemeris, template
     )
     assert analysis["n_transits_fit"] >= 5
     assert analysis["oc_rms_minutes"] < 2.0
 
     assert calculate_ttv_super_period(3.5, 5.0, j_resonance=2) == pytest.approx(8.75, rel=0.01)
+    contexts = enumerate_companion_super_periods(5.0, [3.5, 10.0])
+    inner_context = next(
+        item
+        for item in contexts
+        if item["companion_orbital_relation"] == "inner-companion"
+        and item["resonance_j"] == 2
+    )
+    assert inner_context["super_period_days"] == pytest.approx(8.75, rel=0.01)
+    exact_context = next(
+        item
+        for item in contexts
+        if item["companion_orbital_relation"] == "outer-companion"
+        and item["resonance_j"] == 2
+    )
+    assert exact_context["super_period_days"] is None
+    assert exact_context["super_period_status"] == "exact-resonance-unbounded"
 
 
 def test_ttv_refits_a_weighted_linear_ephemeris():
@@ -1783,7 +2419,11 @@ def test_ttv_refits_a_weighted_linear_ephemeris():
 
 def test_ttv_injected_signal_has_nonzero_refit_residuals():
     from exonym.transit_fit import stellar_density_a_rs
-    from exonym.ttv import _synthetic_timing_table, transit_timing_analysis
+    from exonym.ttv import (
+        _synthetic_timing_table,
+        transit_template_parameters,
+        transit_timing_analysis,
+    )
 
     table = _synthetic_timing_table(ttv_amplitude_minutes=20.0)
     ephemeris = {
@@ -1793,63 +2433,159 @@ def test_ttv_injected_signal_has_nonzero_refit_residuals():
         "depth_ppm": table.pop("_depth_ppm"),
     }
     a_rs = stellar_density_a_rs(1.0, ephemeris["period_days"])
+    template = transit_template_parameters(
+        ephemeris, a_rs, impact_parameter=0.3, q1=0.3, q2=0.3
+    )
     analysis = transit_timing_analysis(
-        table["time"], table["flux"], table["flux_err"], ephemeris, a_rs
+        table["time"], table["flux"], table["flux_err"], ephemeris, template
     )
     assert analysis["oc_rms_minutes"] > 5.0
 
-def test_ttv_flat_chisq_epoch_excluded():
-    """A flat χ² surface (no transit detected) must yield excluded_no_detection."""
-    import numpy as np
 
-    from exonym.ttv import fit_transit_epoch
+def test_ttv_rejects_low_snr_epochs_and_persists_epoch_diagnostics(tmp_path, monkeypatch):
+    from exonym.ttv import run_ttv_analysis
+    from exonym.workspace import create_candidate
 
-    time = np.linspace(0.0, 1.0, 200)
+    workspace = create_candidate(tmp_path, "ttv-low-snr-test")
+    (workspace.path / "outputs" / "mcmc_transit_fit.json").write_text(
+        json.dumps(
+            {
+                "work_package": "MCMC_TRANSIT_FIT",
+                "source": "candidate-data",
+                "signal": None,
+                "posterior": {
+                    "impact_parameter": {"median": 0.3},
+                    "q1": {"median": 0.3},
+                    "q2": {"median": 0.3},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    period_days = 1.0
+    epoch_btjd = 1.0
+    time = np.arange(0.6, 5.4, 0.002)
     flux = np.ones_like(time)
-    flux_err = np.full_like(time, 0.001)
-    template = {
-        "period_days": 3.5,
-        "rp_rs": 0.05,
-        "a_rs": 10.0,
-        "impact_parameter": 0.3,
-        "u1": 0.3,
-        "u2": 0.1,
+    for transit_time in (2.0, 4.0):
+        flux -= 0.01 * np.exp(-0.5 * ((time - transit_time) / 0.03) ** 2)
+    table = {
+        "time": time,
+        "flux": flux,
+        "flux_err": np.full_like(time, 0.001),
+        "sector": np.ones(time.size, dtype=int),
     }
-    # NOTE: the template flux fails because the batman import is not available
-    # in a minimal test, but the chi2 helper uses _template_flux which returns
-    # None when batman is unavailable → chi2 returns 1e100 → best_index points
-    # to a value >= 1e99, so the function returns None. For a true flat-χ²
-    # scenario we need batman installed.
-
-    # Use a fitted epoch that produces curvature <= 0 by using a tiny grid.
-    # Since batman may not be importable in all test contexts, we exercise the
-    # exclusion path directly by replacing a mocked chi² surface.
-    import math
-
-    # Verify the direct algebra: curvature <= 0 path
-    assert math.sqrt(2.0 / (-1.0)) if False else True  # would be domain error
-
-    # Integration test via transit_timing_analysis with flat flux:
-    # When flux is perfectly flat (no transit), every template yields
-    # constant χ² → curvature ≈ 0 → epoch should be excluded.
-    from exonym.ttv import transit_timing_analysis
-    from exonym.transit_fit import stellar_density_a_rs
-
-    rho_solar = 1.0
-    period_days = 3.5
-    a_rs = stellar_density_a_rs(rho_solar, period_days)
     ephemeris = {
         "period_days": period_days,
-        "epoch_btjd": 2.0,
+        "epoch_btjd": epoch_btjd,
         "duration_days": 0.12,
-        "depth_ppm": 2500.0,
+        "depth_ppm": 10000.0,
+        "source": "candidate-config",
+        "field_sources": {
+            "period_days": "candidate-config",
+            "epoch_btjd": "candidate-config",
+            "duration_days": "candidate-config",
+            "depth_ppm": "candidate-config",
+        },
     }
-    analysis = transit_timing_analysis(
-        time, flux, flux_err, ephemeris, a_rs, window_days=0.3
+    stellar = {"mass_solar": 1.0, "radius_solar": 1.0, "source": "candidate-data"}
+
+    def fake_template_flux(_template, sample_time, t0_value):
+        return 1.0 - 0.01 * np.exp(-0.5 * ((sample_time - t0_value) / 0.03) ** 2)
+
+    monkeypatch.setattr("exonym.ttv.load_light_curve_table", lambda *_args, **_kwargs: table)
+    monkeypatch.setattr("exonym.ttv.load_transit_ephemeris", lambda *_args, **_kwargs: ephemeris)
+    monkeypatch.setattr("exonym.ttv.load_stellar_parameters", lambda *_args, **_kwargs: stellar)
+    monkeypatch.setattr("exonym.ttv._template_flux", fake_template_flux)
+    monkeypatch.setattr("exonym.ttv.plot_timing_diagram", lambda *_args, **_kwargs: None)
+
+    output = run_ttv_analysis(workspace)
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    timing = payload["timing"]
+    rejected_by_epoch = {record["epoch"]: record for record in timing["rejected_epochs"]}
+
+    # Epoch indices are zero-based relative to the 1.0 BTJD reference, so
+    # injected transits at 2.0 and 4.0 are epochs 1 and 3. The non-injected
+    # windows must be retained as rejected epochs.
+    for rejected_epoch in (0, 2, 4):
+        record = rejected_by_epoch[rejected_epoch]
+        assert record["rejection_reason"] in {
+            "non-positive-local-depth",
+            "low-local-depth-snr",
+        }
+        assert record["local_depth_snr"] < timing["epoch_acceptance"]["minimum_local_depth_snr"]
+        assert record["sigma_t0_days"] is None
+    assert timing["n_transits_fit"] >= 2
+    assert timing["n_rejected_epochs"] == len(timing["rejected_epochs"])
+    assert "uncertainty_clipped_epochs" in timing
+    assert "search_boundary_epochs" in timing
+    json.dumps(payload, allow_nan=False)
+
+
+def test_ttv_rejects_positive_depth_when_timing_curvature_is_non_positive(monkeypatch):
+    from exonym.ttv import fit_transit_epoch
+
+    time = np.linspace(0.7, 1.3, 301)
+    transit_flux = 1.0 - 0.01 * np.exp(-0.5 * ((time - 1.0) / 0.03) ** 2)
+
+    def fixed_template(_template, sample_time, _t0_value):
+        return 1.0 - 0.01 * np.exp(-0.5 * ((sample_time - 1.0) / 0.03) ** 2)
+
+    monkeypatch.setattr("exonym.ttv._template_flux", fixed_template)
+    fit = fit_transit_epoch(
+        time,
+        transit_flux,
+        np.full_like(time, 1e-4),
+        {"unused": True},
+        1.0,
     )
-    assert "n_excluded_no_detection" in analysis
-    assert analysis["n_excluded_no_detection"] >= 0
-    assert "per_epoch" in analysis
+
+    assert fit["rejection_reason"] == "non-positive-timing-curvature"
+    assert fit["excluded_no_detection"] is True
+    assert fit["sigma_t0"] is None
+    assert fit["depth_snr"] > 3.0
+    assert fit["at_search_boundary"] is True
+
+
+def test_ttv_retains_clipped_uncertainty_and_search_boundary_records(monkeypatch):
+    from exonym.ttv import transit_template_parameters, transit_timing_analysis
+
+    def fake_epoch_fit(_time, _flux, _errors, _template, t0_expected, **_kwargs):
+        return {
+            "t0_fit": t0_expected,
+            "sigma_t0": 0.0005,
+            "sigma_t0_raw": 0.0001,
+            "depth_ppm": 1000.0,
+            "depth_uncertainty_ppm": 100.0,
+            "depth_snr": 10.0,
+            "excluded_no_detection": False,
+            "rejection_reason": None,
+            "at_search_boundary": True,
+            "sigma_t0_clipped": True,
+        }
+
+    monkeypatch.setattr("exonym.ttv.fit_transit_epoch", fake_epoch_fit)
+    ephemeris = {
+        "period_days": 1.0,
+        "epoch_btjd": 0.0,
+        "duration_days": 0.1,
+        "depth_ppm": 1000.0,
+    }
+    template = transit_template_parameters(
+        ephemeris, a_rs=10.0, impact_parameter=0.3, q1=0.3, q2=0.3
+    )
+    analysis = transit_timing_analysis(
+        np.array([0.0, 2.0]),
+        np.ones(2),
+        np.full(2, 1e-4),
+        ephemeris,
+        template,
+    )
+
+    assert len(analysis["uncertainty_clipped_epochs"]) == 3
+    assert len(analysis["search_boundary_epochs"]) == 3
+    assert all(record["sigma_t0_clipped"] for record in analysis["per_epoch"])
+    assert all(record["at_search_boundary"] for record in analysis["per_epoch"])
+
 
 # ---------------------------------------------------------------------------
 # Scientific analysis modules: stellar activity
@@ -1860,6 +2596,7 @@ def test_activity_recovers_rotation_period():
     from exonym.activity import (
         _synthetic_rotation_table,
         gls_periodogram,
+        reconcile_harmonic_segment_periods,
         sampling_window_diagnostics,
         segment_harmonic_persistence,
         sinusoid_amplitude_ppm,
@@ -1904,6 +2641,15 @@ def test_activity_recovers_rotation_period():
     assert persistence["status"] == "descriptive-harmonic-consistency"
     assert persistence["consistent_segment_count"] == 2
     assert persistence["segments"][1]["nearest_harmonic_frequency_factor"] == 2.0
+    reconciliation = reconcile_harmonic_segment_periods(
+        [
+            {"sector": 1, "best_period_days": 5.0, "max_power": 1.0},
+            {"sector": 2, "best_period_days": 2.5, "max_power": 1.0},
+        ],
+        persistence,
+    )
+    assert reconciliation["status"] == "harmonic-reconciled"
+    assert reconciliation["periods_days"] == pytest.approx([5.0, 5.0])
 
 
 def test_activity_does_not_mask_with_a_synthetic_ephemeris(tmp_path, monkeypatch):
@@ -1945,6 +2691,53 @@ def test_activity_does_not_mask_with_a_synthetic_ephemeris(tmp_path, monkeypatch
     assert "best_false_alarm_probability" not in payload
     assert payload["segments"][0]["sampling_window"]["top_window_peaks"]
     assert payload["harmonic_persistence"]["status"] == "unresolved-insufficient-segments"
+
+
+def test_activity_reconciles_harmonic_segment_peaks_before_summary(tmp_path, monkeypatch):
+    """The reported period must not average a fundamental with its harmonic."""
+    import exonym.activity as activity
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "activity-harmonic-reconciliation")
+    first = np.linspace(0.0, 20.0, 120)
+    second = np.linspace(40.0, 60.0, 120)
+    time = np.concatenate((first, second))
+    table = {
+        "time": time,
+        "flux": np.ones(time.size),
+        "flux_err": np.full(time.size, 100e-6),
+        "sector": np.concatenate((np.full(first.size, 1), np.full(second.size, 2))),
+    }
+    synthetic_ephemeris = {
+        "source": "synthetic-demo",
+        "field_sources": {
+            "period_days": "synthetic-demo",
+            "epoch_btjd": "synthetic-demo",
+            "duration_days": "synthetic-demo",
+        },
+    }
+    periodograms = iter(
+        [
+            (np.asarray([5.0, 4.0]), np.asarray([2.0, 1.0]), 0.01),
+            (np.asarray([2.5, 4.0]), np.asarray([2.0, 1.0]), 0.01),
+        ]
+    )
+    monkeypatch.setattr(activity, "load_light_curve_table", lambda *_args, **_kwargs: table)
+    monkeypatch.setattr(activity, "load_transit_ephemeris", lambda _workspace: synthetic_ephemeris)
+    monkeypatch.setattr(activity, "gls_periodogram", lambda *_args: next(periodograms))
+    monkeypatch.setattr(
+        activity,
+        "sampling_window_diagnostics",
+        lambda *_args: {"top_window_peaks": [], "frequency_resolution_days_inverse": 0.05},
+    )
+    monkeypatch.setattr(activity, "sinusoid_amplitude_posterior", lambda *_args: {"median": 0.0})
+
+    output = activity.run_stellar_activity(workspace)
+    payload = json.loads(output.read_text(encoding="utf-8"))
+
+    assert payload["rotation_period_selection"] == "harmonic-reconciled"
+    assert payload["rotation_period_days"] == pytest.approx(5.0)
+    assert len(payload["rotation_period_reconciled_segments"]) == 2
 
 
 # ---------------------------------------------------------------------------

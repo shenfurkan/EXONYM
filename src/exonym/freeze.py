@@ -6,8 +6,12 @@ container image definitions, and a content-addressed manifest.
 
 The manifest records every engine-run.json generated during the candidate
 analysis, every transit configuration hash, and the repository pyproject.toml
-hash so that the full analysis chain is reproductively traceable from a single
+hash so that the full analysis chain is reproducibly traceable from a single
 ``manifest.json`` file.
+
+A release verifies byte integrity and an offline source/workspace load
+boundary. It intentionally does not reproduce scientific engines, network
+retrievals, or remote services.
 """
 
 from __future__ import annotations
@@ -110,7 +114,11 @@ _WORKSPACE_SNAPSHOT_EXCLUDES = {"releases", "scratch", "__pycache__"}
 
 
 class ReleaseVerificationError(RuntimeError):
-    """Raised when a frozen release cannot pass integrity or replay checks."""
+    """Raised when a frozen release fails an integrity or replay check.
+
+    The exception describes a frozen-bundle contract failure; it is not a
+    scientific assessment of the candidate or its evidence.
+    """
 
 
 def _sha256(path: Path) -> str:
@@ -507,6 +515,19 @@ def verify_release(workspace: CandidateWorkspace, version: str) -> Dict[str, obj
     candidate metadata can be replayed without consulting the live checkout or
     a network service. It does not re-execute scientific engines or recreate a
     remote catalogue response.
+
+    Args:
+        workspace: Candidate workspace that owns the requested release.
+        version: Directory-safe frozen release version.
+
+    Returns:
+        Release identity, detached-manifest digest, verified file count, and
+        offline replay metadata.
+
+    Raises:
+        FileNotFoundError: If the requested release is absent.
+        ReleaseVerificationError: If integrity, inventory, lock, or offline
+            replay checks fail.
     """
     version = _validate_release_version(version)
     release_dir = workspace.path / "releases" / version
@@ -559,6 +580,24 @@ def freeze(workspace: CandidateWorkspace, version: Optional[str] = None) -> Path
     - Engine run manifest index (all runs/<engine>/<run-id>/engine-run.json)
     - Transit config file hashes (config/**/*.json)
     - pyproject.toml hash (repository-level package definition)
+
+    Args:
+        workspace: Candidate workspace whose evidence is snapshotted.
+        version: Optional safe release label; a timestamp-based label is used
+            when omitted.
+
+    Returns:
+        Directory containing the completed candidate-local release bundle.
+
+    Raises:
+        FileExistsError: If the requested release directory already exists.
+        FileNotFoundError: If the root requirements lock is absent.
+        ValueError: If the version, dependency lock, or catalog evidence does
+            not satisfy the release contract.
+
+    Note:
+        The bundle is an integrity-checked snapshot, not a scientific rerun
+        or proof that optional engines and external services are reproducible.
     """
     version = _validate_release_version(version or _default_version())
     release_dir = workspace.path / "releases" / version

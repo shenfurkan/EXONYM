@@ -17,6 +17,11 @@ Scaling Relations:
 
 Optionally cross-checks with pySYD when installed. Contains no target identifiers
 or hardcoded candidate constants.
+
+Scientific Boundary:
+    The output is an exploratory scaling diagnostic.  It is not mode
+    identification, a calibrated stellar inference, planet validation, or a
+    lifecycle decision.
 """
 
 from __future__ import annotations
@@ -34,6 +39,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from .constants import (
+    NOMINAL_SOLAR_EFFECTIVE_TEMPERATURE_K as TEFF_SUN_K,
+    SECONDS_PER_DAY,
+)
 from .inputs import (
     load_light_curve_table,
     load_stellar_parameters,
@@ -45,13 +54,14 @@ from .workspace import CandidateWorkspace
 # Canonical Solar Asteroseismic Reference Values (Huber et al. 2011, Chaplin et al. 2014)
 NUMAX_SUN_UHZ = 3090.0      # Solar frequency of maximum oscillation power (microHz)
 DNU_SUN_UHZ = 135.1         # Solar large frequency separation (microHz)
-TEFF_SUN_K = 5772.0         # Solar effective temperature (Kelvin)
 
 PSD_MIN_UHZ = 100.0         # Default minimum frequency for stellar PSD search (microHz)
 PSD_MAX_UHZ = 2000.0        # Default maximum frequency for stellar PSD search (microHz)
 DNU_MIN_UHZ = 30.0          # Minimum trial Delta-nu lag (microHz)
 DNU_MAX_UHZ = 200.0         # Maximum trial Delta-nu lag (microHz) — Solar Δν☉ ≈ 135.1 µHz; must exceed it — Chaplin & Miglio 2013
-MICROHZ_PER_CPD = 0.0864    # Unit conversion factor: cycles per day to microHz (1 c/d = 11.574 microHz)
+# 1 microhertz is exactly 0.0864 cycles per day.  The prior name reversed
+# this conversion direction even though callers used its numeric value correctly.
+CPD_PER_UHZ = 0.0864
 
 
 def _odd_bins(value: float) -> int:
@@ -65,7 +75,35 @@ def compute_power_spectrum(
     frequency_min_uhz: float = PSD_MIN_UHZ,
     frequency_max_uhz: float = PSD_MAX_UHZ,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Return (frequency_uhz, power, whitened, envelope) for a light curve."""
+    """Compute a background-whitened Lomb-Scargle power spectrum.
+
+    Mathematical Formulation:
+        The native PSD uses Astropy's ``normalization="psd"``.  A smoothed
+        local background ``B(nu)`` defines dimensionless whitened power
+        ``W(nu) = P(nu) / B(nu)``; a Gaussian-smoothed ``W`` is the envelope
+        statistic used by :func:`estimate_oscillation_envelope`.
+
+    Args:
+        time (Sequence[float]): Cadence times in a consistent day-based unit;
+            non-finite paired cadences are removed.
+        flux (Sequence[float]): Flux samples paired with ``time``.  The mean is
+            removed before PSD estimation.
+        frequency_min_uhz (float): Lower frequency bound in microhertz.
+        frequency_max_uhz (float): Upper frequency bound in microhertz.
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]: Frequency in
+        microhertz, Astropy PSD power, dimensionless whitened power, and the
+        dimensionless smoothed envelope, all aligned on the frequency grid.
+
+    Raises:
+        ValueError: Fewer than the required finite cadence pairs remain, or
+            the underlying periodogram cannot use the requested frequency range.
+
+    Note:
+        Window functions, granulation, instrumental systematics, and finite
+        cadence can produce misleading envelope structure.
+    """
     from astropy.timeseries import LombScargle
     from scipy.ndimage import gaussian_filter1d, median_filter
 
@@ -82,12 +120,12 @@ def compute_power_spectrum(
         flux_arr - np.nanmean(flux_arr),
         normalization="psd",
     ).autopower(
-        minimum_frequency=frequency_min_uhz * MICROHZ_PER_CPD,
-        maximum_frequency=frequency_max_uhz * MICROHZ_PER_CPD,
+        minimum_frequency=frequency_min_uhz * CPD_PER_UHZ,
+        maximum_frequency=frequency_max_uhz * CPD_PER_UHZ,
         samples_per_peak=1,
         method="fast",
     )
-    frequency_uhz = np.asarray(frequency_day) / MICROHZ_PER_CPD
+    frequency_uhz = np.asarray(frequency_day) / CPD_PER_UHZ
     power = np.asarray(power, dtype=float)
     spacing = float(np.nanmedian(np.diff(frequency_uhz)))
     background_bins = _odd_bins(100.0 / max(spacing, 1e-6))
@@ -106,7 +144,26 @@ def spacing_correlation(
     dnu_min_uhz: float = DNU_MIN_UHZ,
     dnu_max_uhz: float = DNU_MAX_UHZ,
 ) -> Tuple[Optional[float], Optional[float], Optional[np.ndarray]]:
-    """Return (best_dnu_uhz, correlation, lag_grid) around nu_max."""
+    """Correlate a local whitened PSD with shifted copies to estimate ``Delta_nu``.
+
+    Mathematical Formulation:
+        For each trial lag, the function interpolates ``W(nu + Delta_nu)`` on
+        the local frequency grid and returns its normalized dot product with
+        ``W(nu) - 1``.  The best finite correlation selects the reported lag.
+
+    Args:
+        frequency_uhz (np.ndarray): PSD frequency grid in microhertz.
+        whitened (np.ndarray): Dimensionless PSD divided by its background.
+        numax_uhz (float): Envelope-peak frequency in microhertz.
+        dnu_min_uhz (float): Lower trial large-separation lag in microhertz.
+        dnu_max_uhz (float): Upper trial large-separation lag in microhertz.
+
+    Returns:
+        Tuple[Optional[float], Optional[float], Optional[np.ndarray]]: Best
+        lag in microhertz, its dimensionless correlation, and the trial grid.
+        Unsupported local coverage returns ``None`` estimates rather than a
+        fabricated separation.
+    """
     envelope_half_width = 0.66 * numax_uhz**0.88
     use = np.abs(frequency_uhz - numax_uhz) <= envelope_half_width
     local_frequency = frequency_uhz[use]
@@ -131,6 +188,8 @@ def spacing_correlation(
         y = shifted[valid]
         denominator = np.sqrt(np.sum(x * x) * np.sum(y * y))
         scores[index] = np.sum(x * y) / denominator if denominator else np.nan
+    if not np.any(np.isfinite(scores)):
+        return None, None, lags
     best = int(np.nanargmax(scores))
     return float(lags[best]), float(scores[best]), lags
 
@@ -141,19 +200,49 @@ def estimate_oscillation_envelope(
     numax_min_uhz: float,
     numax_max_uhz: float,
 ) -> Dict[str, Any]:
-    """Return numax/dnu candidate estimates from a whitened PSD envelope."""
+    """Estimate an oscillation envelope and local large-separation diagnostic.
+
+    Args:
+        time (Sequence[float]): Candidate light-curve cadence times.
+        flux (Sequence[float]): Paired candidate flux samples.
+        numax_min_uhz (float): Requested lower envelope-search bound in
+            microhertz.
+        numax_max_uhz (float): Requested upper envelope-search bound in
+            microhertz.
+
+    Returns:
+        Dict[str, Any]: Candidate envelope metadata including requested and
+        effective bounds, clipping flags, PSD resolution, ``nu_max`` estimate,
+        and a nullable ``Delta_nu`` correlation result.
+
+    Raises:
+        ValueError: Requested bounds are non-finite or collapse after clipping,
+            or there are insufficient usable cadences for the PSD.
+
+    Note:
+        Effective bounds are recorded separately so review can distinguish the
+        requested astrophysical range from the supported native PSD range.
+    """
     import warnings
 
-    numax_min_used = float(numax_min_uhz)
-    numax_max_used = float(numax_max_uhz)
-    if numax_min_used < PSD_MIN_UHZ:
+    numax_min_requested = float(numax_min_uhz)
+    numax_max_requested = float(numax_max_uhz)
+    if not math.isfinite(numax_min_requested) or not math.isfinite(numax_max_requested):
+        raise ValueError("numax search bounds must be finite")
+    numax_min_used = numax_min_requested
+    numax_max_used = numax_max_requested
+    # NUMERICAL_GUARD: Keep the envelope search within the PSD support instead
+    # of extrapolating a frequency grid beyond its declared native range.
+    numax_min_clipped = numax_min_requested < PSD_MIN_UHZ
+    numax_max_clipped = numax_max_requested > PSD_MAX_UHZ
+    if numax_min_clipped:
         warnings.warn(
             "numax_min_uhz {0:.1f} uHz clamped to search floor {1:.1f} uHz".format(
                 numax_min_used, PSD_MIN_UHZ
             )
         )
         numax_min_used = PSD_MIN_UHZ
-    if numax_max_used > PSD_MAX_UHZ:
+    if numax_max_clipped:
         warnings.warn(
             "numax_max_uhz {0:.1f} uHz clamped to search ceiling {1:.1f} uHz".format(
                 numax_max_used, PSD_MAX_UHZ
@@ -176,9 +265,15 @@ def estimate_oscillation_envelope(
     return {
         "n_points": int(len(time)),
         "baseline_days": float(np.max(time) - np.min(time)),
-        "rayleigh_uhz": float(1e6 / ((np.max(time) - np.min(time)) * 86400.0)),
+        "rayleigh_uhz": float(
+            1e6 / ((np.max(time) - np.min(time)) * SECONDS_PER_DAY)
+        ),
+        "numax_min_requested_uhz": numax_min_requested,
+        "numax_max_requested_uhz": numax_max_requested,
         "numax_min_used": numax_min_used,
         "numax_max_used": numax_max_used,
+        "numax_min_clipped": numax_min_clipped,
+        "numax_max_clipped": numax_max_clipped,
         "numax_candidate_uhz": numax_candidate,
         "envelope_peak_ratio": float(envelope[peak_index]),
         "dnu_candidate_uhz": dnu_candidate,
@@ -196,6 +291,34 @@ def seismic_mass_radius(
 ) -> Dict[str, Any]:
     """Derive asteroseismic stellar mass and radius from scaling relations.
 
+    Mathematical Formulation:
+        The full solution combines ``nu_max / nu_max_sun = (M / M_sun)
+        (R / R_sun)**-2 (Teff / Teff_sun)**-0.5`` with
+        ``Delta_nu / Delta_nu_sun = (rho / rho_sun)**0.5``.  If an observable
+        is unavailable, a supplied mass or radius prior closes the reduced
+        system rather than supplying a new measurement.
+
+    Args:
+        numax_uhz (float): Envelope maximum in microhertz.
+        dnu_uhz (Optional[float]): Large separation in microhertz, or ``None``
+            when no finite spacing correlation is available.
+        teff_k (float): Effective temperature in kelvin.
+        mass_prior_solar (Optional[float]): Solar-unit mass used only when the
+            available observables do not independently determine it.
+        radius_prior_solar (Optional[float]): Solar-unit radius used only when
+            the available observables do not independently determine it.
+        dnu_correction_factor (float): Dimensionless multiplier applied to the
+            measured large separation before scaling.
+
+    Returns:
+        Dict[str, Any]: Rounded mass and radius in solar units plus a method
+        label that states whether the result used both observables or a prior.
+
+    Note:
+        Solar scaling relations can carry systematic error, particularly where
+        a model-dependent large-separation correction is needed.  This helper
+        is a descriptive estimate, not a calibrated stellar solution.
+
     Uses the classic relations
         nu_max / nu_max_sun = M/M_sun (R/R_sun)^-2 (Teff/Teff_sun)^-1/2
         Delta-nu / Delta-nu_sun = (rho / rho_sun)^1/2
@@ -205,16 +328,29 @@ def seismic_mass_radius(
     .. note:: Systematic bias in Delta-nu
         The classic Kjeldsen & Bedding (1995) scaling relation for Delta-nu
         carries a known 5–15% systematic offset driven by near-surface effects.
-        A partial correction can be applied via ``dnu_correction_factor`` using
-        the tabulated values from Sharma et al. (2016, ApJ 822, 15).
+        A caller may apply ``dnu_correction_factor`` only after retaining its
+        own candidate-owned calibration evidence. This helper does not select
+        a correction grid or infer a factor from stellar parameters.
         ``dnu_correction_factor`` multiplies the raw Lomb-Scargle Delta-nu
         estimate before the ratio is computed (default 1.0 = no correction).
     """
+    if isinstance(dnu_correction_factor, bool):
+        raise ValueError("dnu_correction_factor must be a positive finite number")
+    try:
+        correction_factor = float(dnu_correction_factor)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("dnu_correction_factor must be a positive finite number") from exc
+    if not math.isfinite(correction_factor) or correction_factor <= 0.0:
+        raise ValueError("dnu_correction_factor must be a positive finite number")
+
     numax_ratio = float(numax_uhz) / NUMAX_SUN_UHZ
     teff_ratio = float(teff_k) / TEFF_SUN_K
     method = "scaling-relations"
+    dnu_corrected: Optional[float] = None
     if dnu_uhz is not None and dnu_uhz > 0:
-        dnu_corrected = float(dnu_uhz) * float(dnu_correction_factor)
+        dnu_corrected = float(dnu_uhz) * correction_factor
+        if not math.isfinite(dnu_corrected) or dnu_corrected <= 0.0:
+            raise ValueError("dnu_correction_factor produces an invalid corrected Delta-nu")
         dnu_ratio = dnu_corrected / DNU_SUN_UHZ
         if numax_uhz > 0:
             radius = numax_ratio * math.sqrt(teff_ratio) / (dnu_ratio**2)
@@ -236,6 +372,8 @@ def seismic_mass_radius(
         "mass_solar": round(float(mass), 4),
         "radius_solar": round(float(radius), 4),
         "method": method,
+        "dnu_correction_factor": correction_factor,
+        "dnu_corrected_uhz": dnu_corrected,
     }
 
 
@@ -250,10 +388,60 @@ def _percentile_summary(samples: np.ndarray) -> Dict[str, float]:
     }
 
 
+def _rayleigh_resolution_interval(
+    center_uhz: float, rayleigh_uhz: float
+) -> Tuple[float, float, bool]:
+    """Return the physically positive frequency interval for one resolution element.
+
+    A Rayleigh resolution is a finite-baseline bin width, not a Gaussian
+    one-sigma error.  A peak selected from that grid is represented by the
+    half-bin interval around its reported center.  The lower edge is truncated
+    only when that interval would cross the positive-frequency boundary.
+    """
+    half_width = rayleigh_uhz / 2.0
+    lower = center_uhz - half_width
+    upper = center_uhz + half_width
+    if not math.isfinite(upper) or upper <= 0.0:
+        raise ValueError("Rayleigh resolution interval has no positive support")
+    lower_truncated_at_zero = lower <= 0.0
+    return (
+        max(float(np.finfo(float).tiny), lower),
+        upper,
+        lower_truncated_at_zero,
+    )
+
+
 def seismic_uncertainty_summary(
-    envelope: Dict[str, Any], stellar: Dict[str, Any], draws: int = 2048
+    envelope: Dict[str, Any],
+    stellar: Dict[str, Any],
+    draws: int = 2048,
+    dnu_correction_factor: float = 1.0,
 ) -> Dict[str, Any]:
-    """Propagate frequency-resolution and stellar-temperature errors by Monte Carlo."""
+    """Propagate resolution-interval and temperature errors through scaling.
+
+    Args:
+        envelope (Dict[str, Any]): Envelope record with finite ``nu_max``,
+            ``Delta_nu``, and Rayleigh resolution in microhertz.
+        stellar (Dict[str, Any]): Candidate stellar record with effective
+            temperature and its uncertainty in kelvin.
+        draws (int): Number of deterministic Monte Carlo draws used for the
+            reported percentile summaries.
+        dnu_correction_factor (float): Positive finite, evidence-backed
+            multiplier applied to the raw ``Delta_nu`` draws before the mass
+            and radius scaling relations.
+
+    Returns:
+        Dict[str, Any]: Status plus percentile summaries in microhertz and
+        solar units, or an unavailable status when required uncertainties are
+        missing or invalid.
+
+    Note:
+        Each frequency is sampled uniformly within its one-Rayleigh-resolution
+        element, rather than treating the full resolution as a Gaussian
+        one-sigma error. Temperature remains a candidate-supplied Gaussian
+        uncertainty. This deliberately excludes systematic scaling-relation
+        error and is not a complete stellar posterior.
+    """
     try:
         numax = float(envelope["numax_candidate_uhz"])
         dnu = float(envelope["dnu_candidate_uhz"])
@@ -270,12 +458,47 @@ def seismic_uncertainty_summary(
             "status": "unavailable-invalid-input-uncertainty",
             "reason": "Frequency resolution and stellar-temperature uncertainty must be positive and finite.",
         }
+    if isinstance(dnu_correction_factor, bool):
+        return {
+            "status": "unavailable-invalid-dnu-correction-factor",
+            "reason": "dnu_correction_factor must be a positive finite number.",
+        }
+    try:
+        correction_factor = float(dnu_correction_factor)
+    except (TypeError, ValueError):
+        return {
+            "status": "unavailable-invalid-dnu-correction-factor",
+            "reason": "dnu_correction_factor must be a positive finite number.",
+        }
+    if not math.isfinite(correction_factor) or correction_factor <= 0.0:
+        return {
+            "status": "unavailable-invalid-dnu-correction-factor",
+            "reason": "dnu_correction_factor must be a positive finite number.",
+        }
+    try:
+        numax_lower, numax_upper, numax_lower_truncated = _rayleigh_resolution_interval(
+            numax, rayleigh
+        )
+        dnu_lower, dnu_upper, dnu_lower_truncated = _rayleigh_resolution_interval(
+            dnu, rayleigh
+        )
+    except ValueError as exc:
+        return {
+            "status": "unavailable-invalid-resolution-interval",
+            "reason": str(exc),
+        }
     rng = np.random.default_rng(seed=41)
-    numax_draws = np.clip(rng.normal(numax, rayleigh, draws), np.finfo(float).eps, None)
-    dnu_draws = np.clip(rng.normal(dnu, rayleigh, draws), np.finfo(float).eps, None)
+    numax_draws = rng.uniform(numax_lower, numax_upper, draws)
+    dnu_draws = rng.uniform(dnu_lower, dnu_upper, draws)
+    dnu_corrected_draws = dnu_draws * correction_factor
+    if not np.all(np.isfinite(dnu_corrected_draws)) or not np.all(dnu_corrected_draws > 0.0):
+        return {
+            "status": "unavailable-invalid-dnu-correction-factor",
+            "reason": "dnu_correction_factor produces invalid corrected Delta-nu draws.",
+        }
     teff_draws = np.clip(rng.normal(teff, teff_error, draws), np.finfo(float).eps, None)
     numax_ratio = numax_draws / NUMAX_SUN_UHZ
-    dnu_ratio = dnu_draws / DNU_SUN_UHZ
+    dnu_ratio = dnu_corrected_draws / DNU_SUN_UHZ
     teff_ratio = teff_draws / TEFF_SUN_K
     radius_draws = numax_ratio * np.sqrt(teff_ratio) / dnu_ratio**2
     mass_draws = radius_draws**3 * dnu_ratio**2
@@ -284,15 +507,28 @@ def seismic_uncertainty_summary(
         "draws": int(draws),
         "numax_uhz": _percentile_summary(numax_draws),
         "dnu_uhz": _percentile_summary(dnu_draws),
+        "dnu_corrected_uhz": _percentile_summary(dnu_corrected_draws),
+        "dnu_correction_factor": correction_factor,
         "mass_solar": _percentile_summary(mass_draws),
         "radius_solar": _percentile_summary(radius_draws),
+        "frequency_resolution_sampling": {
+            "distribution": "uniform-within-one-Rayleigh-resolution-element",
+            "rayleigh_uhz": rayleigh,
+            "numax_interval_uhz": [numax_lower, numax_upper],
+            "dnu_interval_uhz": [dnu_lower, dnu_upper],
+            "numax_lower_bound_truncated_at_zero": numax_lower_truncated,
+            "dnu_lower_bound_truncated_at_zero": dnu_lower_truncated,
+        },
         "assumptions": (
-            "Independent Gaussian Rayleigh-resolution errors for numax and dnu, and a "
-            "candidate-supplied Gaussian teff error; systematic scaling-relation error is excluded."
+            "Independent uniform draws within one Rayleigh-resolution element for raw "
+            "numax and dnu, a fixed supplied dnu correction factor, and a candidate-supplied "
+            "Gaussian teff error; systematic scaling-relation error is excluded."
         ),
     }
 
 
+# ASTROPHYSICAL_HEURISTIC: Broad plausibility bounds prevent an uncalibrated
+# PSD peak from being propagated as an unreviewed stellar solution.
 SEISMIC_MASS_BOUNDS_SOLAR = (0.05, 20.0)
 SEISMIC_RADIUS_BOUNDS_SOLAR = (0.05, 20.0)
 SEISMIC_PRIOR_RATIO_TOLERANCE = 2.0
@@ -304,6 +540,21 @@ def seismic_sanity_check(
     prior_is_catalog: bool = False,
 ) -> Dict[str, Any]:
     """Flag scaling-relation results that are physically implausible.
+
+    Args:
+        seismic (Dict[str, Any]): Mapping with mass and radius in solar units.
+        radius_prior_solar (Optional[float]): Positive solar-unit external
+            radius prior used for a consistency check when it is catalog-based.
+        prior_is_catalog (bool): Whether the supplied radius prior is eligible
+            for the catalog-consistency heuristic.
+
+    Returns:
+        Dict[str, Any]: ``plausible`` flag and human-readable rejection reasons.
+
+    Note:
+        The bounds and prior-ratio comparison are triage heuristics for noisy
+        PSD peaks.  Passing them does not establish mode identification or a
+        physically calibrated stellar characterization.
 
     Scaling relations applied to noise peaks can return absurd stellar
     parameters (e.g., a 26 Msun A star from two 120-s sectors). Results outside
@@ -339,9 +590,11 @@ def _highpass_segments(
     time = np.asarray(time, dtype=float)[order]
     flux = np.asarray(flux, dtype=float)[order]
     residual = np.full_like(flux, np.nan)
-    gaps = np.flatnonzero(np.diff(time) > 5.0 * cadence_seconds / 86400.0) + 1
+    gaps = np.flatnonzero(
+        np.diff(time) > 5.0 * cadence_seconds / SECONDS_PER_DAY
+    ) + 1
     edges = np.r_[0, gaps, len(time)]
-    nominal_window = int(round(window_days * 86400.0 / cadence_seconds))
+    nominal_window = int(round(window_days * SECONDS_PER_DAY / cadence_seconds))
     if nominal_window % 2 == 0:
         nominal_window += 1
     for start, stop in zip(edges[:-1], edges[1:]):
@@ -365,6 +618,133 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _stellar_parameters_artifact(workspace: CandidateWorkspace) -> Optional[Dict[str, str]]:
+    """Return provenance for the optional candidate-owned stellar input file."""
+    path = workspace.path / "data" / "external" / "stellar_params.json"
+    if not path.is_file() or path.is_symlink():
+        return None
+    return {
+        "path": path.relative_to(workspace.path).as_posix(),
+        "sha256": _sha256(path),
+    }
+
+
+def _nonempty_text(value: Any) -> Optional[str]:
+    """Normalize a nonblank evidence field without coercing arbitrary values."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized if normalized else None
+
+
+def _resolve_dnu_correction(
+    stellar: Dict[str, Any],
+    dnu_uhz: Optional[float],
+    input_artifact: Optional[Dict[str, str]],
+) -> Dict[str, Any]:
+    """Resolve an optional Δν correction only from explicit candidate evidence.
+
+    The candidate-owned ``stellar_params.json`` may provide a nested record of
+    the form ``{"factor": number, "evidence": {"reference": str,
+    "applicability": str}}``.  This function deliberately does not infer a
+    correction from temperature, gravity, or a named literature relation: that
+    would turn an exploratory scaling diagnostic into an uncalibrated model
+    interpolation.
+    """
+    try:
+        raw_dnu = float(dnu_uhz) if dnu_uhz is not None else None
+    except (TypeError, ValueError):
+        raw_dnu = None
+    base: Dict[str, Any] = {
+        "factor": 1.0,
+        "applied": False,
+        "raw_dnu_uhz": raw_dnu if raw_dnu is not None and math.isfinite(raw_dnu) and raw_dnu > 0.0 else None,
+        "scaling_dnu_uhz": raw_dnu if raw_dnu is not None and math.isfinite(raw_dnu) and raw_dnu > 0.0 else None,
+        "input_artifact": input_artifact,
+    }
+    if base["raw_dnu_uhz"] is None:
+        base.update(
+            {
+                "status": "unavailable-no-measured-dnu",
+                "reason": "No finite positive native Delta-nu measurement is available for scaling.",
+            }
+        )
+        return base
+
+    record = stellar.get("dnu_correction")
+    if not isinstance(record, dict):
+        base.update(
+            {
+                "status": "identity-no-evidence-backed-input",
+                "reason": "No candidate-owned dnu_correction record supplied a factor and evidence.",
+            }
+        )
+        return base
+
+    factor_value = record.get("factor")
+    if isinstance(factor_value, bool) or not isinstance(factor_value, (int, float)):
+        base.update(
+            {
+                "status": "identity-invalid-evidence-record",
+                "reason": "dnu_correction.factor must be a positive finite number.",
+            }
+        )
+        return base
+    factor = float(factor_value)
+    if not math.isfinite(factor) or factor <= 0.0:
+        base.update(
+            {
+                "status": "identity-invalid-evidence-record",
+                "reason": "dnu_correction.factor must be a positive finite number.",
+            }
+        )
+        return base
+
+    evidence = record.get("evidence")
+    if not isinstance(evidence, dict):
+        base.update(
+            {
+                "status": "identity-invalid-evidence-record",
+                "reason": "dnu_correction.evidence must describe the correction reference and applicability.",
+            }
+        )
+        return base
+    reference = _nonempty_text(evidence.get("reference"))
+    applicability = _nonempty_text(evidence.get("applicability"))
+    if reference is None or applicability is None:
+        base.update(
+            {
+                "status": "identity-invalid-evidence-record",
+                "reason": "dnu_correction.evidence requires nonblank reference and applicability fields.",
+            }
+        )
+        return base
+
+    scaling_dnu = float(base["raw_dnu_uhz"]) * factor
+    if not math.isfinite(scaling_dnu) or scaling_dnu <= 0.0:
+        base.update(
+            {
+                "status": "identity-invalid-evidence-record",
+                "reason": "dnu_correction.factor produces an invalid corrected Delta-nu.",
+            }
+        )
+        return base
+    base.update(
+        {
+            "factor": factor,
+            "applied": factor != 1.0,
+            "scaling_dnu_uhz": scaling_dnu,
+            "evidence": {"reference": reference, "applicability": applicability},
+            "status": (
+                "corrected-evidence-backed-input"
+                if factor != 1.0
+                else "identity-evidence-backed-input"
+            ),
+        }
+    )
+    return base
 
 
 def _adapter_run_dir(workspace: CandidateWorkspace, engine: str) -> Tuple[str, Path]:
@@ -529,7 +909,7 @@ def _run_pysyd_adapter(
         crosscheck = {
             "pipeline": "pysyd",
             "estimates": _read_pysyd_estimates(estimates_path),
-            "search_range_uhz": [float(numax_min_uhz), float(numax_max_uhz)],
+            "requested_search_range_uhz": [float(numax_min_uhz), float(numax_max_uhz)],
         }
     except Exception as exc:
         manifest_path = _write_adapter_manifest(
@@ -598,14 +978,14 @@ def _synthetic_oscillation_table() -> Dict[str, np.ndarray]:
     numax_demo_uhz = 250.0
     dnu_demo_uhz = 40.0
     envelope_sigma_uhz = 2.5 * dnu_demo_uhz
-    cadence_days = 120.0 / 86400.0
+    cadence_days = 120.0 / SECONDS_PER_DAY
     time = np.arange(0.0, 27.0, cadence_days)
     flux = np.ones_like(time)
     for harmonic in range(-4, 5):
         amplitude = 120e-6 * math.exp(
             -((harmonic * dnu_demo_uhz) ** 2) / (2.0 * envelope_sigma_uhz**2)
         )
-        frequency_cpd = (numax_demo_uhz + harmonic * dnu_demo_uhz) * MICROHZ_PER_CPD
+        frequency_cpd = (numax_demo_uhz + harmonic * dnu_demo_uhz) * CPD_PER_UHZ
         flux = flux + amplitude * np.sin(2.0 * np.pi * frequency_cpd * time)
     flux = flux + rng.normal(0.0, 30e-6, size=time.shape)
     flux_err = np.full_like(flux, 30e-6)
@@ -623,7 +1003,37 @@ def run_asteroseismology(
     numax_min_uhz: float = 100.0,
     numax_max_uhz: float = 1600.0,
 ) -> Path:
-    """Run the asteroseismic pipeline and write outputs/asteroseismic_results.json."""
+    """Run the candidate-local exploratory asteroseismology workflow.
+
+    The runner loads provenance-bound photometry, masks transits only when a
+    complete candidate-derived ephemeris is available, estimates the native
+    PSD envelope, records scaling results and sanity checks, and preserves
+    optional adapter status.
+
+    Args:
+        workspace (CandidateWorkspace): Workspace that owns photometry, stellar
+            parameters, provenance, adapter runs, and output artifacts.
+        numax_min_uhz (float): Requested lower envelope-search bound in
+            microhertz.
+        numax_max_uhz (float): Requested upper envelope-search bound in
+            microhertz.
+
+    Returns:
+        Path: Candidate-local ``outputs/asteroseismic_results.json`` with
+        provenance, native diagnostics, optional adapter manifests, and stated
+        calibration limits.
+
+    Raises:
+        RuntimeError: Required candidate photometry or stellar parameters are
+            unavailable, or a required candidate ephemeris is unsuitable.
+        ValueError: The requested search bounds or usable PSD inputs are invalid.
+        OSError: Candidate-local output or adapter artifacts cannot be written.
+
+    Note:
+        The result is explicitly exploratory.  It does not provide calibrated
+        detection probabilities, an automatic validation constraint, or a
+        lifecycle transition.
+    """
     outputs_dir = workspace.path / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -637,7 +1047,7 @@ def run_asteroseismology(
     ephemeris = load_transit_ephemeris(workspace)
     cadence_seconds = 120.0
     if time.size > 1:
-        cadence_seconds = float(np.median(np.diff(np.sort(time)))) * 86400.0
+        cadence_seconds = float(np.median(np.diff(np.sort(time)))) * SECONDS_PER_DAY
     required_fields = ("period_days", "epoch_btjd", "duration_days")
     can_mask_transits = ephemeris.get("source") != "synthetic-demo" and all(
         ephemeris.get("field_sources", {}).get(field) != "synthetic-demo"
@@ -668,19 +1078,29 @@ def run_asteroseismology(
         detrended_time, detrended_flux, numax_min_uhz, numax_max_uhz
     )
     stellar_params = load_stellar_parameters(workspace)
+    dnu_correction = _resolve_dnu_correction(
+        stellar_params,
+        envelope["dnu_candidate_uhz"],
+        _stellar_parameters_artifact(workspace),
+    )
     seismic = seismic_mass_radius(
         envelope["numax_candidate_uhz"],
         envelope["dnu_candidate_uhz"],
         stellar_params["teff_k"],
         mass_prior_solar=stellar_params["mass_solar"],
         radius_prior_solar=stellar_params["radius_solar"],
+        dnu_correction_factor=dnu_correction["factor"],
     )
     sanity = seismic_sanity_check(
         seismic,
         radius_prior_solar=stellar_params["radius_solar"],
         prior_is_catalog=stellar_params.get("source") == "candidate-data",
     )
-    uncertainty = seismic_uncertainty_summary(envelope, stellar_params)
+    uncertainty = seismic_uncertainty_summary(
+        envelope,
+        stellar_params,
+        dnu_correction_factor=dnu_correction["factor"],
+    )
 
     pysyd_adapter = _run_pysyd_adapter(
         workspace, detrended_time, detrended_flux, numax_min_uhz, numax_max_uhz
@@ -711,11 +1131,24 @@ def run_asteroseismology(
             )
         ),
         "pipeline": "pysyd-crosscheck" if pysyd_result else "whitened-gls-psd",
-        "search_range_uhz": [float(numax_min_uhz), float(numax_max_uhz)],
+        "search_range_uhz": [
+            float(envelope["numax_min_used"]),
+            float(envelope["numax_max_used"]),
+        ],
+        "requested_search_range_uhz": [
+            float(envelope["numax_min_requested_uhz"]),
+            float(envelope["numax_max_requested_uhz"]),
+        ],
+        "numax_search_bounds": {
+            "supported_range_uhz": [PSD_MIN_UHZ, PSD_MAX_UHZ],
+            "lower_clipped": bool(envelope["numax_min_clipped"]),
+            "upper_clipped": bool(envelope["numax_max_clipped"]),
+        },
         "numax_uhz": envelope["numax_candidate_uhz"],
         "envelope_peak_ratio": envelope["envelope_peak_ratio"],
         "dnu_uhz": envelope["dnu_candidate_uhz"],
         "dnu_correlation": envelope["dnu_correlation"],
+        "dnu_correction": dnu_correction,
         "rayleigh_uhz": envelope["rayleigh_uhz"],
         "n_points_analyzed": int(detrended_time.size),
         "baseline_days": envelope["baseline_days"],

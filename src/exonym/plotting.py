@@ -1,7 +1,13 @@
-"""Headless diagnostic vetting figure generation.
+"""Headless diagnostic figure generation for candidate-local review.
 
-All routines enforce headless rendering (`matplotlib.use('Agg')`) to run cleanly
-in automated pipelines and CI/CD without requiring display servers.
+All routines enforce a non-interactive matplotlib backend so the same plotting
+code runs in automated workflows and continuous integration without a display
+server. Inputs are already-produced candidate-local artifacts; plotting neither
+refits a model nor changes the evidence chain.
+
+Scientific boundary:
+    Figures make retained measurements and uncertainties inspectable, but image
+    appearance is not an additional statistical test or a validation claim.
 """
 
 from __future__ import annotations
@@ -10,7 +16,9 @@ from pathlib import Path
 from typing import List, Optional, Sequence
 
 import matplotlib
-matplotlib.use("Agg")  # Enforce non-interactive headless backend
+# DIAGNOSTIC_REASONING: Rendering must be reproducible in non-interactive
+# execution contexts; a GUI backend would couple evidence review to a display.
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 

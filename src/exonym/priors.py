@@ -1,4 +1,11 @@
-"""Preserve and normalize ExoFOP transit priors in candidate-owned evidence."""
+"""Preserve catalog transit-prior retrievals as candidate-owned evidence.
+
+The module stores the unmodified provider response, retrieval metadata, a
+content digest, and a normalized signal configuration.  Normalization changes
+only representation, including an explicitly recorded source-time conversion;
+it does not create missing ephemeris values or convert a catalog record into a
+scientific claim.
+"""
 
 from __future__ import annotations
 
@@ -126,13 +133,29 @@ def _normalized_rows(raw_csv: str, tic_id: object) -> Tuple[List[Dict[str, Any]]
 def fetch_exofop_priors(workspace: CandidateWorkspace) -> List[Path]:
     """Fetch ExoFOP priors with raw-response and normalization provenance.
 
-    Returns paths to the normalized signal configuration files. The exact CSV,
-    retrieval metadata, and manifest remain append-only under the candidate
-    workspace even when a later retrieval replaces a normalized config.
+    The provider CSV is retained byte-for-byte before matching rows to the
+    workspace catalog identifier.  Finite source period, epoch, depth, and
+    duration fields are copied to candidate-local signal configurations with
+    source row numbers and SHA-256-linked retrieval metadata.
+
+    Args:
+        workspace (CandidateWorkspace): Workspace whose metadata supplies the
+            catalog identifier used to select provider rows.
+
+    Returns:
+        List[Path]: Paths to normalized candidate-local signal configuration
+        files.  The raw CSV, response metadata, and manifest remain retained
+        even if a later retrieval replaces a normalized configuration.
 
     Raises:
-        ValueError: If the candidate has no TIC identifier.
-        RuntimeError: If ExoFOP returns a non-success HTTP status.
+        ValueError: The workspace lacks the required catalog identifier.
+        RuntimeError: The provider returns a non-success HTTP status.
+        OSError: The network request or candidate-local evidence write fails.
+
+    Note:
+        Provider values are externally supplied priors.  Downstream workflows
+        must evaluate their own candidate-local evidence rather than treating
+        this retrieval as discovery or validation.
     """
     tic_id = workspace.metadata.get("identifiers", {}).get("tic")
     if not tic_id:
@@ -169,6 +192,8 @@ def fetch_exofop_priors(workspace: CandidateWorkspace) -> List[Path]:
         },
     )
 
+    # SCIENTIFIC_BOUNDARY: Persisted raw-response provenance keeps normalized
+    # provider values auditable without elevating them to a scientific claim.
     signals, skipped_rows = _normalized_rows(raw_csv, tic_id)
     manifest = {
         "schema_version": 1,

@@ -40,9 +40,9 @@ Phase-Specific Gate Policies
 * **acquisition**: Every raw FITS product under ``data/raw/`` must have a
   schema-valid, SHA-256 hash-matched provenance sidecar
   (``<stem>.provenance.json``).
-* **analysis**: Intentionally and permanently blocked. The PRF scene model is
-  uncalibrated and TRICERATOPS integration is pending; no hand-written claim
-  file can unlock this gate.
+* **analysis**: Intentionally and permanently blocked. Calibrated PRF
+  scene-model constraints are not yet integrated into the TRICERATOPS claim
+  path, so no hand-written claim file can unlock this gate.
 * **review**: Additionally locks the lifecycle to ``published`` on successful
   advancement.
 
@@ -92,7 +92,12 @@ NOVELTY_AUDIT_REQUIRED_PROVIDERS = frozenset(("nasa-toi", "nasa-confirmed", "exo
 
 
 class GateError(RuntimeError):
-    """Raised when a phase gate blocks advancement."""
+    """Raised when lifecycle mutation or workflow advancement is disallowed.
+
+    The message identifies an unmet checklist, provenance, novelty, lifecycle,
+    or programmatic gate requirement so callers can preserve the candidate's
+    existing state and record the appropriate evidence.
+    """
 
 
 def _now() -> str:
@@ -101,7 +106,10 @@ def _now() -> str:
 
 def _write_metadata(workspace: CandidateWorkspace, metadata: Dict) -> None:
     path = workspace.path / METADATA_FILENAME
-    path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _append_event(workspace: CandidateWorkspace, event: Dict) -> None:
@@ -109,7 +117,7 @@ def _append_event(workspace: CandidateWorkspace, event: Dict) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     events = directory / "events.jsonl"
     with events.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event, sort_keys=True) + "\n")
+        handle.write(json.dumps(event, sort_keys=True, allow_nan=False) + "\n")
 
 
 def next_phase(phase: str) -> Optional[str]:
@@ -287,7 +295,7 @@ def _raw_product_provenance_error(
         }
         try:
             sidecar.write_text(
-                json.dumps(auto_record, indent=2, sort_keys=True) + "\n",
+                json.dumps(auto_record, indent=2, sort_keys=True, allow_nan=False) + "\n",
                 encoding="utf-8",
             )
         except OSError as exc:
@@ -406,59 +414,21 @@ def _gate_provenance_ready(workspace: CandidateWorkspace) -> Tuple[bool, str]:
 
 
 def _gate_fpp_claim(workspace: CandidateWorkspace, threshold: float = 0.01) -> Tuple[bool, str]:
-    """Gate analysis advancement on available FPP diagnostic evidence.
+    """Block FPP claims until calibrated scene-model integration is available.
 
-    Checks for the presence of FPP-relevant diagnostic outputs (TRICERATOPS
-    results, manual FPP claims) in the candidate workspace. The gate is no
-    longer unconditionally blocked; it gates on available evidence.
+    A real Monte Carlo result is necessary but not sufficient for a validation
+    claim. The current pipeline does not feed calibrated PRF scene constraints
+    into the claim path, so neither diagnostic outputs nor a hand-written FPP
+    claim may advance the analysis phase.
 
-    Parameters
-    ----------
-    workspace : CandidateWorkspace
-        The candidate workspace.
-    threshold : float, optional
-        FPP decision threshold (default 0.01).
-
-    Returns
-    -------
-    Tuple[bool, str]
-        ``(True, summary)`` if diagnostic evidence is found, or
-        ``(False, reason)`` if no evidence is available.
+    ``workspace`` and ``threshold`` remain in the signature so future,
+    separately calibrated claim integration can retain the gate surface.
     """
-    # TRICERATOPS output takes priority as the most rigorous FPP diagnostic.
-    tri_path = workspace.path / "outputs" / "triceratops_results.json"
-    if tri_path.is_file():
-        try:
-            tri = json.loads(tri_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            tri = {}
-        fpp_value = tri.get("FPP")
-        if isinstance(fpp_value, (int, float)):
-            if fpp_value < threshold:
-                return True, "TRICERATOPS FPP {:.6f} < {:.3f}".format(fpp_value, threshold)
-            return False, "TRICERATOPS FPP ({:.6f}) exceeds threshold {:.3f}".format(fpp_value, threshold)
-        return True, "TRICERATOPS results present; FPP evidence available"
-
-    # Manual claim with FPP value.
-    claim_path = workspace.path / "claims" / "fpp_claim.json"
-    if claim_path.is_file():
-        try:
-            claim = json.loads(claim_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            claim = {}
-        fpp_value = claim.get("FPP")
-        if isinstance(fpp_value, (int, float)):
-            if fpp_value < threshold:
-                return True, "claim FPP {:.6f} < {:.3f}".format(fpp_value, threshold)
-            return False, "claim FPP ({:.6f}) exceeds threshold {:.3f}".format(fpp_value, threshold)
-        return True, "FPP claim file present; diagnostic evidence available"
-
-    # Broader diagnostic evidence: any outputs directory with content.
-    outputs_dir = workspace.path / "outputs"
-    if outputs_dir.is_dir() and any(outputs_dir.iterdir()):
-        return True, "diagnostic outputs available; proceeding with analysis"
-
-    return False, "no FPP diagnostic evidence found; produce TRICERATOPS results or a verified FPP claim"
+    return (
+        False,
+        "FPP claims are disabled until provenance-bound observed photometry and "
+        "calibrated scene constraints are integrated into TRICERATOPS.",
+    )
 
 
 def _parse_utc_timestamp(value: object) -> Optional[datetime]:
@@ -780,8 +750,8 @@ def gate_errors(workspace: CandidateWorkspace) -> List[str]:
         if not ok:
             errors.append(detail)
     elif phase == "analysis":
-        # Analysis gate checks for available FPP diagnostic evidence
-        # (TRICERATOPS results, claims, or diagnostic outputs).
+        # Analysis stays blocked until calibrated scene-model constraints can
+        # support a claim; raw FPP outputs and manual claims are insufficient.
         ok, detail = _gate_fpp_claim(workspace)
         if not ok:
             errors.append(detail)
@@ -968,6 +938,7 @@ def advance(workspace: CandidateWorkspace) -> Dict:
     gates_dir.mkdir(parents=True, exist_ok=True)
     index = len(list(gates_dir.glob("gate-*.json")))
     (gates_dir / "gate-{0:03d}-{1}.json".format(index, phase)).write_text(
-        json.dumps(gate_record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        json.dumps(gate_record, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
     )
     return event

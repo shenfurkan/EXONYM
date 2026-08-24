@@ -17,6 +17,12 @@ Physical Model:
 
 Contains zero target-specific identifiers or constants; all catalog magnitudes and
 parallaxes are loaded dynamically from the candidate workspace.
+
+Scientific Boundary:
+    The grid path requires a candidate-supplied atmosphere table; the fallback
+    is a pivot-wavelength reddened-blackbody approximation.  Neither path is a
+    response-integrated atmosphere posterior or an automatic validation
+    constraint.
 """
 
 from __future__ import annotations
@@ -30,16 +36,16 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.constants import c, h, k
-from scipy.special import logsumexp
 
+from .constants import (
+    NOMINAL_SOLAR_EFFECTIVE_TEMPERATURE_K as TEFF_SUN_K,
+    NOMINAL_SOLAR_LOGG_CGS as LOGG_SUN_CGS,
+    NOMINAL_SOLAR_RADIUS_M as RSUN_M,
+    PARSEC_M as PC_M,
+)
 from .inputs import load_photometry, load_stellar_parameters
 from .workspace import CandidateWorkspace
 
-# Physical constants (SI units)
-RSUN_M = 6.957e8                        # Solar radius in meters (IAU 2015 nominal value)
-PC_M = 3.085677581491367e16             # Parsec in meters
-TEFF_SUN_K = 5772.0                     # Solar effective temperature (Kelvin)
-LOGG_SUN_CGS = 4.438                    # Solar surface gravity log10(g [cm s^-2])
 MAG_SYSTEMATIC_FLOOR = 0.05             # Minimum systematic magnitude uncertainty floor
 
 # 2MASS (Cohen et al. 2003) & AllWISE (Wright et al. 2010) bandpass pivot wavelengths and Vega zero-point fluxes (Jy)
@@ -66,7 +72,20 @@ EXTINCTION_RATIOS: Dict[str, float] = {
 
 
 def percentile_summary(samples: np.ndarray) -> Dict[str, float]:
-    """Return p16/median/p84 summary with asymmetric error bars."""
+    """Summarize sampled values with central percentile and asymmetric errors.
+
+    Args:
+        samples (np.ndarray): Numeric posterior or Monte Carlo samples in one
+            declared physical unit.
+
+    Returns:
+        Dict[str, float]: Lower percentile, median, upper percentile, and
+        positive and negative offsets in the same unit as ``samples``.
+
+    Note:
+        This is a descriptive quantile summary; it does not assess sampler
+        convergence or turn a model approximation into a calibrated posterior.
+    """
     quantiles = np.quantile(np.asarray(samples), [0.16, 0.50, 0.84])
     return {
         "p16": float(quantiles[0]),
@@ -83,7 +102,29 @@ def blackbody_model_magnitudes(
     av_mag: float,
     band_data: Sequence[Tuple[str, float, float]],
 ) -> np.ndarray:
-    """Evaluate monochromatic Vega magnitudes at pivot wavelengths."""
+    """Evaluate a reddened blackbody approximation at band pivot wavelengths.
+
+    Mathematical Formulation:
+        The model evaluates ``F_nu = pi B_nu(Teff) (R / d)**2`` at each pivot
+        wavelength, converts to a Vega magnitude, then adds
+        ``A_lambda = A_V (A_lambda / A_V)``.  This matches the monochromatic
+        approximation described in the project's stellar-physics note.
+
+    Args:
+        teff_k (float): Effective temperature in kelvin.
+        log_radius_over_distance (float): Natural logarithm of the
+            dimensionless radius-to-distance scale.
+        av_mag (float): Visual extinction in magnitudes.
+        band_data (Sequence[Tuple[str, float, float]]): Band name, pivot
+            wavelength in microns, and Vega zero-point flux in janskys.
+
+    Returns:
+        np.ndarray: Model Vega magnitudes in the same order as ``band_data``.
+
+    Note:
+        Pivot-wavelength fluxes approximate passband-integrated photometry and
+        should not be interpreted as a response-integrated atmosphere model.
+    """
     radius_distance = math.exp(log_radius_over_distance)
     model = []
     for name, wavelength_micron, zero_jy in band_data:
@@ -106,11 +147,27 @@ def load_atmosphere_grid_model(
     workspace: CandidateWorkspace,
     band_names: Sequence[str],
 ) -> Optional[Callable[[float, float, float], np.ndarray]]:
-    """Return a generic atmosphere-grid interpolator, or None.
+    """Return a candidate-local generic atmosphere-grid interpolator, or ``None``.
 
     The grid CSV must contain ``teff_k``, ``logg_cgs``, ``feh`` columns plus
     magnitude columns named ``mag_<band>`` for the observed bands. Returns a
     callable mapping (teff_k, logg_cgs, feh) -> magnitude array.
+
+    Args:
+        workspace (CandidateWorkspace): Workspace that may own the optional
+            atmosphere-grid CSV.
+        band_names (Sequence[str]): Required observed band labels.  Each must
+            have a corresponding grid magnitude column.
+
+    Returns:
+        Optional[Callable[[float, float, float], np.ndarray]]: Interpolator
+        from effective temperature in kelvin, surface gravity in cgs log units,
+        and metallicity in dex to model magnitudes, or ``None`` if the optional
+        grid is unavailable or unusable.
+
+    Note:
+        Queries outside the linear interpolation hull use nearest-grid fallback.
+        This makes availability explicit but does not establish model adequacy.
     """
     path = workspace.path / "data" / "external" / "atmosphere_grid.csv"
     if not path.is_file():
@@ -185,6 +242,8 @@ def _fit_blackbody(
         (name, *BAND_ZERO_POINTS[name]) for name, _, _ in observations
     ]
     magnitudes = np.array([row[1] for row in observations], dtype=float)
+    # NUMERICAL_GUARD: The declared systematic floor prevents arbitrarily small
+    # catalog errors from dominating this approximate pivot-wavelength model.
     errors = np.sqrt(
         np.array([row[2] for row in observations], dtype=float) ** 2
         + MAG_SYSTEMATIC_FLOOR**2
@@ -196,7 +255,6 @@ def _fit_blackbody(
     distance_pc = 1000.0 / parallax
     teff_prior = float(stellar["teff_k"])
     initial_scale = 1.0 * RSUN_M / (distance_pc * PC_M)
-    prior_centers = np.array([teff_prior, teff_prior + 250.0])
 
     def log_probability(theta: np.ndarray) -> float:
         teff, log_scale, av = float(theta[0]), float(theta[1]), float(theta[2])
@@ -208,13 +266,7 @@ def _fit_blackbody(
         likelihood = -0.5 * np.sum(
             ((magnitudes - model) / errors) ** 2 + np.log(2.0 * np.pi * errors**2)
         )
-        components = np.array(
-            [
-                -0.5 * ((teff - center) / 150.0) ** 2 - np.log(150.0)
-                for center in prior_centers
-            ]
-        )
-        temperature_prior = logsumexp(components) - np.log(2.0)
+        temperature_prior = -0.5 * ((teff - teff_prior) / 200.0) ** 2
         extinction_prior = -0.5 * (av / 0.05) ** 2
         return float(likelihood + temperature_prior + extinction_prior)
 
@@ -223,13 +275,41 @@ def _fit_blackbody(
         log_probability, start, n_walkers, burn_in, production, seed
     )
 
+    samples = np.asarray(samples, dtype=float)
+    if samples.ndim != 2 or samples.shape[0] == 0 or not np.all(np.isfinite(samples)):
+        raise RuntimeError("blackbody SED sampler returned no finite posterior samples")
     draw_rng = np.random.default_rng(seed=seed + 1)
-    parallax_draws = draw_rng.normal(parallax, parallax_error, len(samples))
+    proposed_parallax_draws = np.asarray(
+        draw_rng.normal(parallax, parallax_error, samples.shape[0]), dtype=float
+    )
+    # NUMERICAL_GUARD: Never invert non-positive or non-finite parallax draws.
+    valid_parallax_draws = np.isfinite(proposed_parallax_draws) & (
+        proposed_parallax_draws > 0.0
+    )
+    parallax_draws = proposed_parallax_draws[valid_parallax_draws]
+    derived_samples = samples[valid_parallax_draws]
+    rejected_parallax_draws = int(proposed_parallax_draws.size - parallax_draws.size)
+    if parallax_draws.size == 0:
+        raise RuntimeError(
+            "blackbody SED fitting rejected every parallax draw as non-positive or non-finite"
+        )
     distance_draws = 1000.0 / parallax_draws
-    radius_draws = np.exp(samples[:, 1]) * distance_draws * PC_M / RSUN_M
-    luminosity_draws = radius_draws**2 * (samples[:, 0] / TEFF_SUN_K) ** 4
+    radius_draws = np.exp(derived_samples[:, 1]) * distance_draws * PC_M / RSUN_M
+    luminosity_draws = radius_draws**2 * (derived_samples[:, 0] / TEFF_SUN_K) ** 4
     mass_prior = float(stellar["mass_solar"])
+    if not math.isfinite(mass_prior) or mass_prior <= 0.0:
+        raise RuntimeError("blackbody SED fitting requires positive candidate-owned mass_solar")
     logg_draws = LOGG_SUN_CGS + np.log10(mass_prior) - 2.0 * np.log10(radius_draws)
+    if not (
+        np.all(np.isfinite(distance_draws))
+        and np.all(distance_draws > 0.0)
+        and np.all(np.isfinite(radius_draws))
+        and np.all(radius_draws > 0.0)
+        and np.all(np.isfinite(luminosity_draws))
+        and np.all(luminosity_draws > 0.0)
+        and np.all(np.isfinite(logg_draws))
+    ):
+        raise RuntimeError("blackbody SED fitting produced invalid derived posterior samples")
 
     median = np.median(samples, axis=0)
     model_at_median = blackbody_model_magnitudes(
@@ -263,6 +343,18 @@ def _fit_blackbody(
             "degrees_of_freedom": len(observations) - 3,
             "acceptance_fraction_mean": float(np.mean(sampler.acceptance_fraction)),
             "retained_samples": int(len(samples)),
+            "parallax_draws": {
+                "proposed_count": int(proposed_parallax_draws.size),
+                "accepted_positive_finite_count": int(parallax_draws.size),
+                "rejected_nonpositive_or_nonfinite_count": rejected_parallax_draws,
+                "rejection_rate": float(
+                    rejected_parallax_draws / proposed_parallax_draws.size
+                ),
+                "policy": (
+                    "non-positive or non-finite draws are rejected before "
+                    "distance-derived summaries"
+                ),
+            },
         },
         "samples": samples,
     }
@@ -278,6 +370,8 @@ def _fit_grid(
     seed: int = 7,
 ) -> Dict[str, Any]:
     magnitudes = np.array([row[1] for row in observations], dtype=float)
+    # NUMERICAL_GUARD: Apply the same magnitude-error floor to both model paths
+    # so a grid lookup is not given unbounded weight over catalog systematics.
     errors = np.sqrt(
         np.array([row[2] for row in observations], dtype=float) ** 2
         + MAG_SYSTEMATIC_FLOOR**2
@@ -394,7 +488,31 @@ def _synthetic_photometry(stellar: Dict[str, Any]) -> List[Tuple[str, float, flo
 
 
 def run_sed_fit(workspace: CandidateWorkspace) -> Path:
-    """Run the SED posterior fit and write outputs/sed_fit_results.json."""
+    """Run the candidate-local exploratory broadband SED fit.
+
+    The runner uses a candidate-supplied atmosphere grid when one has the
+    required columns; otherwise it uses the documented reddened-blackbody
+    pivot-wavelength approximation.  It records posterior quantiles, input
+    photometry, residuals, sampler diagnostics, and model caveats.
+
+    Args:
+        workspace (CandidateWorkspace): Workspace that owns broadband
+            photometry, stellar parameters, optional grid data, and outputs.
+
+    Returns:
+        Path: Candidate-local ``outputs/sed_fit_results.json``.  The result
+        records the model path and its known approximation limits.
+
+    Raises:
+        RuntimeError: Candidate-owned photometry or required parallax data for
+            the blackbody path is unavailable or invalid.
+        OSError: Candidate-local output artifacts cannot be written.
+
+    Note:
+        The fit is an exploratory color diagnostic.  It does not provide a
+        calibrated atmosphere posterior, a validation constraint, or a
+        lifecycle decision.
+    """
     outputs_dir = workspace.path / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
     stellar = load_stellar_parameters(workspace)
@@ -410,6 +528,8 @@ def run_sed_fit(workspace: CandidateWorkspace) -> Path:
         grid_used = True
     grid_load_failed = not grid_used and (workspace.path / "data" / "external" / "atmosphere_grid.csv").is_file()
 
+    # SCIENTIFIC_BOUNDARY: The fallback is recorded as a blackbody approximation
+    # rather than being presented as an atmosphere-grid inference.
     fit = (
         _fit_grid(observations, grid_model, stellar)  # type: ignore[arg-type]
         if grid_used

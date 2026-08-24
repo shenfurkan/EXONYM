@@ -1,8 +1,15 @@
-"""Candidate-local radial-velocity ingestion and Keplerian model comparison.
+"""Preserve candidate-local radial velocities and compare fixed-period models.
 
-Observation times are BJD_TDB days. Velocities and their uncertainties are
-metres per second. The fitted Keplerian is descriptive dynamical evidence: it
-does not create a claim or change a candidate disposition.
+Observation times use BJD_TDB days; velocities and quoted uncertainties use
+metres per second.  The Keplerian component follows
+``v(t) = gamma + K [cos(nu(t) + omega) + e cos(omega)]`` after solving
+Kepler's equation.  The fitting path compares that component with a
+nuisance-controlled constant model that shares instrument offsets, jitter,
+linear trend, and an optional homogeneous activity indicator.
+
+Information-criterion differences are descriptive model-comparison evidence.
+They are not false-positive probabilities, a companion-mass inference, a
+planet claim, or a lifecycle decision.
 """
 
 from __future__ import annotations
@@ -30,6 +37,7 @@ MAX_INGEST_BYTES = 10 * 1024 * 1024
 _TAU = 2.0 * math.pi
 KEPLER_SOLVER_TOLERANCE_RAD = 1e-12
 KEPLER_SOLVER_MAX_ITERATIONS = 64
+MAXIMUM_FIT_ECCENTRICITY = 0.95
 RV_MODEL_CONFIGURATION = "instrument-jitter-linear-trend-optional-activity-v1"
 
 
@@ -116,13 +124,34 @@ def _observation_path(workspace: CandidateWorkspace) -> Path:
 
 
 def ingest_radial_velocity_observations(workspace: CandidateWorkspace, source_path: Path) -> Path:
-    """Validate and atomically canonicalize an RV observation JSON file below a workspace."""
+    """Validate and atomically canonicalize one candidate-owned RV record.
+
+    Args:
+        workspace (CandidateWorkspace): Registered workspace that will own the
+            canonical observation record.
+        source_path (Path): Regular UTF-8 JSON file to validate against the RV
+            observation schema before copying it into the workspace.
+
+    Returns:
+        Path: Canonical candidate-local RV observation path.  It is consumed by
+        :func:`fit_radial_velocity` and retains the schema-normalized units.
+
+    Raises:
+        ValueError: The source is not a bounded regular JSON file, has duplicate
+            keys or non-finite numbers, violates the schema, or belongs to a
+            different workspace.
+        RuntimeError: JSON Schema validation support is unavailable.
+        OSError: The validated record cannot be atomically written.
+    """
     record = _validate_observation_record(workspace, _read_safe_json(Path(source_path)))
     destination = _observation_path(workspace)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(destination.name + ".tmp")
     try:
-        temporary.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.write_text(
+            json.dumps(record, indent=2, sort_keys=True, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
         temporary.replace(destination)
     finally:
         if temporary.exists():
@@ -131,7 +160,22 @@ def ingest_radial_velocity_observations(workspace: CandidateWorkspace, source_pa
 
 
 def load_radial_velocity_observations(workspace: CandidateWorkspace) -> Dict[str, Any]:
-    """Load the one validated candidate-local RV observation record."""
+    """Load and revalidate the canonical candidate-local RV record.
+
+    Args:
+        workspace (CandidateWorkspace): Workspace that owns the canonical
+            BJD_TDB and metres-per-second observation record.
+
+    Returns:
+        Dict[str, Any]: Schema-valid observation mapping, including candidate
+        identity, instrument labels, times, velocities, and uncertainties.
+
+    Raises:
+        FileNotFoundError: No RV observation record has been ingested.
+        ValueError: The stored JSON is malformed, non-finite, schema-invalid,
+            or no longer matches the workspace identity.
+        RuntimeError: JSON Schema validation support is unavailable.
+    """
     path = _observation_path(workspace)
     if not path.is_file():
         raise FileNotFoundError("no candidate-local RV observations have been ingested")
@@ -194,7 +238,39 @@ def keplerian_velocity_m_per_s(
     reference_time_bjd_tdb: float,
     period_days: float,
 ) -> np.ndarray:
-    """Evaluate a Keplerian radial-velocity curve in m/s at BJD_TDB days."""
+    """Evaluate the stellar Keplerian radial-velocity component in m/s.
+
+    Mathematical Formulation:
+        Mean anomaly advances as ``M(t) = M_ref + 2 pi (t - t_ref) / P``.
+        The solver obtains eccentric anomaly from ``M = E - e sin(E)`` and
+        evaluates ``K [cos(nu + omega) + e cos(omega)]``.  This is the
+        fixed-period eccentric model documented in the RV comparison method.
+
+    Args:
+        time_bjd_tdb (Sequence[float]): Finite observation times in BJD_TDB
+            days.
+        semi_amplitude_m_per_s (float): Non-negative velocity semi-amplitude
+            in metres per second.
+        mean_anomaly_reference_rad (float): Mean anomaly at the reference time
+            in radians.
+        eccentricity (float): Dimensionless eccentricity in the bound-orbit
+            interval from zero up to, but excluding, one.
+        argument_periastron_rad (float): Stellar-orbit periastron argument in
+            radians.
+        reference_time_bjd_tdb (float): Epoch of the reference mean anomaly in
+            BJD_TDB days.
+        period_days (float): Positive fixed orbital period in days.
+
+    Returns:
+        np.ndarray: Model radial velocities in metres per second, aligned with
+        the supplied observation times.
+
+    Raises:
+        ValueError: Times or scalar parameters are non-finite, the period is
+            not positive, or the eccentricity is outside the bound-orbit range.
+        RuntimeError: Newton iteration does not meet its declared angular
+            residual tolerance at every cadence.
+    """
     scalar_values = (
         semi_amplitude_m_per_s,
         mean_anomaly_reference_rad,
@@ -338,7 +414,9 @@ def _eccentricity_components(theta: np.ndarray, component_start: int) -> Tuple[f
     first = float(theta[component_start])
     second = float(theta[component_start + 1])
     norm_squared = first * first + second * second
-    eccentricity = 0.95 * norm_squared / (1.0 + norm_squared)
+    # NUMERICAL_GUARD: This bounded Cartesian parameterization keeps optimizer
+    # proposals inside the elliptic-orbit domain required by Kepler's equation.
+    eccentricity = MAXIMUM_FIT_ECCENTRICITY * norm_squared / (1.0 + norm_squared)
     argument = math.atan2(second, first) if norm_squared > 0 else 0.0
     return eccentricity, argument, first, second
 
@@ -352,11 +430,45 @@ def fit_radial_velocity(
     period_days: float,
     period_uncertainty_days: Optional[float] = None,
 ) -> Path:
-    """Fit constant and eccentric Keplerian RV models at a fixed period in days.
+    """Compare constant and eccentric Keplerian RV models at a fixed period.
 
-    The period is an explicit user-supplied dynamical input, not a claim. The
-    report retains the observation hash, units, covariance-derived uncertainties,
-    and information-criterion comparison for later human review.
+    Mathematical Formulation:
+        Each model uses ``sigma_eff**2 = sigma_quoted**2 + jitter**2`` in an
+        independent Gaussian likelihood.  The Keplerian adds the eccentric
+        velocity component while retaining the constant model's instrument
+        offsets, linear trend, and optional activity regression.  The report
+        computes AIC and BIC from those likelihoods, including
+        ``Delta BIC = BIC_constant - BIC_keplerian``.
+
+    Astrophysical Rationale:
+        Shared nuisance terms reduce the chance that a Keplerian merely absorbs
+        an instrument offset, drift, contemporaneous activity correlation, or
+        underestimated quoted uncertainty.
+
+    Args:
+        workspace (CandidateWorkspace): Workspace containing validated
+            candidate-local RV observations.
+        period_days (float): Positive fixed period in days.  This function does
+            not search or marginalize over a period grid.
+        period_uncertainty_days (Optional[float]): Positive reported input
+            uncertainty in days, retained as provenance when available.
+
+    Returns:
+        Path: Candidate-local ``outputs/rv_keplerian_fit.json`` with input
+        hashes, formal local covariance summaries, model statistics, and a run
+        manifest.
+
+    Raises:
+        ValueError: The period, observations, activity indicators, or model
+            dimensionality are invalid.
+        FileNotFoundError: Validated candidate-local RV observations are absent.
+        RuntimeError: The Keplerian solver, JSON Schema support, or optimizer
+            cannot produce a valid fit.
+
+    Note:
+        The fit uses a local inverse-Hessian uncertainty approximation and
+        independent residual likelihood.  It does not model correlated noise,
+        additional companions, or establish a validation probability.
     """
     from scipy.optimize import minimize
 
@@ -688,18 +800,36 @@ def fit_radial_velocity(
                 "tolerance_rad": KEPLER_SOLVER_TOLERANCE_RAD,
                 "max_iterations": KEPLER_SOLVER_MAX_ITERATIONS,
             },
+            "eccentricity_parameterization": {
+                "coordinates": "unbounded Cartesian optimizer coordinates (x, y)",
+                "mapping": "e = 0.95 * (x^2 + y^2) / (1 + x^2 + y^2)",
+                "maximum_eccentricity_exclusive": MAXIMUM_FIT_ECCENTRICITY,
+                "numerical_rationale": (
+                    "The bounded mapping keeps all optimizer proposals away from the "
+                    "parabolic e=1 boundary, where Kepler solving and local curvature "
+                    "estimates become poorly conditioned."
+                ),
+                "scientific_limitation": (
+                    "This is a numerical support restriction, not an astrophysical "
+                    "eccentricity prior; fits requiring e near or above 0.95 need a "
+                    "separate model and review."
+                ),
+            },
         },
         "caveat": "This candidate-local RV fit is non-claim evidence and does not determine scientific disposition or lifecycle state. The optional activity term tests only a contemporaneous linear correlation in the supplied indicator; it is not an activity model, and the jitter/trend terms do not establish a companion.",
     }
     output_path = workspace.path / "outputs" / RV_FIT_FILENAME
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    output_path.write_text(
+        json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
 
     run_digest = hashlib.sha256(
         (
             input_hash
             + RV_MODEL_CONFIGURATION
-            + json.dumps(report["fixed_orbital_inputs"], sort_keys=True)
+            + json.dumps(report["fixed_orbital_inputs"], sort_keys=True, allow_nan=False)
         ).encode("utf-8")
     ).hexdigest()
     run_id = "fit-" + run_digest[:16]
@@ -725,6 +855,7 @@ def fit_radial_velocity(
         ],
     }
     (run_dir / "engine-run.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
     )
     return output_path

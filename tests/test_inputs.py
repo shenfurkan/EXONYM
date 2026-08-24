@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from exonym.inputs import _time_values_to_btjd_tdb, load_light_curve_table, load_transit_ephemeris
-from exonym.detrending import detrend_candidate
+from exonym.detrending import detrend_candidate, transit_mask_from_ephemeris
 from exonym.workspace import create_candidate
 
 
@@ -135,8 +135,22 @@ def test_detrended_loader_requires_hash_bound_raw_provenance(tmp_path):
         ),
         encoding="utf-8",
     )
+    (workspace.path / "config" / "transit_config.json").write_text(
+        json.dumps(
+            {
+                "period_days": 3.0,
+                "epoch_btjd": 1.0,
+                "duration_days": 0.12,
+                "depth_ppm": 1000.0,
+                "time_system": "BTJD_TDB",
+            }
+        ),
+        encoding="utf-8",
+    )
+    ephemeris = load_transit_ephemeris(workspace)
     time = np.linspace(0.0, 8.0, 101)
     flux = 1.0 + 0.001 * np.sin(time)
+    transit_mask = transit_mask_from_ephemeris(time, ephemeris)
     detrend_candidate(
         workspace,
         time,
@@ -144,6 +158,8 @@ def test_detrended_loader_requires_hash_bound_raw_provenance(tmp_path):
         window_days=0.5,
         sector=np.full(time.size, 1, dtype=int),
         input_products=[{"path": "data/raw/source.fits", "sha256": raw_digest}],
+        transit_mask=transit_mask,
+        transit_mask_ephemeris=ephemeris,
     )
 
     table = load_light_curve_table(
@@ -162,6 +178,114 @@ def test_detrended_loader_requires_hash_bound_raw_provenance(tmp_path):
     with pytest.raises(ValueError, match="raw provenance"):
         load_light_curve_table(
             workspace,
+            require_raw_provenance=True,
+            detrending_method="running-median",
+        )
+
+
+def test_detrended_loader_rejects_unbound_and_legacy_manifests(tmp_path):
+    workspace = create_candidate(tmp_path, "detrended-loader-unbound")
+    raw_path = workspace.path / "data" / "raw" / "source.fits"
+    raw_path.write_bytes(b"synthetic raw product")
+    raw_digest = hashlib.sha256(raw_path.read_bytes()).hexdigest()
+    raw_path.with_name("source.provenance.json").write_text(
+        json.dumps(
+            {
+                "source_uri": "https://example.invalid/source",
+                "download_timestamp_utc": "2026-01-01T00:00:00Z",
+                "sha256": raw_digest,
+                "fetched_by": "test",
+            }
+        ),
+        encoding="utf-8",
+    )
+    time = np.linspace(0.0, 8.0, 101)
+    result = detrend_candidate(
+        workspace,
+        time,
+        1.0 + 0.001 * np.sin(time),
+        window_days=0.5,
+        sector=np.full(time.size, 1, dtype=int),
+        input_products=[{"path": "data/raw/source.fits", "sha256": raw_digest}],
+    )
+
+    with pytest.raises(ValueError, match="regenerate with `exonym detrend`"):
+        load_light_curve_table(workspace, detrending_method="running-median")
+
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = 1
+    manifest["configuration"] = {"window_days": 0.5}
+    result.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="legacy manifest; regenerate with `exonym detrend`"):
+        load_light_curve_table(workspace, detrending_method="running-median")
+
+
+def test_detrended_loader_rejects_a_changed_transit_mask_ephemeris(tmp_path):
+    workspace = create_candidate(tmp_path, "detrended-mask-provenance")
+    raw_path = workspace.path / "data" / "raw" / "source.fits"
+    raw_path.write_bytes(b"synthetic raw product")
+    raw_digest = hashlib.sha256(raw_path.read_bytes()).hexdigest()
+    raw_path.with_name("source.provenance.json").write_text(
+        json.dumps(
+            {
+                "source_uri": "https://example.invalid/source",
+                "download_timestamp_utc": "2026-01-01T00:00:00Z",
+                "sha256": raw_digest,
+                "fetched_by": "test",
+            }
+        ),
+        encoding="utf-8",
+    )
+    ephemeris_path = workspace.path / "config" / "transit_config.json"
+
+    def write_ephemeris(epoch_btjd):
+        ephemeris_path.write_text(
+            json.dumps(
+                {
+                    "period_days": 3.0,
+                    "epoch_btjd": epoch_btjd,
+                    "duration_days": 0.12,
+                    "depth_ppm": 1000.0,
+                    "time_system": "BTJD_TDB",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    write_ephemeris(1.0)
+    ephemeris = load_transit_ephemeris(workspace)
+    time = np.linspace(0.0, 8.0, 101)
+    flux = 1.0 + 0.001 * np.sin(time)
+    transit_mask = transit_mask_from_ephemeris(time, ephemeris)
+    result = detrend_candidate(
+        workspace,
+        time,
+        flux,
+        window_days=0.5,
+        sector=np.full(time.size, 1, dtype=int),
+        input_products=[{"path": "data/raw/source.fits", "sha256": raw_digest}],
+        transit_mask=transit_mask,
+        transit_mask_ephemeris=ephemeris,
+    )
+
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    provenance = manifest["configuration"]["transit_mask_provenance"]
+    assert provenance["ephemeris"]["epoch_btjd"] == 1.0
+    assert len(provenance["ephemeris_sha256"]) == 64
+    assert len(provenance["mask_sha256"]) == 64
+    unchanged = load_light_curve_table(
+        workspace,
+        max_points=None,
+        require_raw_provenance=True,
+        detrending_method="running-median",
+    )
+    assert unchanged is not None
+
+    write_ephemeris(1.1)
+    with pytest.raises(ValueError, match="transit mask provenance is stale or mismatched"):
+        load_light_curve_table(
+            workspace,
+            max_points=None,
             require_raw_provenance=True,
             detrending_method="running-median",
         )

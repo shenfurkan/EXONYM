@@ -14,20 +14,91 @@
     "artifact",
     "input_products"
   ],
-  "properties": {
-    "schema_version": { "const": 1 },
-    "candidate_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
-    "generated_utc": { "type": "string", "format": "date-time" },
-    "method": { "type": "string", "enum": ["running-median", "wotan", "celerite"] },
-    "backend_version": { "type": ["string", "null"] },
-    "configuration": {
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "transit_mask_ephemeris": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "mask_definition", "time_system", "source", "period_days", "epoch_btjd", "duration_days", "field_sources"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "mask_definition": {"const": "nearest-ephemeris-centre-within-half-duration-v1"},
+        "time_system": {"const": "BTJD_TDB"},
+        "source": {"type": "string", "minLength": 1},
+        "period_days": {"type": "number", "exclusiveMinimum": 0},
+        "epoch_btjd": {"type": "number"},
+        "duration_days": {"type": "number", "exclusiveMinimum": 0},
+        "field_sources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["period_days", "epoch_btjd", "duration_days"],
+          "properties": {
+            "period_days": {"type": "string", "minLength": 1},
+            "epoch_btjd": {"type": "string", "minLength": 1},
+            "duration_days": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "transit_mask_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "mask_definition", "ephemeris", "ephemeris_sha256", "mask_sha256"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "mask_definition": {"const": "nearest-ephemeris-centre-within-half-duration-v1"},
+        "ephemeris": {"$ref": "#/$defs/transit_mask_ephemeris"},
+        "ephemeris_sha256": {"$ref": "#/$defs/sha256"},
+        "mask_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "v1_configuration": {
       "type": "object",
       "required": ["window_days"],
       "additionalProperties": false,
       "properties": {
-        "window_days": { "type": "number", "exclusiveMinimum": 0 }
+        "window_days": {"type": "number", "exclusiveMinimum": 0}
       }
     },
+    "v2_configuration": {
+      "type": "object",
+      "required": ["window_days", "transit_mask_applied", "masked_fraction", "transit_mask_provenance"],
+      "additionalProperties": false,
+      "properties": {
+        "window_days": {"type": "number", "exclusiveMinimum": 0},
+        "transit_mask_applied": {"type": "boolean"},
+        "masked_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "transit_mask_provenance": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/transit_mask_provenance"}
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"transit_mask_applied": {"const": true}}, "required": ["transit_mask_applied"]},
+          "then": {"properties": {"transit_mask_provenance": {"$ref": "#/$defs/transit_mask_provenance"}}}
+        },
+        {
+          "if": {"properties": {"transit_mask_applied": {"const": false}}, "required": ["transit_mask_applied"]},
+          "then": {
+            "properties": {
+              "masked_fraction": {"const": 0},
+              "transit_mask_provenance": {"type": "null"}
+            }
+          }
+        }
+      ]
+    }
+  },
+  "properties": {
+    "schema_version": { "enum": [1, 2] },
+    "candidate_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "generated_utc": { "type": "string", "format": "date-time" },
+    "method": { "type": "string", "enum": ["running-median", "wotan", "celerite"] },
+    "backend_version": { "type": ["string", "null"] },
+    "configuration": {},
     "input": {
       "type": "object",
       "required": ["cadences", "finite_cadences", "sha256"],
@@ -60,5 +131,19 @@
         }
       }
     }
-  }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "schema_version": {"const": 1},
+        "configuration": {"$ref": "#/$defs/v1_configuration"}
+      }
+    },
+    {
+      "properties": {
+        "schema_version": {"const": 2},
+        "configuration": {"$ref": "#/$defs/v2_configuration"}
+      }
+    }
+  ]
 }

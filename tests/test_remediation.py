@@ -6,7 +6,7 @@ import json
 import numpy as np
 
 from exonym.detrending import detrend_candidate
-from exonym.remediation import remediate_candidate_drift, semantic_json_sha256
+from exonym.remediation import numerical_npz_sha256, remediate_candidate_drift, semantic_json_sha256
 from exonym.workspace import create_candidate
 
 
@@ -112,3 +112,82 @@ def test_remediation_keeps_bls_derived_config_bound_to_refreshed_manifest(tmp_pa
     assert refreshed_config["bls_provenance"]["manifest"]["sha256"] == hashlib.sha256(
         manifest_path.read_bytes()
     ).hexdigest()
+
+
+def test_remediation_preserves_existing_triage_policy_identity(tmp_path, monkeypatch):
+    workspace = create_candidate(tmp_path, "remediation-triage-policy")
+    triage_path = workspace.path / "decisions" / "automated_triage.json"
+    triage_path.write_text(
+        json.dumps(
+            {
+                "policy_id": "custom-pre-vetting-policy",
+                "policy_version": "2.4.1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def _rerun_triage(candidate, policy_id, policy_version):
+        captured.update(
+            {
+                "candidate_id": candidate.candidate_id,
+                "policy_id": policy_id,
+                "policy_version": policy_version,
+            }
+        )
+        return triage_path
+
+    monkeypatch.setattr("exonym.engines.run_automated_triage", _rerun_triage)
+
+    actions = remediate_candidate_drift(tmp_path)
+
+    assert actions[workspace.candidate_id] == ["synchronized decisions/automated_triage.json"]
+    assert captured == {
+        "candidate_id": workspace.candidate_id,
+        "policy_id": "custom-pre-vetting-policy",
+        "policy_version": "2.4.1",
+    }
+
+
+def test_remediation_skips_manifest_paths_that_escape_the_workspace(tmp_path):
+    workspace = create_candidate(tmp_path, "remediation-contained-paths")
+    external_npz = tmp_path / "outside.npz"
+    np.savez(external_npz, time=np.array([0.0, 1.0]), flux=np.array([1.0, 1.0]))
+    external_result = tmp_path / "outside.json"
+    external_result.write_text(
+        json.dumps({"generated_utc": "2026-01-01T00:00:00Z", "result": "stable"}),
+        encoding="utf-8",
+    )
+    detrending_manifest_path = workspace.path / "outputs" / "detrending_manifest.running-median.json"
+    detrending_manifest_path.write_text(
+        json.dumps(
+            {
+                "artifact": {
+                    "path": "../../outside.npz",
+                    "data_sha256": numerical_npz_sha256(external_npz),
+                    "sha256": "0" * 64,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    search_manifest_path = workspace.path / "outputs" / "bls_search_manifest.json"
+    search_manifest_path.write_text(
+        json.dumps(
+            {
+                "result_path": "../../outside.json",
+                "result_semantic_sha256": semantic_json_sha256(external_result),
+                "result_sha256": "0" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_detrending_manifest = detrending_manifest_path.read_bytes()
+    original_search_manifest = search_manifest_path.read_bytes()
+
+    actions = remediate_candidate_drift(tmp_path)
+
+    assert actions == {}
+    assert detrending_manifest_path.read_bytes() == original_detrending_manifest
+    assert search_manifest_path.read_bytes() == original_search_manifest

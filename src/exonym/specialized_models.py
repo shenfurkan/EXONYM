@@ -1,9 +1,14 @@
-"""Candidate-local adapters for optional specialized physical models.
+"""Run tightly scoped optional specialized-model adapters in candidate space.
 
-``planetsynth`` is limited to descriptive giant-planet cooling and evolution
-interpretation. ``pyPplusS`` is limited to testing a declared anomalous-transit
-hypothesis. Neither adapter writes claims, changes lifecycle state, or creates a
-scientific disposition.
+``planetsynth`` receives a declared giant-planet characterization in Jupiter
+mass and radius units, gigayears, and kelvin.  ``pyPplusS`` receives a declared
+anomalous-transit hypothesis with cadence-aligned time in days and normalized
+relative flux.  Both adapters preserve input hashes, raw package output, and
+runtime metadata before issuing a normalized report.
+
+The resulting diagnostics describe one supplied model or hypothesis.  They do
+not compare all physical explanations, create a claim, validate a planet, or
+change lifecycle state.
 """
 
 from __future__ import annotations
@@ -37,7 +42,16 @@ MAX_INPUT_BYTES = 5 * 1024 * 1024
 
 @dataclass(frozen=True)
 class AdapterRun:
-    """Paths and final status for one optional adapter invocation."""
+    """Describe the candidate-local outcome of one optional adapter invocation.
+
+    Attributes:
+        status (str): Terminal adapter status such as succeeded, failed, or
+            unavailable.  A non-success status still has a manifest path.
+        manifest_path (Path): Candidate-local engine-run manifest that records
+            inputs, runtime provenance, output digests, and any failure.
+        report_path (Optional[Path]): Normalized scientific report when the
+            adapter succeeds; otherwise ``None``.
+    """
 
     status: str
     manifest_path: Path
@@ -120,6 +134,8 @@ def _validate_planetsynth_applicability(payload: Mapping[str, Any]) -> None:
     from 0 to 3000 K. These conservative bounds prevent extrapolation from being
     presented as a model result.
     """
+    # SCIENTIFIC_BOUNDARY: The declared domain prevents an extrapolated package
+    # result from being represented as a physical interpretation.
     characterization = payload["characterization"]
     mass_mjup = _finite_value(characterization["mass_mjup"]["value"], "mass_mjup")
     radius_rjup = _finite_value(characterization["radius_rjup"]["value"], "radius_rjup")
@@ -322,10 +338,29 @@ def _unavailable_run(
 def run_planetsynth(workspace: CandidateWorkspace) -> AdapterRun:
     """Run a declared giant-planet cooling interpretation when planetsynth supports it.
 
-    The only supported package interface is ``evolve_giant_planet`` with keyword
+    The supported package interface is ``evolve_giant_planet`` with keyword
     arguments ``mass_mjup``, ``radius_rjup``, ``age_gyr``, and
-    ``equilibrium_temperature_k``. It must return finite ``radius_rjup`` and
-    ``luminosity_lsun`` values in a mapping.
+    ``equilibrium_temperature_k``.  Inputs are passed in the units declared by
+    the candidate-local schema; a successful result must provide finite radius
+    in Jupiter radii and luminosity in solar luminosities.
+
+    Args:
+        workspace (CandidateWorkspace): Workspace that owns the declared
+            characterization input and receives all run artifacts.
+
+    Returns:
+        AdapterRun: Status plus manifest path, and a normalized interpretation
+        report path only when the installed package succeeds.
+
+    Raises:
+        FileNotFoundError: The candidate-owned characterization input is absent.
+        ValueError: Input JSON, schema fields, ownership, or declared
+            applicability values are invalid.
+        RuntimeError: Schema validation support is unavailable.
+
+    Note:
+        Cooling and evolution output is descriptive downstream interpretation,
+        not a planet claim or model-selection result.
     """
     input_path, payload = _read_input(
         workspace, PLANETSYNTH_INPUT, "planetsynth-characterization.schema.json"
@@ -426,8 +461,27 @@ def run_pyppluss(workspace: CandidateWorkspace) -> AdapterRun:
     """Test a declared anomalous-transit hypothesis with pyPplusS when supported.
 
     The supported package interface is ``model_anomalous_transit(time_days=...,
-    hypothesis=...)``. It must return a mapping with a finite ``model_flux``
-    array matching the candidate-owned normalized-flux input length.
+    hypothesis=...)``.  It must return finite cadence-aligned ``model_flux``.
+    The normalized report records residual RMS and maximum absolute residual in
+    dimensionless relative flux, matching the adapter-method note.
+
+    Args:
+        workspace (CandidateWorkspace): Workspace that owns the declared
+            hypothesis, observed normalized flux, and output run directory.
+
+    Returns:
+        AdapterRun: Status plus manifest path, and a normalized hypothesis-test
+        report path only when the package interface and output are usable.
+
+    Raises:
+        FileNotFoundError: The candidate-owned hypothesis input is absent.
+        ValueError: Input JSON, schema fields, time ordering, normalized flux,
+            geometry, or package output is invalid.
+        RuntimeError: Schema validation support is unavailable.
+
+    Note:
+        This compares one declared geometry.  It is not evidence that the
+        geometry is unique or that competing astrophysical explanations fail.
     """
     input_path, payload = _read_input(
         workspace, PYPPLUSS_INPUT, "anomalous-transit-hypothesis.schema.json"

@@ -72,13 +72,15 @@
       "additionalProperties": false,
       "required": ["best_period", "best_epoch", "best_depth_ppm", "best_duration_hours", "snr", "n_distinct_transit_events"],
       "properties": {
-        "best_period": {"type": "number", "exclusiveMinimum": 0},
-        "best_epoch": {"type": "number"},
-        "best_depth_ppm": {"type": "number"},
-        "best_duration_hours": {"type": "number", "exclusiveMinimum": 0},
-        "snr": {"type": "number", "minimum": 0},
+        "best_period": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "best_epoch": {"type": ["number", "null"]},
+        "best_depth_ppm": {"type": ["number", "null"]},
+        "best_duration_hours": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "snr": {"type": ["number", "null"], "minimum": 0},
         "n_distinct_transit_events": {"type": "integer", "minimum": 0},
-        "n_period_trials": {"type": "integer", "minimum": 0}
+        "n_period_trials": {"type": "integer", "minimum": 0},
+        "detection_status": {"enum": ["detected", "no-detection"]},
+        "best_depth_uncertainty_ppm": {"type": ["number", "null"], "minimum": 0}
       }
     },
     "branch": {

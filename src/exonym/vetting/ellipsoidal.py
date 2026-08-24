@@ -1,7 +1,14 @@
-"""Out-of-transit ellipsoidal variation amplitude vetting gate.
+"""Leading-order ellipsoidal-variation screening diagnostic.
 
-Evaluates out-of-transit ellipsoidal variation amplitudes to rule out
-stellar-mass binary companions.
+The amplitude helper implements the tidal scaling summarized in the project's
+false-positive diagnostic note: companion-to-host mass ratio, stellar radius
+relative to separation, and orbital inclination set the leading-order signal.
+It provides a physically motivated warning for stellar-mass binary scenarios.
+
+Scientific boundary:
+    The leading-order approximation omits detailed stellar response and
+    correlated photometric variability. Its gate is a screening input, not a
+    companion-mass measurement or a validation conclusion.
 """
 
 from __future__ import annotations
@@ -9,6 +16,8 @@ from __future__ import annotations
 import math
 from typing import Tuple
 
+# ASTROPHYSICAL_HEURISTIC: The retained amplitude threshold is a conservative
+# binary-scenario screen, not a calibrated population probability.
 ELLIPSOIDAL_THRESHOLD_PPM = 100.0
 
 

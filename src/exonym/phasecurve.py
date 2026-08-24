@@ -20,6 +20,12 @@ components based on the BEER (Beaming, Ellipsoidal, and Reflection/emission) mod
 Uncertainties and covariances are estimated via a Generalized Estimating Equations (GEE)
 Huber-White cluster-sandwich covariance estimator (Liang & Zeger 1986) grouped into 0.5-day
 time blocks to remain robust against correlated red noise and stellar granulation.
+
+Scientific Boundary:
+    This is an exploratory circular-harmonic regression with a secondary-eclipse
+    control.  Its amplitudes and formal significances are not calibrated
+    detection probabilities, physical amplitude measurements, or validation
+    evidence on their own.
 """
 
 from __future__ import annotations
@@ -242,6 +248,28 @@ def resolve_secondary_eclipse_control(
 
     A compatible eccentric chain is candidate-local, candidate-derived, and
     explicitly tied to the ephemeris used for the phase-curve regression.
+
+    Args:
+        workspace (CandidateWorkspace): Workspace containing an optional
+            candidate-local transit-fit report and numeric posterior chain.
+        ephemeris (Dict[str, Any]): Current candidate-derived period, epoch,
+            and primary-transit duration in days.
+
+    Returns:
+        Tuple[Dict[str, Any], Dict[str, Any]]: Regression arguments for
+        :func:`fit_phase_curve_components` and a provenance-rich control report.
+        The report names either a circular box control or an
+        eccentric-posterior-marginalized box control.
+
+    Raises:
+        RuntimeError: A present transit-fit report or posterior chain is
+            malformed, non-candidate-data, incompatible with the current
+            ephemeris, or cannot provide a usable eccentric control.
+        ValueError: Required duration or posterior values are invalid.
+
+    Note:
+        The eccentric control approximates conjunction geometry for a regression
+        template.  It is not a complete occultation or brightness-map model.
     """
     duration_days = float(ephemeris["duration_days"])
     circular_arguments = {
@@ -259,6 +287,8 @@ def resolve_secondary_eclipse_control(
     }
     report_path = workspace.path / "outputs" / "mcmc_transit_fit.json"
     if not report_path.exists():
+        # SCIENTIFIC_BOUNDARY: An absent compatible eccentric posterior yields a
+        # explicitly labeled circular control, never an unlabelled assumption.
         return circular_arguments, circular_report
 
     report = _read_json_object(report_path)
@@ -296,12 +326,39 @@ def resolve_secondary_eclipse_control(
     if chain.ndim != 2 or chain.shape[0] == 0 or chain.shape[1] < 9 or not np.all(np.isfinite(chain)):
         raise RuntimeError("candidate-local eccentric transit posterior chain has invalid dimensions or values")
 
+    parameter_names = report.get("parameter_names")
+    if parameter_names is None:
+        # Backward-compatible handling for pre-contract artifacts. The
+        # current producer records names; this fallback retains readability of
+        # legacy candidate evidence while the test below pins its historical
+        # final-coordinate layout.
+        from .transit_fit import PARAMETER_NAMES_ECCENTRIC
+
+        if tuple(PARAMETER_NAMES_ECCENTRIC[-2:]) != ("sqe_cosw", "sqe_sinw"):
+            raise RuntimeError("legacy eccentric transit-fit chain layout is not recognized")
+        sqe_cosw_index, sqe_sinw_index = -2, -1
+    else:
+        if (
+            not isinstance(parameter_names, list)
+            or not all(isinstance(name, str) for name in parameter_names)
+            or len(parameter_names) != chain.shape[1]
+            or parameter_names.count("sqe_cosw") != 1
+            or parameter_names.count("sqe_sinw") != 1
+        ):
+            raise RuntimeError("candidate-local eccentric transit-fit parameter_names contract is invalid")
+        sqe_cosw_index = parameter_names.index("sqe_cosw")
+        sqe_sinw_index = parameter_names.index("sqe_sinw")
+
     sample_indices = np.linspace(
         0, chain.shape[0] - 1, min(chain.shape[0], SECONDARY_TEMPLATE_MAX_SAMPLES), dtype=int
     )
     sampled_chain = chain[sample_indices]
-    eccentricity = sampled_chain[:, -2] ** 2 + sampled_chain[:, -1] ** 2
-    omega_radians = np.arctan2(sampled_chain[:, -1], sampled_chain[:, -2])
+    eccentricity = (
+        sampled_chain[:, sqe_cosw_index] ** 2 + sampled_chain[:, sqe_sinw_index] ** 2
+    )
+    omega_radians = np.arctan2(
+        sampled_chain[:, sqe_sinw_index], sampled_chain[:, sqe_cosw_index]
+    )
     phase_samples, duration_ratios, occulting = _secondary_eclipse_geometry_samples(
         eccentricity, omega_radians, sampled_chain[:, 0], sampled_chain[:, 2]
     )
@@ -361,6 +418,22 @@ def cluster_sandwich_covariance(
     
     The 'bread' matrix uses a Moore-Penrose pseudo-inverse (np.linalg.pinv) to safely
     handle collinear design columns (e.g. duplicate baseline offsets across overlapping sectors).
+
+    Args:
+        design (np.ndarray): Regression design matrix with one row per retained
+            cadence and one column per fitted parameter.
+        residual (np.ndarray): Residual normalized relative flux values.
+        sigma (np.ndarray): Positive normalized-flux uncertainties.
+        cluster (np.ndarray): Integer cadence-cluster labels for robust
+            covariance aggregation.
+
+    Returns:
+        Tuple[np.ndarray, int]: Parameter covariance matrix and the number of
+        distinct covariance clusters.
+
+    Note:
+        This robust covariance addresses within-cluster correlation only.  It
+        does not calibrate a false-alarm probability for any phase component.
     """
     weighted_design = design / sigma[:, None]
     weighted_residual = residual / sigma
@@ -397,6 +470,35 @@ def build_design_matrix(
     components, and a secondary-eclipse control. The control is either a fixed
     box or a posterior-marginalized candidate-local eccentric template. Returns
     (design, names, cluster) with cluster grouping 0.5-day blocks per sector.
+
+    Mathematical Formulation:
+        The circular basis contains reflection/emission proportional to
+        ``-cos(phi)``, beaming proportional to ``sin(phi)``, ellipsoidal
+        variation proportional to ``-cos(2 phi)``, and a second-harmonic sine
+        null control.  The secondary column is a fixed or marginalized box
+        template rather than an occultation light-curve model.
+
+    Args:
+        time (np.ndarray): Retained cadence times in days.
+        phase_days (np.ndarray): Transit-centered orbital phase offsets in days.
+        period_days (float): Positive orbital period in days.
+        duration_days (float): Primary transit duration in days.
+        sector_values (np.ndarray): Cadence-aligned integer segment labels.
+        block_days (float): Time width in days for robust covariance clusters.
+        secondary_eclipse_phase (float): Secondary control center as an orbital
+            phase fraction in the half-open unit interval.
+        secondary_eclipse_duration_days (float): Optional positive duration in
+            days; the primary duration is used when omitted.
+        secondary_eclipse_template (np.ndarray): Optional cadence-aligned,
+            non-negative marginalized control template.
+
+    Returns:
+        Tuple[np.ndarray, List[str], np.ndarray]: Design matrix, matching
+        column names, and covariance-cluster labels.
+
+    Raises:
+        ValueError: Secondary-control phase, duration, or template alignment is
+            invalid.
     """
     if not math.isfinite(secondary_eclipse_phase) or not 0.0 <= secondary_eclipse_phase < 1.0:
         raise ValueError("secondary eclipse phase must be finite and in [0, 1)")
@@ -463,7 +565,45 @@ def fit_phase_curve_components(
     secondary_eclipse_duration_samples_days: np.ndarray = None,
     secondary_eclipse_template_total_samples: int = None,
 ) -> Dict[str, Any]:
-    """Fit harmonic + eclipse components and return the component report."""
+    """Fit circular harmonic and secondary-control components to retained flux.
+
+    The primary-transit window is excluded, then weighted least squares fits
+    per-segment baselines, orbital harmonics, and a secondary control together.
+    Cluster-sandwich covariance supplies the reported block-robust component
+    errors in ppm.
+
+    Args:
+        time (np.ndarray): Cadence times in BTJD days.
+        flux (np.ndarray): Normalized relative flux.
+        flux_err (np.ndarray): Positive normalized-flux uncertainties.
+        sector_values (np.ndarray): Cadence-aligned observation-segment labels.
+        ephemeris (Dict[str, Any]): Candidate-derived period, epoch, and
+            duration in days.
+        block_days (float): Robust covariance-cluster width in days.
+        primary_mask_half_durations (float): Number of transit half-durations
+            excluded around primary transit.
+        secondary_eclipse_phase (float): Secondary-control phase fraction.
+        secondary_eclipse_duration_days (float): Optional secondary duration in
+            days.
+        secondary_eclipse_phase_samples (np.ndarray): Optional posterior phase
+            samples for a marginalized eccentric control.
+        secondary_eclipse_duration_samples_days (np.ndarray): Optional paired
+            posterior duration samples in days.
+        secondary_eclipse_template_total_samples (int): Total posterior draws
+            represented by the marginalized control template.
+
+    Returns:
+        Dict[str, Any]: Component amplitudes and robust errors in ppm, routing
+        status, retained-coverage counts, and secondary-control metadata.
+
+    Raises:
+        ValueError: Coverage, eclipse control, or posterior-template inputs are
+            insufficient or misaligned.
+
+    Note:
+        Formal component significance is a regression diagnostic, not a
+        correlated-noise-calibrated detection significance.
+    """
     period_days = ephemeris["period_days"]
     epoch_btjd = ephemeris["epoch_btjd"]
     duration_days = ephemeris["duration_days"]
@@ -515,28 +655,46 @@ def fit_phase_curve_components(
     covariance, n_clusters = cluster_sandwich_covariance(design, residual, sigma, cluster)
     errors = np.sqrt(np.diag(covariance))
 
-    components: Dict[str, Dict[str, float]] = {}
+    components: Dict[str, Dict[str, Any]] = {}
     for name in PHYSICAL_COMPONENTS:
         index = names.index(name)
         value_ppm = float(coefficients[index] * 1e6)
         error_ppm = float(errors[index] * 1e6)
+        has_defined_error = math.isfinite(error_ppm) and error_ppm > 0.0
         components[name] = {
             "value_ppm": round(value_ppm, 3),
             "block_robust_error_ppm": round(error_ppm, 3),
-            "significance_sigma": round(value_ppm / error_ppm if error_ppm > 0 else 0.0, 2),
-            "three_sigma_absolute_upper_bound_ppm": round(abs(value_ppm) + 3.0 * error_ppm, 3),
+            # NUMERICAL_GUARD: a zero or invalid covariance error does not
+            # represent a null detection significance or a finite upper bound.
+            "significance_sigma": (
+                round(value_ppm / error_ppm, 2) if has_defined_error else None
+            ),
+            "three_sigma_absolute_upper_bound_ppm": (
+                round(abs(value_ppm) + 3.0 * error_ppm, 3)
+                if has_defined_error
+                else None
+            ),
         }
 
-    max_significance = max(
-        abs(item["significance_sigma"]) for item in components.values()
-    )
+    finite_significances = [
+        abs(float(item["significance_sigma"]))
+        for item in components.values()
+        if isinstance(item["significance_sigma"], (int, float))
+        and math.isfinite(float(item["significance_sigma"]))
+    ]
+    max_significance = max(finite_significances) if finite_significances else None
     reflection = components["reflection_semiamplitude"]
+    # DIAGNOSTIC_REASONING: A significant negative reflection-basis amplitude
+    # flags a circular-harmonic interpretation that is likely systematics-limited.
     unphysical_reflection = (
         reflection["value_ppm"] < 0.0
-        and abs(reflection["significance_sigma"]) >= 3.0
+        and isinstance(reflection["significance_sigma"], (int, float))
+        and abs(float(reflection["significance_sigma"])) >= 3.0
     )
     if unphysical_reflection:
         status = "unphysical_phase_harmonic_detected_systematics_limited"
+    elif max_significance is None:
+        status = "undefined_component_significance"
     elif max_significance < 3.0:
         status = "no_significant_phase_curve_component"
     else:
@@ -554,7 +712,9 @@ def fit_phase_curve_components(
         "secondary_box_duration_hours": round(float(secondary_eclipse_duration_days or duration_days) * 24.0, 3),
         "secondary_box_template_method": secondary_template_method,
         "components": components,
-        "maximum_absolute_significance_sigma": round(max_significance, 2),
+        "maximum_absolute_significance_sigma": (
+            round(max_significance, 2) if max_significance is not None else None
+        ),
     }
 
 
@@ -586,7 +746,27 @@ def _synthetic_phase_curve_table() -> Dict[str, np.ndarray]:
 
 
 def run_phase_curve_search(workspace: CandidateWorkspace) -> Path:
-    """Run the phase curve search and write outputs/phase_curve_results.json."""
+    """Run the candidate-local exploratory phase-curve regression.
+
+    Args:
+        workspace (CandidateWorkspace): Workspace that owns provenance-bound
+            photometry, a candidate-derived ephemeris, and output artifacts.
+
+    Returns:
+        Path: Candidate-local ``outputs/phase_curve_results.json`` with the
+        component report, secondary-control provenance, and calibration limits.
+
+    Raises:
+        RuntimeError: Required photometry or a complete candidate-derived
+            ephemeris is unavailable, or the secondary control is unusable.
+        ValueError: Retained regression data or control inputs are invalid.
+        OSError: The result artifact cannot be written.
+
+    Note:
+        The artifact is an exploratory phase-curve diagnostic.  It cannot
+        establish a secondary eclipse, a physical harmonic amplitude, or a
+        validation result.
+    """
     outputs_dir = workspace.path / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -639,6 +819,12 @@ def run_phase_curve_search(workspace: CandidateWorkspace) -> Path:
         "secondary_box_template_method": result["secondary_box_template_method"],
         "components": result["components"],
         "maximum_absolute_significance_sigma": result["maximum_absolute_significance_sigma"],
+        "input_error_binning_convention": (
+            "When the shared light-curve loader downsamples a sector, it retains "
+            "the median reported per-cadence uncertainty in each bin; this is not "
+            "the standard error of a binned median. The artifact does not infer "
+            "whether a particular input required downsampling."
+        ),
         "interpretation": (
             "Exploratory photometric diagnostic; the harmonic terms retain a circular-orbit "
             "basis and no physical amplitude or secondary-eclipse detection is claimed."

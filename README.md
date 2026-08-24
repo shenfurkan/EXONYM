@@ -1,4 +1,6 @@
 <div align="center">
+  <img src="images/exonymbanner.gif" alt="EXONYM Banner" width="100%">
+  <br><br>
   <img src="images/logo.png" alt="EXONYM Logo" width="75">
   <h1>EXONYM</h1>
 </div>

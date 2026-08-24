@@ -279,11 +279,20 @@ def test_raw_provenance_rejects_ambiguous_or_nonfinite_json(tmp_path, sidecar_te
     assert not has_valid_raw_product_provenance(candidate, product)
 
 
-def test_analysis_gate_allows_advancement_with_diagnostic_evidence(tmp_path):
+def test_analysis_gate_blocks_low_looking_and_arbitrary_fpp_outputs(tmp_path):
     candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha", tic="123456789")
     claims = candidate.path / "claims"
     claims.mkdir(parents=True, exist_ok=True)
     _write_verified_fpp_claim(candidate)
+    (candidate.path / "outputs" / "triceratops_results.json").write_text(
+        json.dumps({"FPP": 0.0001}), encoding="utf-8"
+    )
+    (claims / "fpp_claim.json").write_text(
+        json.dumps({"FPP": 0.0001}), encoding="utf-8"
+    )
+    (candidate.path / "outputs" / "arbitrary_diagnostic.json").write_text(
+        json.dumps({"status": "available"}), encoding="utf-8"
+    )
 
     candidate.path.joinpath("docs/01_intake_manifest.md").write_text(
         "- [x] [MANDATORY] a\n- [x] [MANDATORY] b\n- [x] [MANDATORY] c\n- [x] [MANDATORY] d\n",
@@ -328,12 +337,18 @@ def test_analysis_gate_allows_advancement_with_diagnostic_evidence(tmp_path):
     advance(candidate)
     candidate = _reload(tmp_path)
     assert candidate.metadata["workflow"]["phase"] == "analysis"
-    # Gate now checks for diagnostic evidence; with outputs present it should not block.
+
+    from exonym.gatekeeper import _gate_fpp_claim
+
+    passed, reason = _gate_fpp_claim(candidate)
+    assert passed is False
+    assert "FPP claims are disabled" in reason
     errors = gate_errors(candidate)
-    assert not errors, "analysis gate should pass with diagnostic outputs: {0}".format(errors)
-    advance(candidate)
+    assert any("FPP claims are disabled" in error for error in errors)
+    with pytest.raises(GateError, match="FPP claims are disabled"):
+        advance(candidate)
     candidate = _reload(tmp_path)
-    assert candidate.metadata["workflow"]["phase"] == "review"
+    assert candidate.metadata["workflow"]["phase"] == "analysis"
 
 
 @pytest.mark.parametrize("forgery", ("fpp", "no_evidence"))
@@ -416,7 +431,7 @@ def _checked_doc(path, items=4):
 def _to_review_phase(tmp_path):
     candidate = create_candidate(_templated_repo(tmp_path), "candidate-alpha", tic="123456789")
     # Exercise review behavior against a historical workspace that reached the
-    # phase (now reachable through the evidence-based FPP claim gate).
+    # phase before the FPP claim gate was intentionally disabled.
     metadata = dict(candidate.metadata)
     workflow = dict(metadata["workflow"])
     workflow["phase"] = "review"

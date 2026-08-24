@@ -12,6 +12,9 @@ run_banner(skip=False) -> None
     then wait for any keypress before proceeding.
 print_cli_overview() -> None
     Print the categorized command overview without argparse boilerplate.
+
+The rendered globe is terminal presentation only; it is not a scientific
+visualization or candidate-local evidence product.
 """
 
 from __future__ import annotations
@@ -246,6 +249,8 @@ def run_banner(skip: bool = False) -> None:
         When *True* (or when stdout is not a TTY), return immediately without
         producing any output.
     """
+    # SCIENTIFIC_BOUNDARY: This animation is presentation-only and must never
+    # be treated as an observational, model, or candidate-local artifact.
     if skip or not sys.stdout.isatty():
         return
 
@@ -319,7 +324,11 @@ def run_banner(skip: bool = False) -> None:
 
 
 def print_cli_overview() -> None:
-    """Print clean, categorized CLI commands overview (industry-standard format)."""
+    """Print a categorized command overview without parsing arguments.
+
+    The overview is informational only; it does not execute a workflow step
+    or make a scientific assessment.
+    """
     lines = [
         _BOLD + "CORE & WORKFLOW COMMANDS" + _RESET,
         f"  {_BOLD}{'init':<18}{_RESET} Provision a new candidate workspace",

@@ -1,25 +1,19 @@
-"""Fixed-ephemeris photometric screening suite for candidate transit verification.
+"""Deterministic fixed-ephemeris photometric screening diagnostics.
 
-Applies deterministic physical checks on candidate light curves at a declared ephemeris (P, T_0, T_14)
-to rapidly identify eclipsing binaries, centroid contaminants, and period aliases before
-computationally expensive MCMC or TRICERATOPS runs:
+The module measures primary, odd/even, half-phase, and doubled-period windows
+on normalized candidate light curves at a declared BTJD ephemeris. These
+comparisons make common eclipsing-binary aliases and secondary-like features
+visible before later candidate-local analysis; they do not identify an
+astrophysical source on their own.
 
-1. Odd-Even Depth Consistency Check:
-   Computes depth significance difference:
-       z = |delta_odd - delta_even| / sqrt(sigma_odd^2 + sigma_even^2)
-   Flags candidates with z >= 3.0 sigma as probable Eclipsing Binaries (EB) whose true
-   orbital period is doubled (P_true = 2 * P_trial).
+Scientific Boundary:
+    Scatter-based uncertainties do not model correlated noise, blending, or a
+    population false-positive rate. Output is a screening artifact for review,
+    never a statistical validation claim.
 
-2. Half-Phase Secondary Eclipse Screen (phi = 0.5):
-   Measures flux deficit at the anti-transit phase to detect companion occultations (depth_sec).
-   Significant secondary eclipses (> 3 sigma) rule out planetary nature unless proven thermal emission.
-
-3. Doubled-Period Screen (2 * P):
-   Evaluates alternating primary and secondary events at double the declared period.
-
-Note:
-    Produces a screening diagnostic artifact only, NOT a statistical validation claim.
-    Scatter-based uncertainties do not fully model correlated red noise.
+References:
+    methods/literature_notes/perryman_handbook/
+    04_false_positives_vetting_diagnostics.md documents the diagnostic context.
 """
 
 from __future__ import annotations
@@ -37,6 +31,8 @@ from .lightcurve import phase_hours
 from .workspace import CandidateWorkspace
 
 MIN_SAMPLES_PER_WINDOW = 3                      # Minimum in-transit cadences required for depth evaluation
+# ASTROPHYSICAL_HEURISTIC: This review threshold exposes a possible
+# alternating-eclipse alias; it is not a calibrated classification boundary.
 ODD_EVEN_CONSISTENCY_THRESHOLD_SIGMA = 3.0      # Significance threshold (sigma) for odd-even depth difference
 SCREENING_MAX_POINTS_PER_PRODUCT = 12000        # Maximum cadences loaded per product to bound memory
 OUT_OF_TRANSIT_INNER_DURATIONS = 1.2            # Inner buffer boundary for out-of-transit baseline
@@ -172,11 +168,27 @@ def fixed_ephemeris_screen(
     epoch_btjd: float,
     duration_hours: float,
 ) -> Dict[str, Any]:
-    """Screen primary, odd/even, harmonic, and half-period windows.
+    """Measure fixed windows at primary and alias-related ephemerides.
 
-    Inputs are normalized relative flux and BTJD times.  This function is
-    deliberately deterministic and target-neutral so that the result can be
-    re-run from the candidate-owned light curve and declared ephemeris.
+    The odd/even comparison can expose alternating eclipse depths when a
+    periodic search has selected a harmonic. The half-phase and doubled-period
+    windows retain complementary measurements for human review rather than
+    classifying a companion.
+
+    Args:
+        time_btjd: One-dimensional observation times in BTJD_TDB days.
+        flux: Normalized relative flux aligned with time_btjd.
+        period_days: Declared positive orbital period in days.
+        epoch_btjd: Declared finite transit epoch in BTJD_TDB days.
+        duration_hours: Declared positive transit-window duration in hours.
+
+    Returns:
+        JSON-safe primary, odd/even, half-phase, and doubled-period
+        measurements with their coverage and uncertainty status.
+
+    Raises:
+        ValueError: If arrays are incompatible or the declared ephemeris is
+            non-finite or physically invalid.
     """
     period = _require_positive_finite("period_days", period_days)
     duration = _require_positive_finite("duration_hours", duration_hours)
@@ -247,11 +259,24 @@ def run_fixed_ephemeris_screen(
     signal: Optional[str] = None,
     detrending_method: Optional[str] = None,
 ) -> Path:
-    """Write a candidate-local fixed-ephemeris screening artifact.
+    """Write a provenance-aware fixed-ephemeris screening artifact.
 
-    A named signal requires its own readable candidate configuration.  Unlike
-    exploratory commands, this workflow refuses a synthetic ephemeris so that
-    no science-looking screen can be produced from demonstration defaults.
+    A named signal must supply its own candidate configuration. Synthetic,
+    partial, or non-BTJD ephemerides are refused so a review artifact cannot
+    appear to measure an unobserved or demonstration signal.
+
+    Args:
+        workspace: Candidate workspace that owns the input and output records.
+        signal: Optional validated per-signal suffix.
+        detrending_method: Optional named, mask-bound detrending product to
+            load instead of pipeline-normalized flux.
+
+    Returns:
+        Path to the candidate-local JSON screening artifact.
+
+    Raises:
+        ValueError: If candidate ephemeris or light-curve requirements are not
+            satisfied.
     """
     validate_signal_suffix(signal)
     ephemeris = load_transit_ephemeris(workspace, signal=signal)
@@ -287,6 +312,8 @@ def run_fixed_ephemeris_screen(
     result = fixed_ephemeris_screen(table["time"], table["flux"], period, epoch, duration_hours)
 
     sectors = np.asarray(table.get("sector", []), dtype=int)
+    # SCIENTIFIC_BOUNDARY: Retain measurements and provenance without turning
+    # this deterministic screen into a false-positive probability.
     payload = {
         "method": "fixed_ephemeris_photometric_screen",
         "interpretation": (
@@ -312,7 +339,7 @@ def run_fixed_ephemeris_screen(
     outputs_dir.mkdir(parents=True, exist_ok=True)
     output = outputs_dir / "fixed_ephemeris_screen{0}.json".format(signal or "")
     output.write_text(
-        json.dumps(_rounded_payload(payload), indent=2, sort_keys=True) + "\n",
+        json.dumps(_rounded_payload(payload), indent=2, sort_keys=True, allow_nan=False) + "\n",
         encoding="utf-8",
     )
     return output

@@ -96,6 +96,11 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from .constants import (
+    GRAVITATIONAL_CONSTANT_CGS,
+    SECONDS_PER_DAY,
+    SOLAR_MEAN_DENSITY_G_CM3,
+)
 from .inputs import (
     load_light_curve_table,
     load_stellar_parameters,
@@ -104,10 +109,6 @@ from .inputs import (
 from .lightcurve import bin_phase_folded_flux, kipping_to_quadratic_limb_darkening
 from .workspace import CandidateWorkspace, validate_signal_suffix
 
-# Physical constants in CGS units
-# The gravitational constant is the CODATA 2018 value.
-G_CGS = 6.67430e-8          # Gravitational constant (cm^3 g^-1 s^-2)
-RHO_SUN_GCM3 = 1.408        # Mean solar density (g cm^-3)  # ASTROPHYSICAL_HEURISTIC: solar mean from IAU 2015 nominal solar constants
 # ASTROPHYSICAL_HEURISTIC: phase-folded crop window twice the nominal TESS
 # transit-duration envelope; ensures out-of-transit baseline is captured for
 # normalization while keeping far-out-of-eclipse noise from biasing the fit.
@@ -139,9 +140,16 @@ PARAMETER_NAMES_ECCENTRIC = PARAMETER_NAMES_CIRCULAR + (
     "sqe_sinw",          # sqrt(e) * sin(omega), Lagrangian eccentricity component
 )
 
+# A data-independent weakly informative prior on the additive normalized-flux
+# jitter. The sampler keeps the same finite support as the historical model,
+# but its density is no longer centred on the light curve being fitted.
+JITTER_LOG_LOWER = -12.0
+JITTER_LOG_UPPER = -2.0
+JITTER_HALF_CAUCHY_SCALE = 1.0e-3
+
 
 def stellar_density_a_rs(rho_solar: float, period_days: float) -> float:
-    """Calculate scaled semimajor axis (a / R_star) from mean stellar density.
+    r"""Calculate scaled semimajor axis (a / R_star) from mean stellar density.
 
     Mathematical Formulation
     ------------------------
@@ -152,11 +160,10 @@ def stellar_density_a_rs(rho_solar: float, period_days: float) -> float:
         \\left(\\frac{a}{R_*}\\right)^3
         = \\frac{G \\, P^2 \\, \\rho_*}{3\\pi}
 
-    where :math:`G = 6.67430 \\times 10^{-8}` cm\ :sup:`3` g\ :sup:`-1`
-    s\ :sup:`-2`, :math:`P` is the orbital period in seconds, and
-    :math:`\\rho_*` is the mean stellar density in g cm\ :sup:`-3`.  The solar
-    density normalisation :math:`\\rho_\\odot = 1.408` g cm\ :sup:`-3` acts as
-    a convenient scaling.
+    where :math:`G` is the CODATA gravitational constant, :math:`P` is the
+    orbital period in seconds, and :math:`\\rho_*` is the mean stellar density
+    in g cm\ :sup:`-3`. The solar-density normalization is reproducibly
+    derived from IAU nominal solar constants and CODATA G.
 
     Astrophysical Rationale
     -----------------------
@@ -186,12 +193,12 @@ def stellar_density_a_rs(rho_solar: float, period_days: float) -> float:
     """
     if rho_solar <= 0 or period_days <= 0:
         raise ValueError("stellar density and period must be positive")
-    # NUMERICAL_GUARD: convert to CGS (period_days * 86400 s/day) before
+    # NUMERICAL_GUARD: convert to CGS (period_days * seconds/day) before
     # evaluating the cube root; the exponent 1/3 is exact.
-    rho_gcm3 = rho_solar * RHO_SUN_GCM3
-    period_seconds = period_days * 86400.0
+    rho_gcm3 = rho_solar * SOLAR_MEAN_DENSITY_G_CM3
+    period_seconds = period_days * SECONDS_PER_DAY
     return (
-        (G_CGS * period_seconds**2 * rho_gcm3) / (3.0 * math.pi)
+        (GRAVITATIONAL_CONSTANT_CGS * period_seconds**2 * rho_gcm3) / (3.0 * math.pi)
     ) ** (1.0 / 3.0)
 
 
@@ -301,6 +308,17 @@ def inclination_deg_from_impact_parameter(
     return math.degrees(math.acos(cosine))
 
 
+def _require_batman() -> Any:
+    """Import the required batman forward-model dependency."""
+    try:
+        import batman
+    except ImportError as exc:
+        raise RuntimeError(
+            "batman-package is required for transit fitting; install the pinned core dependency."
+        ) from exc
+    return batman
+
+
 def batman_transit_flux(
     phase_days: Sequence[float],
     period_days: float,
@@ -357,14 +375,19 @@ def batman_transit_flux(
     exposure_seconds : float, optional
         Effective exposure integration time in seconds.  The ``batman``
         supersampling is performed in units of days, so this value is
-        divided by 86400 internally.
+        divided by the declared seconds-per-day conversion internally.
 
     Returns
     -------
     numpy.ndarray or None
         The transit model flux at each phase point, or None if the parameter
         combination produces a non-physical geometry, the inclination cannot
-        be computed, or batman raises an exception.
+        be computed, or the forward model rejects a proposal.
+
+    Raises
+    ------
+    RuntimeError
+        If the required ``batman-package`` dependency is unavailable.
     """
     # NUMERICAL_GUARD: non-positive exposure time prevents batman's
     # supersampling integrator from running.
@@ -375,9 +398,8 @@ def batman_transit_flux(
     )
     if inclination_deg is None:
         return None
+    batman = _require_batman()
     try:
-        import batman
-
         # Kipping (2013) inverse transform to standard quadratic coefficients.
         u1, u2 = kipping_to_quadratic_limb_darkening(q1, q2)
         params = batman.TransitParams()
@@ -397,18 +419,21 @@ def batman_transit_flux(
             params,
             np.asarray(phase_days, dtype=float),
             supersample_factor=SUPERSAMPLE_FACTOR,
-            exp_time=float(exposure_seconds) / 86400.0,
+            exp_time=float(exposure_seconds) / SECONDS_PER_DAY,
         )
 
         # Mandel & Agol (2002) analytic flux evaluation.
         flux = np.asarray(model.light_curve(params), dtype=float)
+        if not np.all(np.isfinite(flux)):
+            return None
         # SCIENTIFIC_BOUNDARY: baseline scaling is a multiplicative
         # out-of-transit normalization, not a calibrated per-sector
         # contamination correction.
         return baseline * flux
     except Exception:
-        # batman may throw for extreme parameter combinations;
-        # return None to signal a non-finite likelihood evaluation.
+        # The dependency import is intentionally outside this handler. A
+        # proposal-level forward-model failure has zero likelihood, while a
+        # missing dependency must stop the public fit loudly.
         return None
 
 
@@ -599,7 +624,7 @@ def _native_transit_window_data(
     for index, sector_label in enumerate(sector_labels):
         selected = sectors == sector_label
         sector_time = np.sort(time[selected])
-        cadence_seconds = np.diff(sector_time) * 86400.0
+        cadence_seconds = np.diff(sector_time) * SECONDS_PER_DAY
         cadence_seconds = cadence_seconds[np.isfinite(cadence_seconds) & (cadence_seconds > 0)]
         if cadence_seconds.size == 0:
             raise ValueError("candidate sector has no measurable integration cadence")
@@ -724,6 +749,48 @@ def _initial_fit_parameters(
     if eccentric:
         common.extend([0.0, 0.0])
     return np.asarray(common, dtype=float)
+
+
+def _jitter_prior_assumption() -> Dict[str, Any]:
+    """Describe the data-independent jitter prior shared by both samplers.
+
+    The prior is half-Cauchy in the positive jitter amplitude rather than a
+    Gaussian centred on an uncertainty statistic from the fitted light curve.
+    The production initializer may still use observed scatter to find a
+    practical starting point, but that value is not part of the posterior
+    density or the dynesty prior transform.
+    """
+    return {
+        "parameter": "log_jitter",
+        "distribution": "half-cauchy-on-jitter",
+        "parameterization": "jitter = exp(log_jitter)",
+        "scale_normalized_flux": JITTER_HALF_CAUCHY_SCALE,
+        "truncation_log_jitter": {
+            "lower": JITTER_LOG_LOWER,
+            "upper": JITTER_LOG_UPPER,
+        },
+        "empirical_bayes": False,
+        "data_dependent": False,
+        "rationale": (
+            "A fixed heavy-tailed scale permits excess white noise without using the "
+            "same photometry to set the prior centre and then evaluate the likelihood."
+        ),
+        "limitation": (
+            "This is still an independent-white-noise jitter term, not a correlated-noise "
+            "or instrument-noise calibration."
+        ),
+    }
+
+
+def _half_cauchy_log_jitter_log_density(log_jitter: float) -> float:
+    """Return the log density induced on ``log_jitter`` by the fixed prior."""
+    jitter = math.exp(log_jitter)
+    ratio = jitter / JITTER_HALF_CAUCHY_SCALE
+    return float(
+        math.log(2.0 / (math.pi * JITTER_HALF_CAUCHY_SCALE))
+        - math.log1p(ratio * ratio)
+        + log_jitter
+    )
 
 
 def _stellar_density_prior(stellar: Dict[str, Any]) -> Dict[str, float]:
@@ -923,7 +990,6 @@ def _neg_log_posterior(
         rho_prior_log10_sigma,
         eccentric,
         ldtk_prior,
-        noise_scale=float(np.median(flux_err)),
         n_sectors=n_sectors,
     )
     if not math.isfinite(log_prior):
@@ -1005,7 +1071,6 @@ def _log_prior(
     rho_prior_log10_sigma: float,
     eccentric: bool,
     ldtk_prior: Optional[Dict[str, Any]] = None,
-    noise_scale: Optional[float] = None,
     n_sectors: int = 1,
 ) -> float:
     """Evaluate parameter priors separately from the photometric likelihood.
@@ -1019,10 +1084,9 @@ def _log_prior(
     - **log_rho_star**: Gaussian prior centred on the candidate-local
       stellar density with width propagated from mass and radius
       uncertainties (see :func:`_stellar_density_prior`).
-    - **log_jitter**: weak Gaussian penalty with :math:`\\sigma = 1`
-      centred on the flux scatter, preventing the jitter from absorbing
-      the transit signal while remaining broad enough to not dominate
-      the posterior (Foreman-Mackey et al. 2013).
+    - **log_jitter**: a fixed half-Cauchy prior on the positive jitter
+      amplitude with a 1000-ppm normalized-flux scale. This is intentionally
+      independent of the fitted light curve, avoiding empirical-Bayes reuse.
     - **LDTk prior** (optional): Gaussian terms on ``(u1, u2)`` derived
       from the candidate's limb-darkening table, anchored to the
       Husser et al. (2013) PHOENIX grid via Parviainen & Aigrain (2015).
@@ -1061,7 +1125,7 @@ def _log_prior(
         # NUMERICAL_GUARD: log_jitter bounds keep exp(log_jitter) within
         # machine-precision finite range: exp(-12) ≈ 6e-6, exp(-2) ≈ 0.14
         # (normalized flux units).
-        and -12.0 < log_jitter < -2.0
+        and JITTER_LOG_LOWER < log_jitter < JITTER_LOG_UPPER
         and 0.01 < q1 < 0.99
         and 0.01 < q2 < 0.99
     ):
@@ -1079,12 +1143,7 @@ def _log_prior(
     log_prior = -0.5 * (
         (log_rho - math.log10(rho_prior_solar)) / rho_prior_log10_sigma
     ) ** 2
-    if noise_scale is not None:
-        if noise_scale <= 0 or not math.isfinite(noise_scale):
-            return -np.inf
-        # A weak empirical prior prevents jitter from washing out the transit
-        # signal while retaining the candidate-reported flux uncertainties.
-        log_prior += -0.5 * ((log_jitter - math.log(noise_scale)) / 1.0) ** 2
+    log_prior += _half_cauchy_log_jitter_log_density(log_jitter)
     if ldtk_prior is not None:
         u1, u2 = kipping_to_quadratic_limb_darkening(q1, q2)
         log_prior += -0.5 * ((u1 - ldtk_prior["u1"]) / ldtk_prior["u1_err"]) ** 2
@@ -1124,8 +1183,9 @@ def _log_likelihood(
     but the planet radius ratio, stellar density, impact parameter, limb
     darkening, and jitter are shared across all sectors.
 
-    Returns ``-inf`` if the forward model fails (e.g., batman rejects the
-    parameter combination) or if any sector index is out of range.
+    Returns ``-inf`` if the forward model rejects a proposal or if any sector
+    index is out of range. A missing required ``batman-package`` dependency
+    propagates as ``RuntimeError`` so a public fit cannot silently continue.
     """
     if not np.all(np.isfinite(theta)):
         return -np.inf
@@ -1398,9 +1458,14 @@ def _posterior_summaries(
         ],
         dtype=float,
     )
-    inc_samples = np.degrees(
-        np.arccos(np.clip(b_samples / conjunction_distance_samples, 0.0, 1.0))
+    projection_samples = b_samples / conjunction_distance_samples
+    # NUMERICAL_GUARD: ``arccos`` only accepts the physical projection range.
+    # Retain the edge-on mapping for legacy posterior summaries, but expose how
+    # often a sampled impact parameter exceeded the conjunction distance.
+    inclination_clipped = np.isfinite(projection_samples) & (
+        (projection_samples < 0.0) | (projection_samples > 1.0)
     )
+    inc_samples = np.degrees(np.arccos(np.clip(projection_samples, 0.0, 1.0)))
     area_ppm = (rp_samples**2) * 1e6
     depth_values = []
     for median_rp, median_a, median_b, median_q1, median_q2, median_eccentricity, median_omega in zip(
@@ -1424,7 +1489,11 @@ def _posterior_summaries(
             eccentricity=float(median_eccentricity),
             omega_deg=float(median_omega),
         )
-        depth_values.append(1.0 - (model[0] if model is not None else 1.0))
+        if model is None or model.shape != (1,) or not np.isfinite(model[0]):
+            raise RuntimeError(
+                "batman failed while evaluating posterior-derived mid-transit depths"
+            )
+        depth_values.append(1.0 - model[0])
     depth_ppm_samples = np.asarray(depth_values) * 1e6
 
     u1_samples, u2_samples = [], []
@@ -1433,7 +1502,11 @@ def _posterior_summaries(
         u1_samples.append(u1_val)
         u2_samples.append(u2_val)
 
-    posteriors["inclination_deg"] = _quantile_summary(inc_samples)
+    inclination_summary = _quantile_summary(inc_samples)
+    inclination_summary["conjunction_distance_clip_fraction"] = float(
+        np.mean(inclination_clipped)
+    )
+    posteriors["inclination_deg"] = inclination_summary
     posteriors["a_rs"] = _quantile_summary(a_rs_samples)
     posteriors["conjunction_distance_a_rs"] = _quantile_summary(conjunction_distance_samples)
     posteriors["rho_star_solar"] = _quantile_summary(rho_samples)
@@ -1504,7 +1577,6 @@ def _resample_weighted_posterior(
 def _make_dynesty_prior_transform(
     rho_prior_solar: float,
     rho_prior_log10_sigma: float,
-    noise_scale: float,
     eccentric: bool,
     ldtk_prior: Optional[Dict[str, Any]],
     n_sectors: int = 1,
@@ -1545,8 +1617,6 @@ def _make_dynesty_prior_transform(
         Prior mean density in solar units.
     rho_prior_log10_sigma : float
         Prior density width in :math:`\\log_{10}` space.
-    noise_scale : float
-        Flux scatter for the jitter prior width.
     eccentric : bool
         Whether eccentricity components are active.
     ldtk_prior : dict or None
@@ -1563,14 +1633,25 @@ def _make_dynesty_prior_transform(
     """
     from scipy.special import ndtr, ndtri
 
-    if rho_prior_solar <= 0 or rho_prior_log10_sigma <= 0 or noise_scale <= 0:
-        raise ValueError("stellar density, density uncertainty, and noise scale must be positive")
+    if rho_prior_solar <= 0 or rho_prior_log10_sigma <= 0:
+        raise ValueError("stellar density and density uncertainty must be positive")
 
     def truncated_normal(unit_value: float, mean: float, sigma: float, lower: float, upper: float) -> float:
         clipped = float(np.clip(unit_value, np.finfo(float).eps, 1.0 - np.finfo(float).eps))
         lower_cdf = ndtr((lower - mean) / sigma)
         upper_cdf = ndtr((upper - mean) / sigma)
         return float(mean + sigma * ndtri(lower_cdf + clipped * (upper_cdf - lower_cdf)))
+
+    def truncated_half_cauchy_log_jitter(unit_value: float) -> float:
+        clipped = float(np.clip(unit_value, np.finfo(float).eps, 1.0 - np.finfo(float).eps))
+        lower = math.exp(JITTER_LOG_LOWER)
+        upper = math.exp(JITTER_LOG_UPPER)
+        lower_cdf = 2.0 / math.pi * math.atan(lower / JITTER_HALF_CAUCHY_SCALE)
+        upper_cdf = 2.0 / math.pi * math.atan(upper / JITTER_HALF_CAUCHY_SCALE)
+        jitter = JITTER_HALF_CAUCHY_SCALE * math.tan(
+            0.5 * math.pi * (lower_cdf + clipped * (upper_cdf - lower_cdf))
+        )
+        return float(math.log(jitter))
 
     q_transform = None
     if ldtk_prior is not None:
@@ -1620,9 +1701,7 @@ def _make_dynesty_prior_transform(
         theta[2] = unit_cube[2] * 1.2
         baseline_stop = 3 + n_sectors
         theta[3:baseline_stop] = 0.99 + unit_cube[3:baseline_stop] * 0.02
-        theta[baseline_stop] = truncated_normal(
-            unit_cube[baseline_stop], math.log(noise_scale), 1.0, -12.0, -2.0
-        )
+        theta[baseline_stop] = truncated_half_cauchy_log_jitter(unit_cube[baseline_stop])
         q1_index = baseline_stop + 1
         q2_index = baseline_stop + 2
         if q_transform is None:
@@ -1657,7 +1736,7 @@ def _synthetic_transit_table(
         noise.  It exists for development and testing only.
     """
     rng = np.random.default_rng(seed=rng_seed)
-    cadence_days = 120.0 / 86400.0
+    cadence_days = 120.0 / SECONDS_PER_DAY
     duration_days = max(12.0, 4.0 * float(ephemeris["period_days"]))
     time = np.arange(0.0, duration_days, cadence_days)
     phase_days = (
@@ -1678,9 +1757,9 @@ def _synthetic_transit_table(
         1.0,
         exposure_seconds=EXPTIME_SECONDS,
     )
-    flux = np.ones_like(time)
-    if model is not None:
-        flux = np.asarray(model)
+    if model is None:
+        raise RuntimeError("batman failed while generating a synthetic transit fixture")
+    flux = np.asarray(model)
     flux = flux + rng.normal(0.0, 80e-6, size=time.shape)
     flux_err = np.full_like(flux, 80e-6)
     sector_values = np.ones(time.size, dtype=int)
@@ -1819,7 +1898,8 @@ def run_mcmc_transit_fit(
     detrending_method : str, optional
         Detrending method for light curve retrieval.
     dlogz_tolerance : float, optional
-        dynesty convergence tolerance in :math:`\\Delta\\ln Z` (default 0.5).
+        dynesty initial convergence tolerance in :math:`\\Delta\\ln Z`
+        (default 0.5).
 
     Returns
     -------
@@ -1829,8 +1909,8 @@ def run_mcmc_transit_fit(
     Raises
     ------
     RuntimeError
-        If photometry, ephemeris, or stellar parameters are synthetic or
-        missing.
+        If the required ``batman-package`` dependency is unavailable, or
+        photometry, ephemeris, or stellar parameters are synthetic or missing.
     ValueError
         If ``sampler`` is unrecognised.
     """
@@ -1848,6 +1928,7 @@ def run_mcmc_transit_fit(
         )
     if sampler != "emcee":
         raise ValueError("sampler must be one of: emcee, dynesty")
+    _require_batman()
     import emcee
 
     outputs_dir = workspace.path / "outputs"
@@ -1891,6 +1972,7 @@ def run_mcmc_transit_fit(
 
     depth_ppm = float(ephemeris["depth_ppm"])
     n_sectors = len(sector_labels)
+    jitter_prior = _jitter_prior_assumption()
     scatter = float(np.std(native_flux - np.median(native_flux)))
     start = _initial_fit_parameters(
         depth_ppm, rho_prior_solar, scatter, eccentric, n_sectors=n_sectors
@@ -2066,9 +2148,14 @@ def run_mcmc_transit_fit(
             **density_prior,
             "propagation": "first-order independent symmetric mass and radius uncertainties",
         },
+        "assumptions": {"jitter_prior": jitter_prior},
         "limb_darkening_prior": (
             {"source": "ldtk", "path": ldtk_prior["path"]} if ldtk_prior is not None else None
         ),
+        # CONTRACT: The numeric chain is only meaningful with this exact
+        # parameter order. Consumers must not infer eccentric coordinates from
+        # a positional convention alone.
+        "parameter_names": names,
         "posterior": posteriors,
         "mcmc": {
             "walkers": int(n_walkers),
@@ -2159,7 +2246,7 @@ def _run_dynesty_transit_fit(
     detrending_method : str or None
         Detrending method for light curve retrieval.
     dlogz_tolerance : float, optional
-        Convergence tolerance :math:`\\Delta\\ln Z` (default 0.5).
+        Initial convergence tolerance :math:`\\Delta\\ln Z` (default 0.5).
 
     Returns
     -------
@@ -2182,6 +2269,7 @@ def _run_dynesty_transit_fit(
         ) from exc
     if n_samples <= 0:
         raise ValueError("n_samples must be positive for dynesty")
+    _require_batman()
 
     ephemeris = load_transit_ephemeris(workspace, signal=signal)
     if ephemeris["source"] == "synthetic-demo" or any(
@@ -2219,11 +2307,10 @@ def _run_dynesty_transit_fit(
         raise RuntimeError("candidate photometry cannot support a transit fit") from exc
 
     n_sectors = len(sector_labels)
-    noise_scale = float(np.median(native_error))
+    jitter_prior = _jitter_prior_assumption()
     prior_transform = _make_dynesty_prior_transform(
         rho_prior_solar,
         rho_prior_log10_sigma,
-        noise_scale,
         eccentric,
         ldtk_prior,
         n_sectors=n_sectors,
@@ -2234,9 +2321,10 @@ def _run_dynesty_transit_fit(
     # and is capped at 500 to limit runtime.  For very large samples the
     # live point count is scaled as n_samples // 10.
     initial_live_points = max(2 * ndim + 1, min(500, max(50, n_samples // 10)))
-    # SCIENTIFIC_BOUNDARY: dynesty's DynamicNestedSampler with dlogz
-    # tolerance controls when the evidence integral has converged; this
-    # is a numerical stopping rule, not a physical validation criterion.
+    # SCIENTIFIC_BOUNDARY: ``dlogz_init`` applies only to dynesty's initial
+    # baseline run. The later dynamic allocation uses dynesty's default
+    # stopping function because this call supplies no custom stop kwargs.
+    # Neither numerical condition is a physical validation criterion.
     nested_sampler = dynesty.DynamicNestedSampler(
         lambda theta: _log_likelihood(
             theta,
@@ -2253,11 +2341,12 @@ def _run_dynesty_transit_fit(
         ndim,
         rstate=np.random.default_rng(seed),
     )
-    nested_sampler.run_nested(
-        nlive_init=initial_live_points,
-        dlogz=dlogz_tolerance,
-        print_progress=False,
-    )
+    run_nested_kwargs = {
+        "nlive_init": initial_live_points,
+        "dlogz_init": dlogz_tolerance,
+        "print_progress": False,
+    }
+    nested_sampler.run_nested(**run_nested_kwargs)
     results = nested_sampler.results
     samples = np.asarray(results.samples, dtype=float)
     log_weights = np.asarray(results.logwt, dtype=float)
@@ -2278,6 +2367,7 @@ def _run_dynesty_transit_fit(
         raise RuntimeError("dynesty returned incomplete or non-finite nested-sampling results")
     posterior_weights = np.exp(log_weights - float(log_evidence[-1]))
     chain, effective_samples = _resample_weighted_posterior(samples, posterior_weights, seed)
+    names = _parameter_names(eccentric, n_sectors, sector_labels)
     posteriors = _posterior_summaries(
         chain, ephemeris, eccentric, n_sectors=n_sectors, sector_labels=sector_labels
     )
@@ -2313,9 +2403,12 @@ def _run_dynesty_transit_fit(
             **density_prior,
             "propagation": "first-order independent symmetric mass and radius uncertainties",
         },
+        "assumptions": {"jitter_prior": jitter_prior},
         "limb_darkening_prior": (
             {"source": "ldtk", "path": ldtk_prior["path"]} if ldtk_prior is not None else None
         ),
+        # CONTRACT: Persist the resampled-chain order for positional consumers.
+        "parameter_names": names,
         "posterior": posteriors,
         # SCIENTIFIC_BOUNDARY: nested-sampling log Z is the model evidence
         # under the Gaussian independent-noise likelihood and chosen prior;
@@ -2329,8 +2422,29 @@ def _run_dynesty_transit_fit(
         "diagnostics": {
             "initial_live_points": int(initial_live_points),
             "sampler_niter": int(getattr(results, "niter", 0)),
-            "sampler_stop_criterion": str(getattr(results, "stop_iteration", "unknown")),
+            "sampler_stop_criterion": None,
+            "sampler_stop_criterion_status": "not-reported-by-dynesty-results",
+            "dlogz_init_tolerance": float(dlogz_tolerance),
             "dlogz_tolerance": float(dlogz_tolerance),
+            "dynesty_run_configuration": {
+                "initial_baseline": {
+                    "nlive_init": int(run_nested_kwargs["nlive_init"]),
+                    "criterion": "dlogz_init",
+                    "dlogz_init": float(run_nested_kwargs["dlogz_init"]),
+                },
+                "final_dynamic_stopping": {
+                    "criterion": "dynesty-default-stopping-function",
+                    "custom_stop_function": None,
+                    "custom_stop_kwargs": {},
+                    "use_stop": {
+                        "value": True,
+                        "source": "dynesty API default; not overridden by this run",
+                    },
+                    "configured_hard_stop_kwargs": {},
+                    "result_criterion": None,
+                    "result_criterion_status": "not-reported-by-dynesty-results",
+                },
+            },
             "iterations": int(getattr(results, "niter", samples.shape[0])),
             "likelihood_calls": int(np.sum(np.asarray(getattr(results, "ncall", 0)))),
             "sampling_efficiency_percent": sampling_efficiency,
@@ -2372,7 +2486,7 @@ def _run_dynesty_transit_fit(
 
 
 def _chunk_medians(samples: np.ndarray) -> List[float]:
-    """Median down a large sample chain to ~1000 values for model evaluation.
+    r"""Median down a large sample chain to ~1000 values for model evaluation.
 
     This is a throughput optimisation: evaluating the batman forward model
     on a full posterior chain of O(10\ :sup:`5`) samples would be

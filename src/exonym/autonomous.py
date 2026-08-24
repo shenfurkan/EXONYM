@@ -1,8 +1,14 @@
 """Bounded candidate-local automation for evidence collection and vetting.
 
-This is an execution coordinator, not a workflow-state shortcut. It never
-checks human checklist items, advances phases, assigns a disposition, records a
-decisive rejection, or turns an FPP into a validation claim.
+The coordinator invokes a fixed sequence of existing commands and writes a
+candidate-local run record with the selected inputs and outputs. It keeps
+automation operationally useful without allowing a convenience command to
+change lifecycle ownership or scientific interpretation.
+
+Scientific boundary:
+    Automation is not a workflow-state shortcut. It never checks human
+    checklist items, advances phases, assigns a disposition, records a decisive
+    rejection, or turns a statistical output into a validation claim.
 """
 
 from __future__ import annotations
@@ -13,8 +19,9 @@ import math
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from . import __version__
 from .inputs import _read_json, MINIMUM_BLS_CANDIDATE_SNR, is_manifest_bound_bls_result
 from .workspace import CandidateWorkspace
 
@@ -88,6 +95,63 @@ def _has_raw_fits(candidate: CandidateWorkspace) -> bool:
     return any(path.is_file() and path.suffix.lower() in (".fits", ".fz") for path in raw.rglob("*"))
 
 
+def _normalize_requested_sectors(sectors: Optional[Sequence[int]]) -> Optional[List[int]]:
+    """Return a sorted explicit sector scope or reject malformed caller values."""
+    if sectors is None:
+        return None
+    from .ingest import _coerce_sector_value
+
+    normalized: List[int] = []
+    for value in sectors:
+        sector = _coerce_sector_value(value)
+        if sector is None:
+            raise ValueError("sectors must contain positive integer values")
+        normalized.append(sector)
+    return sorted(set(normalized))
+
+
+def _available_common_sectors(
+    lightcurve_sequence_numbers: Iterable[object],
+    tpf_sequence_numbers: Iterable[object],
+) -> List[int]:
+    """Return positive archive sectors represented by both SPOC product searches."""
+    from .ingest import _coerce_sector_value
+
+    lightcurve_sectors = {
+        sector
+        for value in lightcurve_sequence_numbers
+        for sector in [_coerce_sector_value(value)]
+        if sector is not None
+    }
+    tpf_sectors = {
+        sector
+        for value in tpf_sequence_numbers
+        for sector in [_coerce_sector_value(value)]
+        if sector is not None
+    }
+    return sorted(lightcurve_sectors.intersection(tpf_sectors))
+
+
+def _select_download_sectors(
+    available_common_sectors: Sequence[int], requested_sectors: Optional[Sequence[int]]
+) -> List[int]:
+    """Select the effective common archive sectors for one auto-vet download.
+
+    The default preserves the bounded one-sector acquisition policy. Explicit
+    caller selections are intersected with products available in both searches
+    rather than being forwarded as an unverified archive filter.
+    """
+    available = sorted(set(available_common_sectors))
+    if not available:
+        raise RuntimeError("No common LC and TPF sectors for target")
+    if requested_sectors is None:
+        return [available[0]]
+    selected = sorted(set(available).intersection(requested_sectors))
+    if not selected:
+        raise RuntimeError("No requested sectors are available in both LC and TPF searches")
+    return selected
+
+
 def auto_vet_candidate(
     candidate: CandidateWorkspace,
     sectors: Optional[Sequence[int]] = None,
@@ -99,12 +163,16 @@ def auto_vet_candidate(
 
     Individual failures are retained in the manifest and do not cause later,
     independent diagnostics to be skipped. The final TRICERATOPS call continues
-    to enforce ``require_vetting_readiness`` internally.
+    to enforce ``require_vetting_readiness`` internally. The manifest records
+    the effective sector scope passed to search; ``null`` denotes an unfiltered
+    existing candidate-local data set.
     """
     if isinstance(n_draws, bool) or int(n_draws) < 1:
         raise ValueError("n_draws must be at least one")
     if isinstance(fit_samples, bool) or int(fit_samples) < 1:
         raise ValueError("fit_samples must be at least one")
+    requested_sectors = _normalize_requested_sectors(sectors)
+    sectors_used = requested_sectors
     run_id = uuid.uuid4().hex
     run_dir = candidate.path / "runs" / "auto-vet" / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
@@ -127,24 +195,38 @@ def auto_vet_candidate(
 
     if download and not _has_raw_fits(candidate):
         def ingest() -> List[Path]:
+            nonlocal sectors_used
+
+            from contextlib import ExitStack
+
             from .ingest import fetch_tess_products, fetch_tess_tpfs, ingest_products
             import lightkurve as lk
 
+            sectors_used = []
             tic = candidate.metadata["identifiers"].get("tic")
             sr_lc = lk.search_lightcurve(f"TIC {tic}", author="SPOC")
             sr_tp = lk.search_targetpixelfile(f"TIC {tic}", author="SPOC")
             if not sr_lc or not sr_tp:
                 raise RuntimeError("MAST returned no requested SPOC products")
-            common = sorted(list(set(sr_lc.table['sequence_number']).intersection(set(sr_tp.table['sequence_number']))))
-            if not common:
-                raise RuntimeError("No common LC and TPF sectors for target")
-            use_sectors = list(sectors) if sectors else [common[0]]
+            common = _available_common_sectors(
+                sr_lc.table["sequence_number"], sr_tp.table["sequence_number"]
+            )
+            sectors_used = _select_download_sectors(common, requested_sectors)
 
-            products = fetch_tess_products(candidate, sectors=use_sectors, provider="spoc")
-            products.extend(fetch_tess_tpfs(candidate, sectors=use_sectors, provider="spoc"))
-            if not products:
-                raise RuntimeError("MAST returned no requested SPOC products")
-            return ingest_products(candidate, products, fetched_by="exonym-auto-vet/1.2.0")
+            with ExitStack() as staging_batches:
+                products = list(
+                    staging_batches.enter_context(
+                        fetch_tess_products(candidate, sectors=sectors_used, provider="spoc")
+                    )
+                )
+                products.extend(
+                    staging_batches.enter_context(
+                        fetch_tess_tpfs(candidate, sectors=sectors_used, provider="spoc")
+                    )
+                )
+                if not products:
+                    raise RuntimeError("MAST returned no requested SPOC products")
+                return ingest_products(candidate, products, fetched_by="exonym-auto-vet/1.2.0")
 
         execute("ingest", ingest)
     else:
@@ -153,7 +235,7 @@ def auto_vet_candidate(
     def search() -> Path:
         from .search import run_bls_on_candidate
 
-        result_path = run_bls_on_candidate(candidate, sectors=sectors)
+        result_path = run_bls_on_candidate(candidate, sectors=sectors_used)
         config_path = _write_bls_transit_config(candidate, result_path)
         artifacts.append(_artifact(candidate, config_path, "bls-transit-config"))
         return result_path
@@ -187,11 +269,17 @@ def auto_vet_candidate(
         "status": "succeeded" if succeeded else "blocked",
         "started_at": started_at,
         "completed_at": _timestamp(),
-        "runtime": {"kind": "direct", "version": "1.2.0", "executable": "exonym.autonomous"},
+        "runtime": {
+            "kind": "direct",
+            "version": __version__,
+            "version_known": True,
+            "executable": "exonym.autonomous",
+        },
         "inputs": [_artifact(candidate, candidate.path / "candidate.json", "candidate-metadata")],
         "outputs": artifacts,
         "automation": {
             "steps": steps,
+            "sectors_used": sectors_used,
             "claim_eligible": False,
             "disposition_changed": False,
             "workflow_advanced": False,

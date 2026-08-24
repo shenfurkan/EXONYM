@@ -360,7 +360,12 @@ def test_run_bls_signal_uses_prior_duration_and_preserves_each_signal_output(tmp
     )
     monkeypatch.setattr("exonym.search.find_transits", fake_find_transits)
 
-    first_output = run_bls_on_candidate(workspace, signal=".01")
+    first_output = run_bls_on_candidate(
+        workspace,
+        signal=".01",
+        period_min=4.1,
+        period_max=4.3,
+    )
     second_output = run_bls_on_candidate(workspace, signal=".02")
 
     assert first_output.name == "bls_search_results.01.json"
@@ -388,6 +393,46 @@ def test_run_bls_signal_uses_prior_duration_and_preserves_each_signal_output(tmp
     assert calls[0]["period_min"] == pytest.approx(4.1)
     assert calls[0]["period_max"] == pytest.approx(4.3)
     assert calls[1]["duration_hours"] == pytest.approx(4.8)
+
+
+def test_run_bls_signal_rejects_conflicting_explicit_period_bounds(tmp_path):
+    workspace = create_candidate(tmp_path, "candidate-targeted-bound-conflict")
+    signals = workspace.path / "config" / "signals"
+    signals.mkdir(parents=True)
+    (signals / "transit_config.01.json").write_text(
+        json.dumps(
+            {
+                "transit": {
+                    "period_days": 4.2,
+                    "duration_hours": 2.4,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="bounds conflict with candidate prior window"):
+        run_bls_on_candidate(
+            workspace,
+            signal=".01",
+            period_min=1.0,
+            period_max=10.0,
+        )
+
+
+def test_search_cli_leaves_blind_period_bounds_unset_until_requested():
+    from exonym.__main__ import _build_parser
+
+    parser = _build_parser()
+    default_args = parser.parse_args(["search", "synthetic-candidate"])
+    explicit_args = parser.parse_args(
+        ["search", "synthetic-candidate", "--period-min", "1.0", "--period-max", "10.0"]
+    )
+
+    assert default_args.period_min is None
+    assert default_args.period_max is None
+    assert explicit_args.period_min == pytest.approx(1.0)
+    assert explicit_args.period_max == pytest.approx(10.0)
 
 
 def test_run_bls_signal_requires_a_readable_signal_prior(tmp_path):
@@ -521,7 +566,7 @@ def test_bls_manifest_requires_candidate_photometry_inputs(tmp_path):
 
 
 def test_bls_binding_rejects_a_changed_detrending_product(tmp_path):
-    from exonym.detrending import detrend_candidate
+    from exonym.detrending import detrend_candidate, transit_mask_from_ephemeris
     from exonym.inputs import is_manifest_bound_bls_result
 
     workspace = create_candidate(tmp_path, "detrending-bound-search")
@@ -530,6 +575,18 @@ def test_bls_binding_rejects_a_changed_detrending_product(tmp_path):
     _write_raw_provenance(raw_path)
     raw_digest = hashlib.sha256(raw_path.read_bytes()).hexdigest()
     time = np.linspace(0.0, 8.0, 101)
+    ephemeris = {
+        "period_days": 3.5,
+        "epoch_btjd": 1.0,
+        "duration_days": 2.0 / 24.0,
+        "time_system": "BTJD_TDB",
+        "source": "candidate-config",
+        "field_sources": {
+            "period_days": "candidate-config",
+            "epoch_btjd": "candidate-config",
+            "duration_days": "candidate-config",
+        },
+    }
     detrending = detrend_candidate(
         workspace,
         time,
@@ -537,6 +594,8 @@ def test_bls_binding_rejects_a_changed_detrending_product(tmp_path):
         window_days=0.5,
         sector=np.ones(time.size, dtype=int),
         input_products=[{"path": "data/raw/source.fits", "sha256": raw_digest}],
+        transit_mask=transit_mask_from_ephemeris(time, ephemeris),
+        transit_mask_ephemeris=ephemeris,
     )
     detrending_manifest = json.loads(detrending.manifest_path.read_text(encoding="utf-8"))
     preprocessing = {
@@ -600,6 +659,126 @@ def test_bls_binding_rejects_a_changed_detrending_product(tmp_path):
     np.savez_compressed(detrending.artifact_path, **artifact_payload)
 
     assert not is_manifest_bound_bls_result(workspace, result_path, result, None)
+
+
+def test_bls_binding_rejects_legacy_unmasked_preprocessing_for_ephemeris_resolution(tmp_path):
+    """A BLS-derived config cannot revive a pre-mask detrending artifact."""
+    from exonym.inputs import is_manifest_bound_bls_result, load_transit_ephemeris
+
+    workspace = create_candidate(tmp_path, "legacy-preprocessing")
+    raw_path = workspace.path / "data" / "raw" / "source.fits"
+    raw_path.write_bytes(b"synthetic raw product")
+    _write_raw_provenance(raw_path)
+    raw_digest = hashlib.sha256(raw_path.read_bytes()).hexdigest()
+    artifact_path = workspace.path / "data" / "processed" / "detrended-running-median.npz"
+    artifact_path.write_bytes(b"legacy detrending artifact")
+    artifact_digest = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    detrending_manifest_path = workspace.path / "outputs" / "detrending_manifest.running-median.json"
+    detrending_manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "candidate_id": workspace.candidate_id,
+                "generated_utc": "2026-01-01T00:00:00Z",
+                "method": "running-median",
+                "configuration": {"window_days": 0.5},
+                "input": {"cadences": 101, "finite_cadences": 101, "sha256": "a" * 64},
+                "artifact": {
+                    "path": "data/processed/detrended-running-median.npz",
+                    "sha256": artifact_digest,
+                    "data_sha256": "b" * 64,
+                },
+                "input_products": [{"path": "data/raw/source.fits", "sha256": raw_digest}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    preprocessing = {
+        "kind": "candidate-detrending",
+        "method": "running-median",
+        "manifest": {
+            "path": "outputs/detrending_manifest.running-median.json",
+            "sha256": hashlib.sha256(detrending_manifest_path.read_bytes()).hexdigest(),
+        },
+        "artifact": {
+            "path": "data/processed/detrended-running-median.npz",
+            "sha256": artifact_digest,
+            "data_sha256": "b" * 64,
+        },
+    }
+    result_path = workspace.path / "outputs" / "bls_search_results.json"
+    result = {
+        "source": "candidate-data",
+        "detection_status": "detected",
+        "time_system": "BTJD_TDB",
+        "detection_threshold_snr": 7.1,
+        "best_period": 3.5,
+        "best_epoch": 1.0,
+        "best_duration_hours": 2.0,
+        "best_depth_ppm": 500.0,
+        "snr": 8.0,
+        "n_distinct_transit_events": 3,
+        "preprocessing": preprocessing,
+    }
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    bls_manifest_path = workspace.path / "outputs" / "bls_search_manifest.json"
+    bls_manifest_path.write_text(
+        json.dumps(
+            {
+                "schema": "exonym-bls-search-manifest-1",
+                "candidate_id": workspace.candidate_id,
+                "result_path": "outputs/bls_search_results.json",
+                "result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
+                "source": "candidate-data",
+                "detection_status": "detected",
+                "inputs": [
+                    {
+                        "path": "data/raw/source.fits",
+                        "sha256": raw_digest,
+                        "provenance_path": "data/raw/source.provenance.json",
+                        "provenance_sha256": hashlib.sha256(
+                            raw_path.with_name("source.provenance.json").read_bytes()
+                        ).hexdigest(),
+                    }
+                ],
+                "configuration": {
+                    "engine": "bls",
+                    "signal": None,
+                    "time_system": "BTJD_TDB",
+                    "detection_threshold_snr": 7.1,
+                    "preprocessing": preprocessing,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (workspace.path / "config" / "transit_config.json").write_text(
+        json.dumps(
+            {
+                "source": "candidate-data-bls",
+                "bls_provenance": {
+                    "result": {
+                        "path": "outputs/bls_search_results.json",
+                        "sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
+                    },
+                    "manifest": {
+                        "path": "outputs/bls_search_manifest.json",
+                        "sha256": hashlib.sha256(bls_manifest_path.read_bytes()).hexdigest(),
+                    },
+                },
+                "transit": {
+                    "period_days": 3.5,
+                    "epoch_btjd": 1.0,
+                    "duration_days": 2.0 / 24.0,
+                    "depth_ppm": 500.0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert not is_manifest_bound_bls_result(workspace, result_path, result, None)
+    assert load_transit_ephemeris(workspace)["source"] == "synthetic-demo"
 
 
 def test_run_bls_on_candidate_with_real_data(tmp_path):

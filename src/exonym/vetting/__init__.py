@@ -1,4 +1,16 @@
-"""NASA SPOC and TFOP diagnostic helper routines."""
+"""Target-neutral diagnostic primitives used by the vetting workflow.
+
+The functions exported here calculate individual screening statistics such as
+odd/even depth consistency, a centroid-offset significance, and a leading-order
+ellipsoidal-variation estimate. They are evidence inputs, not dispositions:
+their candidate-local reports must still pass provenance, data-suitability, and
+workflow gates before any downstream routing can use them.
+
+Scientific boundary:
+    These helpers do not calibrate a scene model or a population false-positive
+    probability. A passing diagnostic therefore never establishes a discovery
+    or validation claim on its own.
+"""
 
 from .centroid import centroid_gate, centroid_offset_pvalue, centroid_offset_z
 from .ellipsoidal import ellipsoidal_gate, ellipsoidal_variation_amplitude_ppm

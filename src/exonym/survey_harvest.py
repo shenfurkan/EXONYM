@@ -1,9 +1,14 @@
 """Streaming TCE harvesting and conservative live novelty screening.
 
-The TCE source is supplied by the operator so its release, columns, and
-selection are retained with the candidate-local evidence rather than embedded
-in shared source. A successful lookup only means that the queried registries
-returned no matching record at retrieval time; it is not a scientific claim.
+The operator supplies the TCE release so its version, columns, and selection
+are retained with candidate-local evidence rather than embedded in shared
+source. Numeric prefilters bound work, while independent registry responses
+are stored with a freshness window for later review.
+
+Scientific Boundary:
+    A no-registration response means only that the queried registries returned
+    no matching record at retrieval time. It is neither proof of novelty nor a
+    scientific claim.
 """
 
 from __future__ import annotations
@@ -26,8 +31,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 from urllib.error import HTTPError, URLError
 
-from .survey import SurveyWorkspace, register_survey_target
-from .workspace import CandidateWorkspace, create_candidate
+from .survey import SurveyWorkspace, _load_target_record, register_survey_target
+from .workspace import CandidateWorkspace, create_candidate, load_candidate
 
 
 DEFAULT_HTTP_TIMEOUT_SECONDS = 20.0
@@ -40,12 +45,30 @@ _NASA_RESPONSE_COLUMNS = {
     "nasa-confirmed": frozenset(("pl_name", "tic_id")),
 }
 _EXOFOP_REGISTRATION_FIELDS = ("tois", "ctois", "planet_parameters")
+_TERMINAL_HARVEST_STATUSES = frozenset(
+    ("registered", "ineligible", "already-provisioned", "rollback-leftover")
+)
 Transport = Callable[[str, float], bytes]
 
 
 @dataclass(frozen=True)
 class TceFilters:
-    """Operator-selected numeric bounds for a reproducible TCE prefilter."""
+    """Operator-selected numeric bounds for a reproducible TCE prefilter.
+
+    Attributes:
+        minimum_snr: Positive source-reported ranking-statistic lower bound.
+        period_min_days: Inclusive positive lower orbital-period bound in days.
+        period_max_days: Inclusive orbital-period upper bound in days.
+        depth_min_ppm: Inclusive positive transit-depth lower bound in ppm.
+        depth_max_ppm: Inclusive transit-depth upper bound in ppm.
+        radius_min_earth: Inclusive positive source-reported radius lower
+            bound in Earth radii.
+        radius_max_earth: Inclusive source-reported radius upper bound in
+            Earth radii.
+        stellar_radius_max_solar: Inclusive positive stellar-radius upper
+            bound in solar radii.
+        tmag_max: Optional-magnitude acceptance upper bound.
+    """
 
     minimum_snr: float
     period_min_days: float
@@ -74,7 +97,17 @@ class TceFilters:
             raise ValueError("TCE filter bounds are not physically ordered")
 
     def matches(self, row: Mapping[str, Any]) -> bool:
-        """Return whether one source row supplies and satisfies every bound."""
+        """Return whether one source row supplies and satisfies every bound.
+
+        Args:
+            row: TCE source row with normalized or recognized alternate column
+                names for the declared filter quantities.
+
+        Returns:
+            True only when every required quantity is finite and within the
+            configured inclusive bounds. A missing optional magnitude does not
+            exclude an otherwise complete row.
+        """
         values = {
             "snr": _number(row, "snr", "tce_snr", "mes", "tce_mes", "tce_model_snr"),
             "period": _number(row, "period", "period_days", "tce_period", "tcet_period"),
@@ -97,7 +130,14 @@ class TceFilters:
 
 @dataclass(frozen=True)
 class NoveltyResult:
-    """Raw, source-addressable result of live registry lookups."""
+    """Raw, source-addressable result of live registry lookups.
+
+    Attributes:
+        status: Eligible, ineligible, or unavailable retrieval outcome.
+        reason: Human-readable retrieval rationale, not a scientific claim.
+        responses: Ordered provider name, canonical URL, and raw response
+            bytes retained for a later candidate-local audit.
+    """
 
     status: str
     reason: str
@@ -206,7 +246,18 @@ def _nea_urls(tic: str) -> Tuple[Tuple[str, str], ...]:
 
 
 def novelty_provider_urls(tic: str) -> Tuple[Tuple[str, str], ...]:
-    """Return the canonical three-registry novelty queries for one TIC."""
+    """Construct the canonical independent-registry queries for one identifier.
+
+    Args:
+        tic: Positive mission-catalog identifier as a decimal string.
+
+    Returns:
+        Ordered provider-name and canonical-HTTPS-URL pairs used for a single
+        live novelty retrieval.
+
+    Raises:
+        ValueError: If tic is not a positive decimal identifier string.
+    """
     normalized_tic = str(tic)
     if not _TIC_PATTERN.fullmatch(normalized_tic):
         raise ValueError("TIC identifier must be a positive integer string")
@@ -301,7 +352,21 @@ def _strict_json_object(payload: bytes) -> Mapping[str, object]:
 def novelty_response_has_registration(
     provider: str, source_uri: str, payload: bytes, tic: str
 ) -> bool:
-    """Validate one retained response and report whether it contains a registry record."""
+    """Validate a retained registry response and test for registration content.
+
+    Args:
+        provider: Supported provider label associated with the response.
+        source_uri: Canonical query URL expected for provider and tic.
+        payload: Raw provider response bytes retained by the caller.
+        tic: Positive mission-catalog identifier used for the query.
+
+    Returns:
+        True when a schema-valid response contains a registration record.
+
+    Raises:
+        ValueError: If provider identity, query URL, response shape, or
+            encoding does not satisfy the provider contract.
+    """
     expected_urls = dict(novelty_provider_urls(tic))
     if provider not in expected_urls or source_uri != expected_urls[provider]:
         raise ValueError("novelty response does not use the canonical provider query")
@@ -319,8 +384,25 @@ def evaluate_live_novelty(
 ) -> NoveltyResult:
     """Query independent registries without treating a no-match as proof.
 
-    Any unavailable or malformed source is inconclusive. Eligibility therefore
-    requires completed NASA TOI, NASA confirmed-planet, and ExoFOP checks.
+    Any unavailable, malformed, or noncanonical source is inconclusive.
+    Eligibility therefore requires completed responses from every configured
+    provider, while a detected registration stops the lookup as ineligible.
+
+    Args:
+        tic: Positive mission-catalog identifier as a decimal string.
+        timeout: Positive network timeout in seconds for each request attempt.
+        transport: Injectable HTTPS byte transport used for live retrieval.
+
+    Returns:
+        Raw provider responses and an eligible, ineligible, or unavailable
+        retrieval state.
+
+    Raises:
+        ValueError: If tic or timeout is invalid before network retrieval.
+
+    Notes:
+        An eligible result is a time-bounded retrieval observation, not proof
+        of novelty or a scientific validation claim.
     """
     if not _TIC_PATTERN.fullmatch(str(tic)):
         raise ValueError("TIC identifier must be a positive integer string")
@@ -351,7 +433,21 @@ def write_novelty_audit(
     result: NoveltyResult,
     freshness_hours: float,
 ) -> Path:
-    """Retain raw responses and write a hash-bound schema-v2 novelty audit."""
+    """Retain raw responses and write a hash-bound candidate-local audit.
+
+    Args:
+        candidate: Candidate workspace that owns raw responses and audit JSON.
+        result: Source-addressable live novelty retrieval result.
+        freshness_hours: Positive duration before the audit becomes stale.
+
+    Returns:
+        Path to the written candidate-local novelty audit.
+
+    Raises:
+        ValueError: If freshness or provider identity is invalid.
+        RuntimeError: If an eligible result lacks every valid independent
+            response or contains a detected registration.
+    """
     try:
         freshness = float(freshness_hours)
     except (TypeError, ValueError) as exc:
@@ -410,7 +506,19 @@ def write_novelty_audit(
 
 
 def stream_tce_rows(source: str, timeout: float = DEFAULT_HTTP_TIMEOUT_SECONDS) -> Iterator[Dict[str, str]]:
-    """Yield CSV rows without loading a TCE release into process memory."""
+    """Yield non-comment CSV rows from a local release or HTTPS endpoint.
+
+    Args:
+        source: Existing local CSV path or HTTPS URL supplied by the operator.
+        timeout: Positive request timeout in seconds for an HTTPS stream.
+
+    Yields:
+        String-keyed CSV row mappings in source order.
+
+    Raises:
+        ValueError: If source is neither a readable local file nor an HTTPS
+            URL accepted by the transport policy.
+    """
     source_path = Path(source)
     if source_path.is_file():
         with source_path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -428,6 +536,96 @@ def stream_tce_rows(source: str, timeout: float = DEFAULT_HTTP_TIMEOUT_SECONDS) 
                 yield dict(row)
 
 
+def _is_terminal_harvest_status(status: str) -> bool:
+    """Return whether a harvest result consumes one bounded candidate slot.
+
+    Live-registry outages are explicitly non-terminal: they leave novelty
+    unresolved and must not prevent later source rows from being assessed.
+    Every other emitted state is a definitive result for this invocation and
+    therefore consumes the operator's requested cap.
+    """
+    return status in _TERMINAL_HARVEST_STATUSES
+
+
+def _existing_harvest_outcome(
+    survey: SurveyWorkspace, candidate_id: str, tic: str
+) -> Dict[str, str]:
+    """Validate an existing workspace before reporting it as provisioned.
+
+    ``create_candidate`` deliberately raises on any path collision.  A
+    collision is not evidence of a completed earlier harvest: an interrupted
+    rollback can leave a valid-looking ``candidate.json`` without the survey
+    denominator record that commits the harvest transaction.  Only a loaded,
+    identity-matched candidate with a valid matching target record is
+    idempotently reported as already provisioned.
+    """
+    try:
+        candidate = load_candidate(survey.repository_root, candidate_id)
+    except (OSError, ValueError):
+        return {
+            "candidate_id": candidate_id,
+            "status": "rollback-leftover",
+            "reason": (
+                "Existing candidate workspace could not be validated; it is not "
+                "treated as already provisioned."
+            ),
+        }
+    identifiers = candidate.metadata.get("identifiers", {})
+    if (
+        identifiers.get("tic") != tic
+        or identifiers.get("mission") != survey.metadata["mission"]
+    ):
+        return {
+            "candidate_id": candidate_id,
+            "status": "rollback-leftover",
+            "reason": (
+                "Existing candidate workspace does not match this survey's TIC "
+                "and mission identity."
+            ),
+        }
+    try:
+        _load_target_record(survey, candidate_id)
+    except (OSError, ValueError):
+        return {
+            "candidate_id": candidate_id,
+            "status": "rollback-leftover",
+            "reason": (
+                "Existing candidate workspace has no valid matching survey target "
+                "record and requires operator inspection."
+            ),
+        }
+    return {"candidate_id": candidate_id, "status": "already-provisioned"}
+
+
+def _rollback_harvest_provisioning(
+    candidate_path: Path,
+    survey_target_dir: Path,
+    survey_target_existed: bool,
+) -> List[Path]:
+    """Remove paths created by one failed harvest and return any leftovers.
+
+    Pre-existing survey target records are never deleted.  The caller uses the
+    returned paths to make an interrupted rollback explicit instead of hiding
+    it behind ``ignore_errors=True`` and misreporting it on a later retry.
+    """
+    paths = [candidate_path]
+    if not survey_target_existed:
+        paths.append(survey_target_dir)
+    leftovers: List[Path] = []
+    for path in paths:
+        if not path.exists():
+            continue
+        try:
+            shutil.rmtree(path)
+        except OSError:
+            # A post-cleanup existence check below distinguishes an error that
+            # still left recoverable debris from one that completed removal.
+            pass
+        if path.exists():
+            leftovers.append(path)
+    return leftovers
+
+
 def harvest_tces(
     survey: SurveyWorkspace,
     source: str,
@@ -437,7 +635,36 @@ def harvest_tces(
     freshness_hours: float = 24.0,
     transport: Transport = _https_bytes,
 ) -> List[Dict[str, str]]:
-    """Filter a streamed release and provision only currently eligible workspaces."""
+    """Filter a streamed release and provision candidate-local eligible records.
+
+    Rows first pass operator-selected numerical bounds, then conservative live
+    novelty retrieval. Registered workspaces retain raw response evidence
+    before becoming part of the survey denominator. The returned outcomes
+    retain unavailable, ineligible, and already-provisioned states rather than
+    silently treating them as candidates.
+
+    Args:
+        survey: Survey that owns newly registered target records.
+        source: Local CSV path or HTTPS release stream.
+        filters: Reproducible numeric prefilter contract.
+        max_candidates: Positive cap on terminal candidate outcomes. Registry
+            outages remain visible in the result list but do not consume it.
+        novelty_timeout: Positive timeout in seconds for novelty requests.
+        freshness_hours: Positive audit freshness duration in hours.
+        transport: Injectable HTTPS byte transport used by novelty retrieval.
+
+    Returns:
+        Ordered, JSON-safe per-row harvesting outcomes.
+
+    Raises:
+        ValueError: If maximum count or freshness is invalid.
+        RuntimeError: If evidence needed to register an eligible workspace
+            cannot be written or validated.
+
+    Notes:
+        Provisioning and no-match retrieval are operational triage steps, not
+        scientific claims of novelty or planetary status.
+    """
     if isinstance(max_candidates, bool) or int(max_candidates) < 1:
         raise ValueError("max_candidates must be at least one")
     try:
@@ -446,18 +673,25 @@ def harvest_tces(
         raise ValueError("freshness_hours must be positive and finite") from exc
     if not math.isfinite(freshness) or freshness <= 0.0:
         raise ValueError("freshness_hours must be positive and finite")
+    candidate_limit = int(max_candidates)
+    terminal_outcomes = 0
     outcomes: List[Dict[str, str]] = []
     for row in stream_tce_rows(source, timeout=novelty_timeout):
-        if len(outcomes) >= int(max_candidates):
+        if terminal_outcomes >= candidate_limit:
             break
         if not filters.matches(row):
             continue
         tic = _tic(row)
         if tic is None:
             continue
+        # SCIENTIFIC_BOUNDARY: A completed no-match lookup may permit
+        # candidate-local triage, but it cannot establish scientific novelty.
         result = evaluate_live_novelty(tic, timeout=novelty_timeout, transport=transport)
         if result.status != "eligible":
-            outcomes.append({"status": result.status, "reason": result.reason})
+            outcome = {"status": result.status, "reason": result.reason}
+            outcomes.append(outcome)
+            if _is_terminal_harvest_status(outcome["status"]):
+                terminal_outcomes += 1
             continue
         candidate_id = "tce-" + tic
         try:
@@ -469,17 +703,28 @@ def harvest_tces(
                 tags=["survey-harvest"],
             )
         except FileExistsError:
-            outcomes.append({"candidate_id": candidate_id, "status": "already-provisioned"})
+            outcome = _existing_harvest_outcome(survey, candidate_id, tic)
+            outcomes.append(outcome)
+            terminal_outcomes += 1
             continue
         survey_target_dir = survey.path / "targets" / candidate.candidate_id
         survey_target_existed = survey_target_dir.exists()
         try:
             write_novelty_audit(candidate, result, freshness_hours=freshness)
             register_survey_target(survey, candidate)
-        except Exception:
-            shutil.rmtree(candidate.path, ignore_errors=True)
-            if not survey_target_existed:
-                shutil.rmtree(survey_target_dir, ignore_errors=True)
+        except Exception as exc:
+            leftovers = _rollback_harvest_provisioning(
+                candidate.path,
+                survey_target_dir,
+                survey_target_existed,
+            )
+            if leftovers:
+                raise RuntimeError(
+                    "harvest provisioning failed and rollback left incomplete paths: {0}".format(
+                        ", ".join(path.as_posix() for path in leftovers)
+                    )
+                ) from exc
             raise
         outcomes.append({"candidate_id": candidate.candidate_id, "status": "registered"})
+        terminal_outcomes += 1
     return outcomes

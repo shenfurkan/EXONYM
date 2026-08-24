@@ -130,6 +130,18 @@
             "tolerance_rad": { "const": 1e-12 },
             "max_iterations": { "const": 64 }
           }
+        },
+        "eccentricity_parameterization": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["coordinates", "mapping", "maximum_eccentricity_exclusive", "numerical_rationale", "scientific_limitation"],
+          "properties": {
+            "coordinates": { "type": "string", "minLength": 1 },
+            "mapping": { "type": "string", "minLength": 1 },
+            "maximum_eccentricity_exclusive": { "const": 0.95 },
+            "numerical_rationale": { "type": "string", "minLength": 1 },
+            "scientific_limitation": { "type": "string", "minLength": 1 }
+          }
         }
       }
     },

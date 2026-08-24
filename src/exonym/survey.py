@@ -1,9 +1,19 @@
-"""Candidate-local survey registration and single-cohort search control.
+"""Candidate-local survey registration and bounded-cohort search control.
 
-Survey records live below ``candidate/_surveys/`` so target membership,
-selection sectors, and outcomes never enter the target-neutral source tree.
-They provide a complete denominator for a bounded search cohort, but do not
-turn a photometric peak into a planetary claim.
+Survey records live below candidate/_surveys so membership, selected sectors,
+and outcomes never enter the target-neutral source tree. They retain a
+complete denominator for a predeclared cohort, link each target to
+candidate-local evidence, and keep triage outcomes separate from lifecycle
+state and scientific claims.
+
+Scientific Boundary:
+    A survey alert is a human-review routing result. It is not a discovery,
+    candidate disposition, population-completeness measurement, or validation
+    result.
+
+References:
+    methods/tls_search.md and methods/detrending-and-transit-inference.md
+    document the search and preprocessing assumptions used by survey controls.
 """
 
 from __future__ import annotations
@@ -103,7 +113,15 @@ REFERENCE_BLS_CONFIGURATION = {
 
 @dataclass(frozen=True)
 class SurveyWorkspace:
-    """A bounded, candidate-local blind-search cohort."""
+    """Filesystem-backed metadata for one bounded candidate-local cohort.
+
+    Attributes:
+        repository_root: Resolved repository root that owns the survey.
+        survey_id: Validated stable survey identifier.
+        path: Candidate/_surveys path that holds metadata, target records, and
+            run records.
+        metadata: Schema-validated survey configuration and scientific scope.
+    """
 
     repository_root: Path
     survey_id: str
@@ -117,7 +135,18 @@ def _timestamp() -> str:
 
 
 def validate_survey_id(survey_id: str) -> str:
-    """Normalize a safe survey directory identifier."""
+    """Normalize and validate a stable survey directory identifier.
+
+    Args:
+        survey_id: Operator-supplied lowercase, hyphen-safe cohort label.
+
+    Returns:
+        The normalized identifier suitable for a candidate-local path.
+
+    Raises:
+        ValueError: If the identifier is empty or does not meet the stable
+            filesystem and CLI naming contract.
+    """
     normalized = survey_id.strip().lower()
     # Surveys are collection instances, so keep their IDs URL- and CLI-friendly.
     if not _SURVEY_ID.fullmatch(normalized):
@@ -191,7 +220,27 @@ def create_survey(
     sectors: Sequence[int],
     review_snr: float = 6.0,
 ) -> SurveyWorkspace:
-    """Create one bounded search cohort without modifying candidate records."""
+    """Create a bounded cohort without modifying candidate lifecycle records.
+
+    Args:
+        repository_root: Repository that owns candidate-local survey records.
+        survey_id: Stable identifier for the new cohort.
+        mission: Supported mission label for the cohort.
+        sectors: Positive, unique frozen sector selections.
+        review_snr: Positive pre-registered BLS review threshold.
+
+    Returns:
+        Metadata and path for the newly created survey workspace.
+
+    Raises:
+        ValueError: If mission, sectors, identifier, or review threshold is
+            invalid.
+        FileExistsError: If the requested survey directory already exists.
+
+    Notes:
+        Creation establishes a denominator container only; it does not change
+        any candidate state or assert a scientific result.
+    """
     if mission != "tess":
         raise ValueError("blind survey search currently supports only the tess mission")
     normalized_id = validate_survey_id(survey_id)
@@ -222,7 +271,20 @@ def create_survey(
 
 
 def load_survey(repository_root: Path, survey_id: str) -> SurveyWorkspace:
-    """Load a survey and validate its small, stable metadata contract."""
+    """Load one survey and validate its stable metadata contract.
+
+    Args:
+        repository_root: Repository that owns the survey directory.
+        survey_id: Stable identifier of the survey to load.
+
+    Returns:
+        A workspace object with validated metadata and candidate-local path.
+
+    Raises:
+        FileNotFoundError: If the survey metadata record is absent.
+        ValueError: If metadata is unreadable, unsupported, or mismatched to
+            its directory and configured mission.
+    """
     normalized_id = validate_survey_id(survey_id)
     path = _survey_path(repository_root, normalized_id)
     metadata_path = path / SURVEY_METADATA_FILENAME
@@ -291,7 +353,24 @@ def _write_target_record(survey: SurveyWorkspace, record: Dict[str, Any]) -> Pat
 def register_survey_target(
     survey: SurveyWorkspace, candidate: CandidateWorkspace
 ) -> Path:
-    """Register one TOI-free TESS workspace in a survey denominator."""
+    """Register one eligible mission workspace in the survey denominator.
+
+    Registration records membership and a pending novelty-audit requirement;
+    it does not run a search or alter the candidate lifecycle.
+
+    Args:
+        survey: Survey workspace that owns the denominator record.
+        candidate: Candidate workspace proposed for membership.
+
+    Returns:
+        Path to the newly written candidate-local target metadata record.
+
+    Raises:
+        ValueError: If the candidate mission or required identifier does not
+            match the survey, or if the workspace is already known to a
+            registered catalog.
+        FileExistsError: If the candidate already has a record in this survey.
+    """
     identifiers = candidate.metadata.get("identifiers", {})
     if identifiers.get("mission") != survey.metadata["mission"]:
         raise ValueError("candidate mission does not match the survey")
@@ -480,13 +559,29 @@ def _wilson_interval(recovered_count: int, trial_count: int) -> Dict[str, Any]:
 def run_survey_sensitivity(
     survey: SurveyWorkspace, candidate: CandidateWorkspace
 ) -> Path:
-    """Write a two-branch candidate-level injection-recovery grid.
+    """Write a two-branch injection-recovery grid for one registered target.
 
-    This operation is deliberately separate from survey alert routing. It uses
-    a frozen box-transit grid on one candidate's observed light curve and
-    reports only the recovery outcomes for that configuration. It does not
-    estimate a survey selection function, population completeness, false-alarm
-    probability, or scientific validation probability.
+    The frozen box-signal grid is evaluated on observed, provenance-bound
+    photometry through normalized and running-median branches. It is
+    intentionally separate from survey-alert routing so recovery evidence
+    cannot be mistaken for a disposition.
+
+    Args:
+        survey: Survey that supplies frozen sectors and configuration.
+        candidate: Registered candidate workspace whose observed light curve is
+            evaluated.
+
+    Returns:
+        Path to the candidate-local survey-sensitivity artifact.
+
+    Raises:
+        RuntimeError: If a current eligible novelty audit, observed photometry,
+            or hashable input manifest is unavailable.
+
+    Notes:
+        Results characterize the declared target and grid only. They do not
+        estimate a survey selection function, population completeness,
+        false-alarm probability, or scientific validation probability.
     """
     _load_target_record(survey, candidate.candidate_id)
     if not _current_eligible_audit(candidate):
@@ -1033,11 +1128,33 @@ def run_survey_search(
     candidate: CandidateWorkspace,
     review_snr: Optional[float] = None,
 ) -> Path:
-    """Search one eligible target using only the survey's selected sectors.
+    """Search one eligible target using only the survey's frozen sectors.
 
-    The outcome is a triage state. It does not set the candidate lifecycle,
-    scientific disposition, or a false-positive claim.
+    The function reuses matching candidate-local BLS evidence when possible,
+    otherwise writes a new sector-bound search result and associated
+    robustness diagnostics. The recorded outcome routes review only.
+
+    Args:
+        survey: Survey that owns sectors, threshold, and target record.
+        candidate: Registered candidate workspace to search.
+        review_snr: Optional threshold that must equal the pre-registered
+            survey value.
+
+    Returns:
+        Path to the updated candidate-local survey target record.
+
+    Raises:
+        ValueError: If the optional threshold differs from the registered
+            survey configuration.
+        RuntimeError: If required candidate photometry or strict search
+            evidence is unavailable.
+
+    Notes:
+        The outcome does not set candidate lifecycle, scientific disposition,
+        or a false-positive claim.
     """
+    # SCIENTIFIC_BOUNDARY: Survey status is restricted to review routing and
+    # must not be reused as a lifecycle transition or scientific conclusion.
     configured_review_snr = _validate_review_snr(survey.metadata["review_snr"])
     if review_snr is not None and _validate_review_snr(review_snr) != configured_review_snr:
         raise ValueError("review_snr must match the preregistered survey threshold")
@@ -1095,7 +1212,20 @@ def run_survey_search(
 
 
 def exclude_survey_target(survey: SurveyWorkspace, candidate_id: str, reason: str) -> Path:
-    """Record a pre-search exclusion while preserving the survey denominator."""
+    """Record a pre-search exclusion while preserving denominator membership.
+
+    Args:
+        survey: Survey that owns the existing target record.
+        candidate_id: Registered candidate identifier.
+        reason: Non-empty operator rationale retained with the outcome.
+
+    Returns:
+        Path to the updated target record.
+
+    Raises:
+        ValueError: If reason is empty or candidate identity is invalid.
+        FileNotFoundError: If the candidate is not registered in the survey.
+    """
     if not reason.strip():
         raise ValueError("an exclusion reason is required")
     record = _load_target_record(survey, candidate_id)
@@ -1107,7 +1237,16 @@ def exclude_survey_target(survey: SurveyWorkspace, candidate_id: str, reason: st
 
 
 def survey_summary(survey: SurveyWorkspace) -> Dict[str, Any]:
-    """Return the recorded survey denominator and outcome counts."""
+    """Summarize recorded denominator membership and outcome states.
+
+    Args:
+        survey: Survey whose target records are inspected.
+
+    Returns:
+        A JSON-safe mapping with survey metadata, counts by outcome, and
+        individual target records. Unreadable or orphaned records are retained
+        as explicit states rather than silently excluded.
+    """
     counts: Dict[str, int] = {}
     targets: List[Dict[str, Any]] = []
     for metadata_path in sorted((survey.path / "targets").glob("*/" + TARGET_METADATA_FILENAME)):
@@ -1140,5 +1279,17 @@ def survey_summary(survey: SurveyWorkspace) -> Dict[str, Any]:
 
 
 def load_survey_candidate(repository_root: Path, candidate_id: str) -> CandidateWorkspace:
-    """Load a candidate for CLI survey actions without duplicating validation."""
+    """Load one candidate for survey actions through shared validation.
+
+    Args:
+        repository_root: Repository that owns the candidate workspace.
+        candidate_id: Candidate identifier accepted by the shared loader.
+
+    Returns:
+        The validated candidate workspace.
+
+    Raises:
+        FileNotFoundError: If the candidate workspace does not exist.
+        ValueError: If the candidate identifier or metadata is invalid.
+    """
     return load_candidate(repository_root, candidate_id)

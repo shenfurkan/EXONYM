@@ -1,9 +1,17 @@
-"""Candidate-local cache for repeatable integrity verification.
+"""Candidate-local acceleration cache for integrity verification.
 
-The cache records file size and nanosecond mtime alongside an already computed
-SHA-256 digest. It is an acceleration layer, not a replacement for a clean
-integrity audit: callers can request a fresh audit when trust in filesystem
-metadata is insufficient.
+The cache associates file size and nanosecond modification time with parsed
+JSON and SHA-256 results. It avoids repeated reads during one verification
+operation while keeping cache entries scoped to the owning candidate workspace.
+Persisted entries are additionally bound to the resolved repository/workspace
+location and filesystem identity, so a cache copied into another checkout is
+discarded before it can satisfy a fingerprint lookup.
+
+Scientific boundary:
+    A fingerprint cache is an optimisation, not provenance or a scientific
+    reproducibility guarantee. The workspace binding prevents accidental cache
+    reuse after a copy or relocation; callers can request a fresh audit whenever
+    the trustworthiness of local filesystem metadata is insufficient.
 """
 
 from __future__ import annotations
@@ -18,7 +26,7 @@ from typing import Any, Callable, Dict, Iterator, Optional
 
 
 _CACHE_FILENAME = ".exonym-verify-cache.json"
-_CACHE_VERSION = 1
+_CACHE_VERSION = 2
 _ACTIVE_CACHE: ContextVar[Optional["CandidateVerificationCache"]] = ContextVar(
     "exonym_verification_cache", default=None
 )
@@ -38,7 +46,13 @@ def _sha256(path: Path) -> str:
 
 
 class CandidateVerificationCache:
-    """Persist trusted file digests below their owning candidate workspaces."""
+    """Persist workspace-bound file digests below owning candidate workspaces.
+
+    Cache records are accepted only when their scope hash matches the current
+    resolved repository and workspace paths plus their filesystem identities.
+    Moving or copying a candidate workspace safely converts cache hits into
+    misses; it does not alter candidate-owned scientific artifacts.
+    """
 
     def __init__(self, repository_root: Path, *, enabled: bool = True) -> None:
         self.repository_root = Path(repository_root).resolve()
@@ -50,6 +64,23 @@ class CandidateVerificationCache:
         self.hash_misses = 0
         self.json_hits = 0
         self.json_misses = 0
+
+    def _workspace_scope(self, workspace: Path) -> str:
+        """Return a stable local binding that invalidates copied cache records."""
+        workspace = workspace.resolve()
+        repository_stat = self.repository_root.stat()
+        workspace_stat = workspace.stat()
+        material = {
+            "repository_root": str(self.repository_root),
+            "repository_device": int(repository_stat.st_dev),
+            "repository_inode": int(repository_stat.st_ino),
+            "workspace": str(workspace),
+            "workspace_device": int(workspace_stat.st_dev),
+            "workspace_inode": int(workspace_stat.st_ino),
+        }
+        return hashlib.sha256(
+            json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
 
     def _workspace_for(self, path: Path) -> Optional[Path]:
         try:
@@ -65,13 +96,19 @@ class CandidateVerificationCache:
         if workspace in self._states:
             return self._states[workspace]
         cache_path = workspace / "outputs" / _CACHE_FILENAME
-        state: Dict[str, Any] = {"version": _CACHE_VERSION, "files": {}}
+        scope = self._workspace_scope(workspace)
+        state: Dict[str, Any] = {
+            "version": _CACHE_VERSION,
+            "workspace_scope": scope,
+            "files": {},
+        }
         if self.enabled and cache_path.is_file():
             try:
                 loaded = json.loads(cache_path.read_text(encoding="utf-8"))
                 if (
                     isinstance(loaded, dict)
                     and loaded.get("version") == _CACHE_VERSION
+                    and loaded.get("workspace_scope") == scope
                     and isinstance(loaded.get("files"), dict)
                 ):
                     state = loaded
@@ -89,7 +126,8 @@ class CandidateVerificationCache:
             relative = Path(path).resolve().relative_to(workspace.resolve()).as_posix()
         except (OSError, ValueError):
             return None, None
-        return state, state["files"].get(relative)
+        record = state["files"].get(relative)
+        return state, record if isinstance(record, dict) else None
 
     def sha256(self, path: Path) -> str:
         """Return a cached SHA-256 only when size and mtime still match."""
@@ -139,11 +177,20 @@ class CandidateVerificationCache:
             workspace = self._workspace_for(path)
             assert workspace is not None
             relative = path.resolve().relative_to(workspace.resolve()).as_posix()
-            existing_digest = record.get("sha256") if isinstance(record, dict) else None
+            existing_digest = (
+                record.get("sha256")
+                if (
+                    isinstance(record, dict)
+                    and record.get("mtime_ns") == fingerprint["mtime_ns"]
+                    and record.get("size") == fingerprint["size"]
+                    and isinstance(record.get("sha256"), str)
+                )
+                else None
+            )
             state["files"][relative] = {
                 **fingerprint,
                 "json": value,
-                **({"sha256": existing_digest} if isinstance(existing_digest, str) else {}),
+                **({"sha256": existing_digest} if existing_digest is not None else {}),
             }
             self._dirty.add(workspace.resolve())
         return value

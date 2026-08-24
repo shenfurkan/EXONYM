@@ -1,8 +1,13 @@
-"""Export candidate-local archival sources as SAOImage DS9 regions.
+"""Export validated candidate-local archival sources as DS9 regions.
 
-The exporter never derives coordinates from a transit centroid or candidate
-metadata.  Every DS9 point is copied from a validated archival report; PRF
-localization can only add source-ID annotations to those existing points.
+Every region point copies a finite sky coordinate from the validated archival
+report. PRF localization may add source identifiers to those existing points,
+but the exporter never turns a transit-centroid offset into an absolute sky
+coordinate or trusts candidate metadata as a replacement for archive evidence.
+
+Scientific boundary:
+    A region file is a review visualisation. It is not an astrometric fit,
+    localization calibration, or evidence of the origin of a photometric dip.
 """
 
 from __future__ import annotations

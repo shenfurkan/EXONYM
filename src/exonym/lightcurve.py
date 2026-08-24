@@ -22,10 +22,10 @@ Units convention
   relative to the nearest transit centre.
 * Flux: normalised relative flux (dimensionless); depths and
   uncertainties reported in parts-per-million (ppm).
-* Stellar / planetary radii: solar and Earth units respectively
-  (conversion factor 0.0091577 = R_⊕ / R_⊙).
-* Density: g cm⁻³ (CGS); the mean solar density 1.408 g cm⁻³ is used
-  for the Kepler-III scaling to *a* / R_*.
+* Stellar / planetary radii: solar and Earth units respectively, converted
+  through the IAU 2015 nominal-radius ratio in :mod:`exonym.constants`.
+* Density: g cm⁻³ (CGS); the solar normalization is reproducibly derived
+  from IAU nominal solar constants and CODATA G.
 """
 
 from __future__ import annotations
@@ -35,6 +35,13 @@ import re
 from typing import Dict, Optional, Sequence, Tuple
 
 import numpy as np
+
+from .constants import (
+    EARTH_TO_SOLAR_RADIUS_RATIO,
+    GRAVITATIONAL_CONSTANT_CGS,
+    SECONDS_PER_DAY,
+    SOLAR_MEAN_DENSITY_G_CM3,
+)
 
 
 def parse_tess_sector(mission: object) -> Optional[int]:
@@ -307,7 +314,7 @@ def calculate_contact_durations(
     impact_parameter_b: float,
     eccentricity: float = 0.0,
     omega_deg: float = 90.0,
-) -> Dict[str, float]:
+) -> Dict[str, object]:
     """Return dict of contact durations T₁₄, T₂₃, T₁₂ in hours and grazing status.
 
     Mathematical formulation
@@ -316,10 +323,11 @@ def calculate_contact_durations(
 
     .. math::
 
-        k = \\frac{R_p}{R_*} = \\frac{R_{p,\\oplus} \\times 0.0091577}
+        k = \\frac{R_p}{R_*} = \\frac{R_{p,\\oplus} \\times (R_\\oplus/R_\\odot)}
                                         {R_{*,\\odot}},
 
-    where :math:`0.0091577 = R_\\oplus / R_\\odot`.
+    where the radius conversion uses IAU 2015 nominal equatorial-Earth and
+    solar radii.
 
     **Scaled semi-major axis.**  From Kepler's Third Law and the
     definition of mean stellar density :math:`\\rho_*` (Perryman §2;
@@ -330,10 +338,9 @@ def calculate_contact_durations(
         \\left(\\frac{a}{R_*}\\right)^3
         = \\frac{G\\,P^2\\,\\rho_*}{3\\pi},
 
-    with :math:`P` in seconds, :math:`\\rho_*` in g cm⁻³, and
-    :math:`G = 6.67430 \\times 10^{-8}` cm³ g⁻¹ s⁻² (CODATA 2018).
-    The stellar density is scaled from the mean solar density
-    :math:`\\rho_\\odot = 1.408` g cm⁻³.
+    with :math:`P` in seconds, :math:`\\rho_*` in g cm⁻³, and the CODATA
+    gravitational constant. The stellar density is scaled from the
+    reproducible nominal-solar normalization in :mod:`exonym.constants`.
 
     **Eccentricity factor.**  For an orbit with eccentricity *e* and
     argument of periastron :math:`\\omega` (Perryman §2, Eq. 2.26):
@@ -407,14 +414,17 @@ def calculate_contact_durations(
 
     Returns
     -------
-    Dict[str, float]
+    Dict[str, object]
+        Includes ``geometry_status`` as ``"full-transit"``, ``"grazing"``,
+        or ``"non-transiting"``. The no-contact status has ``v_stat = None``.
         Keys:
         - ``"T14_hr"`` — total duration T₁₄ in hours (4 decimal places).
         - ``"T23_hr"`` — full-transit duration T₂₃ in hours (0.0 when grazing).
         - ``"T12_hr"`` — ingress/egress duration T₁₂ in hours.
-        - ``"grazing"`` — 1.0 when :math:`b > 1 - k` (or :math:`b \\ge 1 + k`),
-          else 0.0.
-        - ``"v_stat"`` — V-shape statistic (1.0 when T₁₄ = 0).
+        - ``"grazing"`` — 1.0 for a contact geometry with
+          :math:`1-k < b < 1+k`, else 0.0.
+        - ``"v_stat"`` — V-shape statistic for transiting geometries, or
+          ``None`` when there is no contact.
 
     Raises
     ------
@@ -424,11 +434,10 @@ def calculate_contact_durations(
 
     Notes
     -----
-    The ``b >= 1 + k`` early-return sets ``grazing = 1.0`` and
-    ``v_stat = 1.0``, which is **indistinguishable from a perfectly
-    V-shaped grazing event**.  This is a SCIENTIFIC_BOUNDARY: downstream
-    morphology consumers should treat zero-duration transits as
-    physically distinct from true V-shaped events.
+    The ``b >= 1 + k`` no-contact case uses
+    ``geometry_status = "non-transiting"``, ``grazing = 0.0``, and
+    ``v_stat = None``. It must remain distinct from a contact geometry that
+    produces a genuinely V-shaped grazing event.
     """
     if period_days <= 0 or r_star_solar <= 0 or m_star_solar <= 0 or r_planet_earth <= 0:
         raise ValueError("physical parameters must be positive")
@@ -437,27 +446,30 @@ def calculate_contact_durations(
     if impact_parameter_b < 0:
         raise ValueError("impact_parameter_b must be non-negative")
 
-    # Radius ratio: R_earth → R_sun conversion via 0.0091577 (R_⊕ / R_⊙).
-    k = (r_planet_earth * 0.0091577) / r_star_solar
+    # Radius ratio uses IAU 2015 nominal equatorial-Earth / solar radii.
+    k = (r_planet_earth * EARTH_TO_SOLAR_RADIUS_RATIO) / r_star_solar
     # SCIENTIFIC_BOUNDARY: b ≥ 1+k means no disc overlap at any orbital
-    # phase.  Returning grazing=1, v_stat=1 matches the sentinel for
-    # V-shaped events but is physically distinct (see Notes).
+    # phase. It has no measurable V-shape morphology and is not a grazing
+    # transit.
     if impact_parameter_b >= 1.0 + k:
         return {
             "T14_hr": 0.0,
             "T23_hr": 0.0,
             "T12_hr": 0.0,
-            "grazing": 1.0,
-            "v_stat": 1.0,
+            "grazing": 0.0,
+            "v_stat": None,
+            "geometry_status": "non-transiting",
         }
 
-    # Mean solar density (ρ_⊙ = 1.408 g cm⁻³) for scaling stellar density.
-    rho_solar_gcm3 = 1.408
+    # IAU-nominal/CODATA-derived solar density for scaling stellar density.
+    rho_solar_gcm3 = SOLAR_MEAN_DENSITY_G_CM3
     rho_star_gcm3 = m_star_solar / (r_star_solar**3) * rho_solar_gcm3
-    g_cgs = 6.67430e-8
-    period_sec = period_days * 86400.0
+    period_sec = period_days * SECONDS_PER_DAY
     # a / R_* from Kepler's Third Law (Perryman §2; Seager & Mallén-Ornelas 2003).
-    a_over_r = ((g_cgs * (period_sec**2) * rho_star_gcm3) / (3.0 * math.pi)) ** (1.0 / 3.0)
+    a_over_r = (
+        (GRAVITATIONAL_CONSTANT_CGS * (period_sec**2) * rho_star_gcm3)
+        / (3.0 * math.pi)
+    ) ** (1.0 / 3.0)
 
     # Eccentricity correction factor (Perryman §2, Eq. 2.26).
     ecc_factor = math.sqrt(1.0 - eccentricity**2) / (
@@ -499,6 +511,7 @@ def calculate_contact_durations(
         "T12_hr": round(t12_sec / 3600.0, 4),
         "grazing": 1.0 if grazing else 0.0,
         "v_stat": round(v_stat, 4),
+        "geometry_status": "grazing" if grazing else "full-transit",
     }
 
 

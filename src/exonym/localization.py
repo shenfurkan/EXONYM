@@ -17,7 +17,7 @@ Key Methodological Steps:
 
 Instrument Constants:
 - TESS Pixel Scale: 21.0 arcseconds / pixel (Ricker et al. 2015).
-- TESS Nominal PRF FWHM: ~0.75 pixels.
+- TESS Nominal PRF FWHM: ~2 pixels for this screening approximation.
 
 Contains zero target-specific constants; all celestial positions and TPF cubes are
 loaded dynamically from candidate-local workspace files.
@@ -43,11 +43,11 @@ from .workspace import CandidateWorkspace
 # All coordinate conversions between pixel and equatorial offsets rely on this factor.
 PIXEL_SCALE_ARCSEC = 21.0
 
-# ASTROPHYSICAL_HEURISTIC: nominal isotropic Gaussian PRF FWHM (~0.75 TESS pixels).
-# A pure Gaussian approximation ignores the wavelength-dependent, asymmetric, and
-# field-position-dependent wings of the true TESS PRF.  This simplification limits
-# the model to screening-level diagnostics rather than calibrated astrometry.
-PRF_FWHM_PIXELS = 0.75
+# ASTROPHYSICAL_HEURISTIC: a detector-scale nominal isotropic Gaussian width
+# provides a less artificially compact screening template. The true TESS PRF
+# remains wavelength-, temperature-, and field-position-dependent, so this is
+# deliberately not a replacement for the calibrated PRF-library model.
+PRF_FWHM_PIXELS = 2.0
 
 # QUALITY_HARD_MASK: bitwise OR of TESS data-quality flags for severe instrumental
 # anomalies (momentum dumps, desaturation events, cosmic-ray hits).  Cadences whose
@@ -123,7 +123,7 @@ def gaussian_prf_kernel(
     -----------------------
     The true TESS PRF is wavelength-dependent, mildly asymmetric, and varies
     with detector field position (Twicken et al. 2018).  An isotropic
-    Gaussian with a fixed 0.75-pixel FWHM is a first-order approximation
+    Gaussian with a fixed nominal detector-scale FWHM is a first-order approximation
     suitable for screening-level source-localisation but not for calibrated
     astrometry.  Formal TESS PRF library templates are not used; this is an
     intentional methodological simplification documented in the output
@@ -140,7 +140,7 @@ def gaussian_prf_kernel(
     y0 : float
         Source row centre in pixel units.
     fwhm_pixels : float, optional
-        Gaussian FWHM in TESS pixels.  Default is ``PRF_FWHM_PIXELS`` (0.75).
+        Gaussian FWHM in TESS pixels. Default is ``PRF_FWHM_PIXELS``.
 
     Returns
     -------
@@ -1125,7 +1125,12 @@ def run_prf_localization(
     )
     neighbors, source_catalog = _load_archival_gaia_neighbors(workspace)
 
-    cubes = load_tpf_cubes(workspace, require_raw_provenance=True)
+    skipped_tpf_products: List[Dict[str, str]] = []
+    cubes = load_tpf_cubes(
+        workspace,
+        require_raw_provenance=True,
+        skipped_products=skipped_tpf_products,
+    )
     if not cubes:
         source = "not-run-no-candidate-tpf"
     elif not candidate_ephemeris:
@@ -1264,9 +1269,10 @@ def run_prf_localization(
             "Gaussian-PRF non-negative least-squares screening of absolute "
             "out-of-transit minus in-transit difference images"
         ),
-        "prf_model": "isotropic Gaussian, FWHM=0.75 TESS pixels",
+        "prf_model": "isotropic Gaussian, nominal FWHM=2.0 TESS pixels",
         "search_radius_arcsec": float(search_radius_arcsec),
         "source_catalog": source_catalog,
+        "skipped_tpf_products": skipped_tpf_products,
         "sector_results": sector_results,
         "summary": {
             "n_sectors": len(sector_results),

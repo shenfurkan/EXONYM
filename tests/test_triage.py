@@ -10,6 +10,8 @@ import numpy as np
 import pytest
 import lightkurve as lk
 
+from exonym import __version__
+import exonym.engines as engines_module
 from exonym.__main__ import main
 from exonym.engines import report_candidate_engines, run_automated_triage, run_engine
 from exonym.isolation import IsolationReport
@@ -327,8 +329,48 @@ def test_engine_run_generates_valid_schema_manifest(tmp_path: Path):
     assert manifest_data["status"] == "succeeded"
     assert len(manifest_data["inputs"]) >= 1
     assert len(manifest_data["outputs"]) >= 1
+    assert isinstance(manifest_data["runtime"]["version"], str)
+    assert manifest_data["runtime"]["version_known"] is True
 
     # Verify that schemas.py validates the workspace with 0 violations
+    report = IsolationReport()
+    validate_schemas(tmp_path, report)
+    assert report.ok, f"Schema violations: {[v.detail for v in report.violations]}"
+
+
+def test_engine_run_records_unknown_dependency_version_without_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Arrange
+    candidate = create_candidate(tmp_path, "synth-unversioned-engine")
+    output = candidate.path / "outputs" / "screen.json"
+    output.write_text("{}\n", encoding="utf-8")
+    unversioned = engines_module.EngineStatus(
+        name="screen",
+        capability="screening",
+        optional_group="core",
+        module_name="synthetic_unversioned",
+        description="Synthetic unversioned engine.",
+        installed=True,
+        version=None,
+    )
+    monkeypatch.setattr(engines_module, "get_engine", lambda _name: unversioned)
+    monkeypatch.setattr(
+        "exonym.screening.run_fixed_ephemeris_screen",
+        lambda workspace, signal=None: output,
+    )
+
+    # Act
+    manifest_path = engines_module.run_engine(candidate, "screen")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    # Assert
+    assert manifest["runtime"] == {
+        "kind": "direct",
+        "version": None,
+        "version_known": False,
+        "executable": "synthetic_unversioned",
+    }
     report = IsolationReport()
     validate_schemas(tmp_path, report)
     assert report.ok, f"Schema violations: {[v.detail for v in report.violations]}"
@@ -365,10 +407,89 @@ def test_automated_triage_requires_review_for_uncalibrated_activity(tmp_path: Pa
     assert {item["name"] for item in evidence["diagnostics"]} == {
         "screening", "archive", "localization", "activity", "dilution"
     }
+    statistical_manifest = next(
+        (candidate_path / "runs" / "statistical-vetting").glob("*/engine-run.json")
+    )
+    statistical_runtime = json.loads(
+        statistical_manifest.read_text(encoding="utf-8")
+    )["runtime"]
+    assert statistical_runtime == {
+        "kind": "direct",
+        "version": __version__,
+        "version_known": True,
+        "executable": "exonym.statistical_vetting",
+    }
 
     report = IsolationReport()
     validate_schemas(tmp_path, report)
     assert report.ok, f"Schema violations: {[v.detail for v in report.violations]}"
+
+
+def test_statistical_vetting_routes_present_rv_data_through_triage(tmp_path: Path):
+    """A real candidate-local RV report becomes an explicit triage diagnostic."""
+    from exonym.radial_velocity import (
+        fit_radial_velocity,
+        ingest_radial_velocity_observations,
+        keplerian_velocity_m_per_s,
+    )
+    from exonym.statistical_vetting import build_statistical_vetting_evidence
+
+    candidate_path = _setup_synthetic_workspace(tmp_path, "synth-rv-triage")
+    candidate = load_candidate(tmp_path, "synth-rv-triage")
+    _write_passing_pre_vetting_artifacts(candidate_path, candidate.candidate_id)
+
+    period_days = 2.5
+    reference_time = 100.5
+    times = np.linspace(reference_time - 10.0, reference_time + 10.0, 48)
+    velocities = keplerian_velocity_m_per_s(
+        times,
+        semi_amplitude_m_per_s=10.0,
+        mean_anomaly_reference_rad=0.0,
+        eccentricity=0.0,
+        argument_periastron_rad=0.0,
+        reference_time_bjd_tdb=reference_time,
+        period_days=period_days,
+    )
+    source = tmp_path / "synthetic-rv-triage.json"
+    source.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "candidate_id": candidate.candidate_id,
+                "observations": [
+                    {
+                        "observation_time": {"value": float(time), "unit": "BJD_TDB"},
+                        "velocity": {"value": float(velocity), "unit": "m/s"},
+                        "uncertainty": {"value": 0.5, "unit": "m/s"},
+                        "instrument": "synthetic-spectrograph",
+                        "provenance": {
+                            "source_uri": "https://example.invalid/synthetic-rv",
+                            "retrieved_at_utc": "2000-01-01T00:00:00Z",
+                            "record_label": "synthetic-rv-{0}".format(index),
+                        },
+                    }
+                    for index, (time, velocity) in enumerate(zip(times, velocities))
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    ingest_radial_velocity_observations(candidate, source)
+    report_path = fit_radial_velocity(candidate, period_days)
+    assert report_path.is_file()
+
+    evidence = json.loads(build_statistical_vetting_evidence(candidate).read_text(encoding="utf-8"))
+    rv = next(record for record in evidence["diagnostics"] if record["name"] == "radial-velocity")
+    assert rv["status"] == "review-required"
+    assert rv["score"]["value"] >= 10.0
+    assert evidence["status"] == "review-required"
+
+    triage = json.loads(run_automated_triage(candidate).read_text(encoding="utf-8"))
+    assert len(triage["records"]) == 6
+    assert any("radial-velocity:" in record["reason"] for record in triage["records"])
+    audit = IsolationReport()
+    validate_schemas(tmp_path, audit)
+    assert audit.ok, f"Schema violations: {[violation.detail for violation in audit.violations]}"
 
 
 def test_automated_triage_review_required_on_odd_even_anomaly(tmp_path: Path):
@@ -459,14 +580,93 @@ def test_statistical_vetting_requires_review_for_inconclusive_localization(tmp_p
     _write_passing_pre_vetting_artifacts(candidate_path, candidate.candidate_id)
     localization_path = candidate_path / "outputs" / "prf_localization_results.json"
     localization = json.loads(localization_path.read_text(encoding="utf-8"))
-    localization["summary"]["conclusion"] = "inconclusive_no_competing_sources_modeled"
+    localization["summary"].update(
+        {
+            "conclusion": "inconclusive_no_competing_sources_modeled",
+            "median_target_to_other_difference_ratio": None,
+            "sectors_with_competing_sources_modeled": 0,
+        }
+    )
     localization_path.write_text(json.dumps(localization), encoding="utf-8")
 
-    evidence = json.loads(build_statistical_vetting_evidence(candidate).read_text(encoding="utf-8"))
+    evidence = json.loads(
+        build_statistical_vetting_evidence(candidate).read_text(encoding="utf-8")
+    )
 
-    record = next(item for item in evidence["diagnostics"] if item["name"] == "localization")
+    record = next(
+        item for item in evidence["diagnostics"] if item["name"] == "localization"
+    )
     assert record["status"] == "review-required"
+    assert "modeled no competing sources" in record["reason"]
     assert evidence["status"] == "review-required"
+
+
+@pytest.mark.parametrize(
+    ("ratio", "reason_fragment"),
+    [
+        (2.0, "target-favored"),
+        (1.0, "competitor-favored"),
+        (0.5, "competitor-favored"),
+    ],
+)
+def test_statistical_vetting_distinguishes_uncalibrated_localization_ratio_direction(
+    tmp_path: Path, ratio: float, reason_fragment: str
+):
+    from exonym.statistical_vetting import build_statistical_vetting_evidence
+
+    candidate_path = _setup_synthetic_workspace(tmp_path, "synth-localization-ratio")
+    candidate = load_candidate(tmp_path, "synth-localization-ratio")
+    _write_passing_pre_vetting_artifacts(candidate_path, candidate.candidate_id)
+    localization_path = candidate_path / "outputs" / "prf_localization_results.json"
+    localization = json.loads(localization_path.read_text(encoding="utf-8"))
+    localization["summary"].update(
+        {
+            "median_target_to_other_difference_ratio": ratio,
+            "sectors_with_competing_sources_modeled": 1,
+        }
+    )
+    localization_path.write_text(json.dumps(localization), encoding="utf-8")
+
+    evidence = json.loads(
+        build_statistical_vetting_evidence(candidate).read_text(encoding="utf-8")
+    )
+
+    record = next(
+        item for item in evidence["diagnostics"] if item["name"] == "localization"
+    )
+    assert record["status"] == "review-required"
+    assert reason_fragment in record["reason"]
+    assert evidence["status"] == "review-required"
+
+
+def test_statistical_vetting_blocks_missing_localization_ratio_with_modeled_competitor(
+    tmp_path: Path,
+):
+    from exonym.statistical_vetting import build_statistical_vetting_evidence
+
+    candidate_path = _setup_synthetic_workspace(tmp_path, "synth-localization-missing-ratio")
+    candidate = load_candidate(tmp_path, "synth-localization-missing-ratio")
+    _write_passing_pre_vetting_artifacts(candidate_path, candidate.candidate_id)
+    localization_path = candidate_path / "outputs" / "prf_localization_results.json"
+    localization = json.loads(localization_path.read_text(encoding="utf-8"))
+    localization["summary"].update(
+        {
+            "median_target_to_other_difference_ratio": None,
+            "sectors_with_competing_sources_modeled": 1,
+        }
+    )
+    localization_path.write_text(json.dumps(localization), encoding="utf-8")
+
+    evidence = json.loads(
+        build_statistical_vetting_evidence(candidate).read_text(encoding="utf-8")
+    )
+
+    record = next(
+        item for item in evidence["diagnostics"] if item["name"] == "localization"
+    )
+    assert record["status"] == "blocked"
+    assert "modeled competing sources" in record["reason"]
+    assert evidence["status"] == "blocked"
 
 
 def test_statistical_vetting_blocks_self_declared_localization_calibration(tmp_path: Path):
@@ -593,6 +793,31 @@ def test_activity_harmonic_requires_human_review(tmp_path: Path):
     activity = next(record for record in evidence["diagnostics"] if record["name"] == "activity")
     assert activity["status"] == "review-required"
     assert evidence["status"] == "review-required"
+
+
+def test_statistical_vetting_blocks_activity_alias_triage_without_screening_ephemeris(
+    tmp_path: Path,
+):
+    from exonym.statistical_vetting import build_statistical_vetting_evidence
+
+    candidate_path = _setup_synthetic_workspace(tmp_path, "synth-activity-no-ephemeris")
+    candidate = load_candidate(tmp_path, "synth-activity-no-ephemeris")
+    _write_passing_pre_vetting_artifacts(candidate_path, candidate.candidate_id)
+    screen_path = candidate_path / "outputs" / "fixed_ephemeris_screen.json"
+    screen = json.loads(screen_path.read_text(encoding="utf-8"))
+    screen.pop("ephemeris")
+    screen_path.write_text(json.dumps(screen), encoding="utf-8")
+
+    evidence = json.loads(
+        build_statistical_vetting_evidence(candidate).read_text(encoding="utf-8")
+    )
+
+    activity = next(
+        record for record in evidence["diagnostics"] if record["name"] == "activity"
+    )
+    assert activity["status"] == "blocked"
+    assert "requires a finite screening ephemeris transit period" in activity["reason"]
+    assert evidence["status"] == "blocked"
 
 
 def test_vetting_readiness_refuses_review_required_evidence_without_claims(tmp_path: Path):

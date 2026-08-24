@@ -1,9 +1,13 @@
-"""Candidate data ingestion: network fetch plus offline provenance recording.
+"""Candidate data ingestion: network retrieval and offline provenance records.
 
-The network fetchers retrieve selected SPOC or TESSCut light curves from MAST
-via lightkurve. ``ingest_products`` is a pure function that copies downloaded
-products into ``candidate/<id>/data/raw/`` and writes
-``.provenance.json`` sidecars, satisfying the acquisition gate.
+Network fetchers retrieve selected official products from MAST through optional
+dependencies. The ingestion entry point copies caller-provided downloaded
+files into candidate data/raw and writes provenance sidecars, so later
+workflow steps can bind raw bytes to their recorded source URI.
+
+Scientific Boundary:
+    Downloading or recording a product establishes acquisition provenance, not
+    photometric quality, a detected signal, or an astrophysical conclusion.
 """
 
 from __future__ import annotations
@@ -11,7 +15,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Set, Tuple
 from urllib.parse import quote
 
 from .catalog import write_provenance_sidecar
@@ -19,6 +23,40 @@ from .workspace import CandidateWorkspace
 
 Product = Tuple[Path, str]  # (local product path, source URI)
 _PROVIDERS = ("spoc",)
+
+
+class FetchedProducts(list):
+    """List-like downloaded products that own one temporary staging directory.
+
+    Use a fetched batch as a context manager when combining products from
+    multiple archive queries. Passing one batch directly to :func:`ingest_products`
+    also releases its staging directory after the ingest attempt, whether or
+    not the candidate-local commit succeeds.
+    """
+
+    def __init__(self, staging_path: Optional[Path] = None) -> None:
+        super().__init__()
+        self._staging_path = staging_path
+        self._cleaned = False
+
+    @property
+    def staging_path(self) -> Optional[Path]:
+        """Return the owned temporary directory, if this batch downloaded files."""
+        return self._staging_path
+
+    def cleanup(self) -> None:
+        """Remove the owned staging directory once product bytes are no longer needed."""
+        if self._staging_path is None or self._cleaned:
+            return
+        self._cleaned = True
+        shutil.rmtree(self._staging_path, ignore_errors=True)
+
+    def __enter__(self) -> "FetchedProducts":
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> bool:
+        self.cleanup()
+        return False
 
 
 def _validate_provider(provider: str) -> str:
@@ -29,11 +67,37 @@ def _validate_provider(provider: str) -> str:
     return provider
 
 
+def _coerce_sector_value(value: object) -> Optional[int]:
+    """Parse one positive sector value without guessing from product filenames."""
+    try:
+        sector = int(value)
+    except (TypeError, ValueError, OverflowError):
+        text = str(value).strip()
+        if text.lower().startswith("s"):
+            text = text[1:]
+        try:
+            sector = int(text)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return sector if sector > 0 else None
+
+
 def _sector_value(row: object) -> Optional[int]:
     try:
-        return int(row["sequence_number"]) or None  # type: ignore[index]
-    except (KeyError, TypeError, ValueError):
+        value = row["sequence_number"]  # type: ignore[index]
+    except (KeyError, IndexError, TypeError):
         return None
+    return _coerce_sector_value(value)
+
+
+def _requested_sectors(sectors: Optional[Sequence[int]]) -> Optional[Set[int]]:
+    """Normalize an explicit sector filter or reject malformed selections loudly."""
+    if sectors is None:
+        return None
+    normalized = {_coerce_sector_value(sector) for sector in sectors}
+    if None in normalized:
+        raise ValueError("sectors must contain positive integer values")
+    return {int(sector) for sector in normalized}
 
 
 def _mast_product_data_uri(row: object) -> str:
@@ -85,60 +149,115 @@ def _download_spoc_product(row: object, staging: Path) -> Path:
     return destination
 
 
+def _fetch_spoc_products(search: object, sectors: Optional[Sequence[int]]) -> FetchedProducts:
+    """Download selected archive rows into an owned temporary staging directory.
+
+    An explicit sector selection is a provenance constraint. Rows without a
+    usable ``sequence_number`` are therefore excluded rather than downloaded
+    under an unknown sector. A failed download removes all partially staged
+    bytes before propagating the archive error.
+    """
+    requested_sectors = _requested_sectors(sectors)
+    selected_rows: List[object] = []
+    for index in range(len(search)):  # type: ignore[arg-type]
+        row = search.table[index]  # type: ignore[union-attr]
+        sector_value = _sector_value(row)
+        if requested_sectors is not None:
+            if sector_value is None or sector_value not in requested_sectors:
+                continue
+        selected_rows.append(row)
+
+    if not selected_rows:
+        return FetchedProducts()
+
+    products = FetchedProducts(Path(tempfile.mkdtemp(prefix="exonym-ingest-")))
+    completed = False
+    try:
+        for row in selected_rows:
+            fits_path = _download_spoc_product(row, products.staging_path)  # type: ignore[arg-type]
+            products.append((fits_path, _mast_product_uri(row)))
+        completed = True
+        return products
+    finally:
+        if not completed:
+            products.cleanup()
+
+
 def ingest_products(
     workspace: CandidateWorkspace,
     products: Sequence[Product],
     fetched_by: str = "exonym-ingest/1.2.0",
 ) -> List[Path]:
-    """Copy products into ``data/raw/`` and write provenance sidecars.
+    """Atomically ingest downloaded products and write provenance sidecars.
 
-    Raises ``FileExistsError`` if a product name already exists in the raw
-    directory (no-clobber rule).
+    The operation plans every destination before modifying data/raw, stages
+    files and sidecars together, and removes committed files if a later move
+    fails. Existing raw names and sidecars are never overwritten.
+
+    Args:
+        workspace: Candidate workspace that owns the raw-product directory.
+        products: Local downloaded path and source-URI pairs to ingest.
+        fetched_by: Retrieval-agent label recorded in each provenance sidecar.
+
+    Returns:
+        Destination paths for successfully ingested raw products in input
+        order, or an empty list when products is empty.
+
+    Raises:
+        FileExistsError: If a destination product or provenance sidecar already
+            exists.
+        ValueError: If multiple batch entries would collide after naming.
+        OSError: If copying, sidecar creation, or final moves cannot complete.
     """
-    raw = workspace.path / "data" / "raw"
-    raw.mkdir(parents=True, exist_ok=True)
-    planned = []
-    seen_destinations = set()
-    for product, source_uri in products:
-        destination = raw / Path(product).name
-        sidecar = destination.with_name(destination.stem + ".provenance.json")
-        if destination.exists() or sidecar.exists():
-            raise FileExistsError("raw product or provenance sidecar already exists: {0}".format(destination))
-        if destination.name in seen_destinations or sidecar.name in seen_destinations:
-            raise ValueError("ingest batch contains colliding product or sidecar names")
-        seen_destinations.update((destination.name, sidecar.name))
-        planned.append((Path(product), str(source_uri), destination, sidecar))
-    if not planned:
-        return []
-
-    staging = Path(tempfile.mkdtemp(prefix=".ingest-staging-", dir=str(raw)))
-    committed: List[Path] = []
+    fetched_products = products if isinstance(products, FetchedProducts) else None
     try:
-        staged_pairs = []
-        for product, source_uri, destination, sidecar in planned:
-            staged_product = staging / destination.name
-            shutil.copy2(product, staged_product)
-            staged_sidecar = write_provenance_sidecar(
-                staged_product, source_uri, fetched_by=fetched_by
-            )
-            staged_pairs.append((staged_product, staged_sidecar, destination, sidecar))
-        for staged_product, staged_sidecar, destination, sidecar in staged_pairs:
-            shutil.move(str(staged_product), str(destination))
-            committed.append(destination)
-            try:
-                shutil.move(str(staged_sidecar), str(sidecar))
-                committed.append(sidecar)
-            except OSError:
-                destination.unlink(missing_ok=True)
-                committed.pop()
-                raise
-        return [destination for _, _, destination, _ in planned]
-    except Exception:
-        for path in reversed(committed):
-            path.unlink(missing_ok=True)
-        raise
+        raw = workspace.path / "data" / "raw"
+        raw.mkdir(parents=True, exist_ok=True)
+        planned = []
+        seen_destinations = set()
+        for product, source_uri in products:
+            destination = raw / Path(product).name
+            sidecar = destination.with_name(destination.stem + ".provenance.json")
+            if destination.exists() or sidecar.exists():
+                raise FileExistsError("raw product or provenance sidecar already exists: {0}".format(destination))
+            if destination.name in seen_destinations or sidecar.name in seen_destinations:
+                raise ValueError("ingest batch contains colliding product or sidecar names")
+            seen_destinations.update((destination.name, sidecar.name))
+            planned.append((Path(product), str(source_uri), destination, sidecar))
+        if not planned:
+            return []
+
+        staging = Path(tempfile.mkdtemp(prefix=".ingest-staging-", dir=str(raw)))
+        committed: List[Path] = []
+        try:
+            staged_pairs = []
+            for product, source_uri, destination, sidecar in planned:
+                staged_product = staging / destination.name
+                shutil.copy2(product, staged_product)
+                staged_sidecar = write_provenance_sidecar(
+                    staged_product, source_uri, fetched_by=fetched_by
+                )
+                staged_pairs.append((staged_product, staged_sidecar, destination, sidecar))
+            for staged_product, staged_sidecar, destination, sidecar in staged_pairs:
+                shutil.move(str(staged_product), str(destination))
+                committed.append(destination)
+                try:
+                    shutil.move(str(staged_sidecar), str(sidecar))
+                    committed.append(sidecar)
+                except OSError:
+                    destination.unlink(missing_ok=True)
+                    committed.pop()
+                    raise
+            return [destination for _, _, destination, _ in planned]
+        except Exception:
+            for path in reversed(committed):
+                path.unlink(missing_ok=True)
+            raise
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        if fetched_products is not None:
+            fetched_products.cleanup()
 
 
 def fetch_tess_products(
@@ -146,15 +265,31 @@ def fetch_tess_products(
     sectors: Optional[Sequence[int]] = None,
     exptime: int = 120,
     provider: str = "spoc",
-) -> List[Product]:
-    """Download light curves from the selected MAST provider.
+) -> FetchedProducts:
+    """Fetch official mission light curves into caller-owned staging paths.
 
-    Returns ``(local_path, source_uri)`` pairs staged in a temporary
-    directory. ``provider`` is currently limited to official SPOC products,
-    whose archived bytes and MAST data URI can be retained together. The caller
-    passes products to ``ingest_products``.
+    The returned list owns a temporary staging directory. Use it as a context
+    manager when combining batches, or pass it directly to ``ingest_products``;
+    either path removes the staged bytes after consumption. No candidate data
+    is modified until that separate ingestion step succeeds.
+
+    Args:
+        workspace: Candidate workspace that supplies the mission identifier.
+        sectors: Optional archive-sector selection applied before download.
+        exptime: Requested cadence exposure time in seconds.
+        provider: Supported official archive provider label.
+
+    Returns:
+        Context-manageable local staging-path and source-URI pairs for
+        downloaded light curves.
+
+    Raises:
+        ValueError: If provider or required candidate mission identifier is
+            invalid.
+        RuntimeError: If optional archive dependencies or product download are
+            unavailable.
     """
-    provider = _validate_provider(provider)
+    _validate_provider(provider)
     try:
         import lightkurve as lk
     except ImportError as exc:  # pragma: no cover - optional dependency
@@ -167,19 +302,9 @@ def fetch_tess_products(
 
     search = lk.search_lightcurve(target, author="SPOC", exptime=exptime)
     if not search:
-        return []
+        return FetchedProducts()
 
-    products: List[Product] = []
-    staging = Path(tempfile.mkdtemp(prefix="exonym-ingest-"))
-    for index in range(len(search)):
-        row = search.table[index]
-        sector_value = _sector_value(row)
-        if sectors is not None and sector_value is not None and sector_value not in sectors:
-            continue
-
-        fits_path = _download_spoc_product(row, staging)
-        products.append((fits_path, _mast_product_uri(row)))
-    return products
+    return _fetch_spoc_products(search, sectors)
 
 
 def fetch_tess_tpfs(
@@ -187,15 +312,33 @@ def fetch_tess_tpfs(
     sectors: Optional[Sequence[int]] = None,
     exptime: int = 120,
     provider: str = "spoc",
-) -> List[Product]:
-    """Download SPOC target pixel files from MAST (network access required).
+) -> FetchedProducts:
+    """Fetch official target-pixel files into caller-owned staging paths.
 
-    TPF products are staged as ``s{sec:04d}_tp.fits`` so the acquisition gate's
-    provenance sidecar convention (``<stem>.provenance.json``) applies to them
-    exactly like light curves — the ``tp`` stem marker is also what
-    ``inputs.load_tpf_cubes`` uses to distinguish TPFs from light curves.
+    Target-pixel products use the established filename marker that lets the
+    input loader distinguish them from light curves after provenance-aware
+    ingestion. The returned list owns its temporary staging directory; use it
+    as a context manager when combining batches, or pass it directly to
+    ``ingest_products``. Network retrieval does not write candidate data until
+    that separate ingestion step succeeds.
+
+    Args:
+        workspace: Candidate workspace that supplies the mission identifier.
+        sectors: Optional archive-sector selection applied before download.
+        exptime: Requested cadence exposure time in seconds.
+        provider: Supported official archive provider label.
+
+    Returns:
+        Context-manageable local staging-path and source-URI pairs for
+        downloaded target-pixel products.
+
+    Raises:
+        ValueError: If provider or required candidate mission identifier is
+            invalid.
+        RuntimeError: If optional archive dependencies or product download are
+            unavailable.
     """
-    provider = _validate_provider(provider)
+    _validate_provider(provider)
     try:
         import lightkurve as lk
     except ImportError as exc:  # pragma: no cover - optional dependency
@@ -208,16 +351,8 @@ def fetch_tess_tpfs(
 
     search = lk.search_targetpixelfile(target, author="SPOC", exptime=exptime)
     if not search:
-        return []
+        return FetchedProducts()
 
-    products: List[Product] = []
-    staging = Path(tempfile.mkdtemp(prefix="exonym-ingest-"))
-    for index in range(len(search)):
-        row = search.table[index]
-        sector_value = _sector_value(row)
-        if sectors is not None and sector_value is not None and sector_value not in sectors:
-            continue
-
-        fits_path = _download_spoc_product(row, staging)
-        products.append((fits_path, _mast_product_uri(row)))
-    return products
+    # SCIENTIFIC_BOUNDARY: Retain the MAST URI with each downloaded byte stream
+    # so later ingestion can record provenance without assigning data quality.
+    return _fetch_spoc_products(search, sectors)

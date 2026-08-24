@@ -60,8 +60,8 @@
         "source_row_number": {"type": "integer", "minimum": 2},
         "period_days": {"type": "number", "exclusiveMinimum": 0},
         "epoch_btjd": {"type": "number"},
-        "depth_ppm": {"type": "number"},
-        "duration_hours": {"type": "number"},
+        "depth_ppm": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000},
+        "duration_hours": {"type": "number", "exclusiveMinimum": 0},
         "source_time_system": {"type": "string", "minLength": 1}
       }
     }

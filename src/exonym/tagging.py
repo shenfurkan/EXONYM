@@ -22,7 +22,22 @@ def _tags(metadata: dict) -> List[str]:
 
 
 def add_tags(workspace: CandidateWorkspace, tags: Sequence[str]) -> List[str]:
-    """Append tags to a candidate record (deduplicated, case preserved)."""
+    """Append distinct, nonempty tags to one candidate record.
+
+    Tag spelling is preserved and existing tags remain in their original
+    order. The updated metadata is validated before it is written.
+
+    Args:
+        workspace: Candidate workspace whose metadata owns the tags.
+        tags: Proposed tags; empty values and already-present values are
+            ignored.
+
+    Returns:
+        The complete ordered tag list after any additions.
+
+    Raises:
+        ValueError: If the resulting candidate metadata is invalid.
+    """
     metadata = dict(workspace.metadata)
     current = _tags(metadata)
     seen = set(current)
@@ -39,6 +54,15 @@ def add_tags(workspace: CandidateWorkspace, tags: Sequence[str]) -> List[str]:
 
 
 def has_tag(workspace: CandidateWorkspace, tag: str) -> bool:
+    """Return whether a candidate has one exact metadata tag.
+
+    Args:
+        workspace: Candidate workspace to inspect.
+        tag: Case-sensitive tag to look up.
+
+    Returns:
+        ``True`` when ``tag`` is present in ``identifiers.tags``.
+    """
     return tag in _tags(workspace.metadata)
 
 
@@ -48,7 +72,21 @@ def filter_candidates(
     phase: Optional[str] = None,
     mission: Optional[str] = None,
 ) -> List[CandidateWorkspace]:
-    """Filter candidates by tag, workflow phase, and/or mission."""
+    """Filter candidate workspaces by optional metadata fields.
+
+    Every supplied criterion must match. Omitting a criterion leaves that
+    field unrestricted.
+
+    Args:
+        candidates: Candidate workspaces to consider.
+        tag: Optional exact metadata tag.
+        phase: Optional workflow phase.
+        mission: Optional originating mission identifier.
+
+    Returns:
+        Candidate workspaces that satisfy all supplied criteria, preserving
+        input order.
+    """
     filtered = []
     for candidate in candidates:
         if tag is not None and not has_tag(candidate, tag):
@@ -62,7 +100,21 @@ def filter_candidates(
 
 
 def evaluate_habitable_zone_tag(insolation_earth: float) -> Optional[str]:
-    """Return 'HabitableZoneCandidate' tag if insolation falls within Kopparapu HZ limits [0.32, 1.11]."""
+    """Return the metadata tag for the configured insolation interval.
+
+    The interval is used only to assign a candidate-management tag. It is not
+    a physical characterization or a habitability claim.
+
+    Args:
+        insolation_earth: Positive incident flux in Earth-insolation units.
+
+    Returns:
+        ``"HabitableZoneCandidate"`` for values in the configured inclusive
+        interval, otherwise ``None``.
+
+    Raises:
+        ValueError: If ``insolation_earth`` is not positive.
+    """
     if insolation_earth <= 0:
         raise ValueError("insolation_earth must be positive")
     if 0.32 <= insolation_earth <= 1.11:

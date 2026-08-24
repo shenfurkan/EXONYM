@@ -41,7 +41,8 @@
       "required": ["kind", "version"],
       "properties": {
         "kind": { "enum": ["direct", "container", "external"] },
-        "version": { "type": "string", "minLength": 1 },
+        "version": { "type": ["string", "null"], "minLength": 1 },
+        "version_known": { "type": "boolean" },
         "image_digest": {
           "type": "string",
           "pattern": "^sha256:[a-f0-9]{64}$"
@@ -91,6 +92,12 @@
             }
           }
         },
+        "sectors_used": {
+          "description": "Effective auto-vet sector filter passed to the search; null means all candidate-local sectors.",
+          "type": ["array", "null"],
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 1 }
+        },
         "claim_eligible": { "const": false },
         "disposition_changed": { "const": false },
         "workflow_advanced": { "const": false }
@@ -105,6 +112,57 @@
         "not": { "required": ["failure"] }
       },
       "else": { "required": ["failure"] }
+    },
+    {
+      "if": {
+        "properties": {
+          "runtime": {
+            "required": ["version_known"],
+            "properties": { "version_known": { "const": true } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime": {
+            "properties": { "version": { "type": "string", "minLength": 1 } }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "runtime": {
+            "required": ["version_known"],
+            "properties": { "version_known": { "const": false } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime": {
+            "properties": { "version": { "type": "null" } }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "runtime": {
+            "properties": { "version": { "type": "null" } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime": {
+            "required": ["version_known"],
+            "properties": { "version_known": { "const": false } }
+          }
+        }
+      }
     }
   ],
   "$defs": {

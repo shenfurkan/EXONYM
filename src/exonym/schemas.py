@@ -7,6 +7,11 @@ against ``schemas/claim.schema.json`` (JSON Schema draft 2020-12).
 
 Frozen legacy evidence under ``candidate/<id>/legacy-project/`` is excluded:
 it predates the schema system and is preserved as-is.
+
+Validation is intentionally structural and provenance-oriented: a valid schema
+record establishes that required fields, artifact paths, and recorded digests
+follow the local contract. It does not certify the scientific interpretation
+of an artifact or recreate a remote service response.
 """
 
 from __future__ import annotations
@@ -638,7 +643,19 @@ def _load_schemas(root: Path, report: IsolationReport) -> Dict[str, object]:
 
 
 def validate_schema_definitions(root: Path, report: IsolationReport) -> Dict[str, object]:
-    """Load and validate shared JSON Schema definitions without reading candidates."""
+    """Load and validate shared JSON Schema definitions without reading candidates.
+
+    Args:
+        root: Repository root that may provide authoritative ``schemas/``
+            resources.
+        report: Report to receive unavailable-resource and invalid-definition
+            findings.
+
+    Returns:
+        Mapping of successfully parsed schema filenames to JSON objects. A
+        missing optional ``jsonschema`` dependency is reported and yields an
+        empty mapping.
+    """
     root = Path(root).resolve()
     try:
         import jsonschema
@@ -786,10 +803,29 @@ def _validate_survey_sensitivity_artifact(
         for branch in branches.values():
             try:
                 best = branch["best"]
-                period_match = abs(float(best["best_period"]) / key[0] - 1.0) <= tolerance
-                delta_days = (float(best["best_epoch"]) - float(injection["epoch_btjd"]) + 0.5 * key[0]) % key[0] - 0.5 * key[0]
-                epoch_match = abs(delta_days * 24.0) <= key[1] * epoch_fraction
-                snr_pass = float(best["snr"]) >= minimum_snr and int(best["n_distinct_transit_events"]) >= 2
+                if not isinstance(best, dict):
+                    raise TypeError("BLS result must be an object")
+                if best.get("detection_status") == "no-detection":
+                    # A standard no-detection record intentionally has a
+                    # nullable ephemeris. It is a completed trial, not a
+                    # malformed recovery, and cannot satisfy any branch gate.
+                    period_match = False
+                    epoch_match = False
+                    snr_pass = False
+                else:
+                    period_match = (
+                        abs(float(best["best_period"]) / key[0] - 1.0) <= tolerance
+                    )
+                    delta_days = (
+                        float(best["best_epoch"])
+                        - float(injection["epoch_btjd"])
+                        + 0.5 * key[0]
+                    ) % key[0] - 0.5 * key[0]
+                    epoch_match = abs(delta_days * 24.0) <= key[1] * epoch_fraction
+                    snr_pass = (
+                        float(best["snr"]) >= minimum_snr
+                        and int(best["n_distinct_transit_events"]) >= 2
+                    )
                 expected_branch = {
                     "period_match": period_match,
                     "epoch_match": epoch_match,
@@ -923,7 +959,19 @@ def _validate_exofop_prior_retrieval(
 
 
 def validate_schemas(root: Path, report: IsolationReport) -> None:
-    """Append schema violations for every candidate record in the tree."""
+    """Append structural and provenance violations for candidate-owned records.
+
+    Args:
+        root: Repository root containing shared schemas and candidate
+            workspaces.
+        report: Report that receives schema, ownership, and hash-binding
+            findings.
+
+    Note:
+        Successful validation confirms the recorded local contract only. It
+        does not make a scientific claim, calibrate a method, or validate a
+        candidate.
+    """
     root = Path(root).resolve()
     schemas = validate_schema_definitions(root, report)
     if CANDIDATE_SCHEMA not in schemas or PROVENANCE_SCHEMA not in schemas:

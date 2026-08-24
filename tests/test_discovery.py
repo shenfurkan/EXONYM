@@ -251,6 +251,88 @@ def test_injection_recovery_no_detection_safe(monkeypatch):
     )
     assert len(results) == 1
     assert results[0]["recovered"] is False
+    assert results[0]["best"]["detection_status"] == "no-detection"
+
+
+def test_injection_recovery_retains_a_finite_low_snr_non_detection(monkeypatch):
+    """A below-threshold BLS result has no recoverable ephemeris to compare."""
+    from exonym.discovery import injection_recovery_diagnostics
+    from exonym.search import BLSSearchResult
+
+    time = np.linspace(0.0, 10.0, 200)
+    low_snr = BLSSearchResult(
+        best_period=None,
+        best_epoch=None,
+        best_depth_ppm=None,
+        best_duration_hours=None,
+        snr=2.5,
+        n_distinct_transit_events=2,
+        n_period_trials=24,
+        detection_status="no-detection",
+        best_depth_uncertainty_ppm=100.0,
+    )
+    monkeypatch.setattr(
+        "exonym.discovery.search_duration_grid", lambda *args, **kwargs: (low_snr, [])
+    )
+
+    result = injection_recovery_diagnostics(
+        time,
+        np.ones_like(time),
+        [{"epoch_btjd": 1.0, "period_days": 3.0, "duration_hours": 2.0, "depth_ppm": 1.0}],
+        duration_grid_hours=[2.0],
+        period_min_days=1.0,
+        period_max_days=10.0,
+        n_periods=10,
+        tolerance=0.1,
+    )[0]
+
+    assert result["recovered"] is False
+    assert result["best"]["detection_status"] == "no-detection"
+    assert result["best"]["snr"] == pytest.approx(2.5)
+    assert result["best"]["n_period_trials"] == 24
+
+
+def test_injection_recovery_literal_none_preserves_non_detection_trial_metadata(monkeypatch):
+    """A literal missing BLS result must become a retained non-detection record."""
+    time = np.linspace(0.0, 10.0, 200)
+    injection = {
+        "epoch_btjd": 1.0,
+        "period_days": 3.0,
+        "duration_hours": 2.0,
+        "depth_ppm": 1e-6,
+    }
+
+    monkeypatch.setattr(
+        "exonym.discovery.search_duration_grid", lambda *args, **kwargs: (None, [])
+    )
+
+    result = injection_recovery_diagnostics(
+        time,
+        np.ones_like(time),
+        [injection],
+        duration_grid_hours=[2.0],
+        period_min_days=1.0,
+        period_max_days=10.0,
+        n_periods=10,
+        tolerance=0.1,
+    )[0]
+
+    assert result["injection"] == injection
+    assert result["period_match"] is False
+    assert result["epoch_match"] is False
+    assert result["snr_pass"] is False
+    assert result["recovered"] is False
+    assert result["best"] == {
+        "best_period": None,
+        "best_epoch": None,
+        "best_depth_ppm": None,
+        "best_duration_hours": None,
+        "snr": None,
+        "n_distinct_transit_events": 0,
+        "n_period_trials": 10,
+        "detection_status": "no-detection",
+        "best_depth_uncertainty_ppm": None,
+    }
 
 
 def test_injection_recovery_requires_both_preprocessing_branches(monkeypatch):

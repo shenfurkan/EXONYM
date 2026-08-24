@@ -1,8 +1,20 @@
-"""Multi-mission catalog identifier parsing and provenance sidecar generation.
+"""Catalog identifier parsing, provenance sidecars, and feasibility helpers.
 
-Identifier parsers support TESS (TOI/TIC), Kepler (KOI), K2 (EPIC), PLATO
-(PIC), and CHEOPS target designations. The provenance generator is a pure
-function so it can be unit-tested offline and reused by the ingest engine.
+Identifier parsing and provenance writing are deterministic, target-neutral
+utilities used by ingestion. The numerical helpers estimate radial-velocity,
+astrometric, atmospheric-scale-height, and transmission observables from their
+explicit physical inputs; they are useful for planning, not fitted evidence.
+
+Astrophysical rationale:
+    The Doppler and astrometric helpers follow the two-body scaling relations
+    summarized in the project's Perryman radial-velocity and astrometry note.
+    Input and return units are encoded in their public function names and
+    docstrings so callers cannot silently mix catalog conventions.
+
+Scientific boundary:
+    These estimates do not consume candidate observations, uncertainty models,
+    or a scene model. They must not be interpreted as a detection or validation
+    result.
 """
 
 from __future__ import annotations
@@ -16,6 +28,17 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from .constants import (
+    BOLTZMANN_CONSTANT_J_K,
+    EARTH_MASS_ONE_JULIAN_YEAR_RV_SEMI_AMPLITUDE_M_PER_S,
+    EARTH_TO_SOLAR_MASS_PARAMETER_RATIO,
+    JULIAN_YEAR_DAYS,
+    NOMINAL_EARTH_EQUATORIAL_RADIUS_M,
+    NOMINAL_EARTH_MASS_PARAMETER_M3_S2,
+    NOMINAL_SOLAR_RADIUS_KM,
+    PROTON_MASS_KG,
+)
 
 MISSIONS = ("tess", "kepler", "k2", "plato", "cheops")
 INGEST_FETCHER = "exonym-ingest/1.2.0"
@@ -134,10 +157,10 @@ def calculate_radial_velocity_semi_amplitude(
         raise ValueError("eccentricity must satisfy 0 <= e < 1")
     sin_i = math.sin(math.radians(inclination_deg))
     return (
-        0.0895
+        EARTH_MASS_ONE_JULIAN_YEAR_RV_SEMI_AMPLITUDE_M_PER_S
         * (m_planet_earth * sin_i)
         * (m_star_solar ** (-2.0 / 3.0))
-        * ((period_days / 365.25) ** (-1.0 / 3.0))
+        * ((period_days / JULIAN_YEAR_DAYS) ** (-1.0 / 3.0))
         / math.sqrt(1.0 - eccentricity**2)
     )
 
@@ -156,7 +179,7 @@ def calculate_astrometric_wobble_microarcsec(
         or distance_pc <= 0
     ):
         raise ValueError("physical parameters must be positive")
-    m_earth_solar = 3.00348e-6
+    m_earth_solar = EARTH_TO_SOLAR_MASS_PARAMETER_RATIO
     m_p_solar = m_planet_earth * m_earth_solar
     alpha_arcsec = (m_p_solar / m_star_solar) * semi_major_axis_au / distance_pc
     return alpha_arcsec * 1.0e6
@@ -176,15 +199,11 @@ def calculate_atmospheric_scale_height_km(
         or mean_molecular_weight <= 0
     ):
         raise ValueError("physical parameters must be positive")
-    g_mks = 6.67430e-11
-    m_earth_kg = 5.9722e24
-    r_earth_m = 6.3710e6
-    k_b = 1.380649e-23
-    m_h_kg = 1.673557e-27
-
-    g_p = (g_mks * m_planet_earth * m_earth_kg) / ((r_planet_earth * r_earth_m) ** 2)
-    mu_kg = mean_molecular_weight * m_h_kg
-    h_meters = (k_b * t_eq_kelvin) / (mu_kg * g_p)
+    g_p = (
+        NOMINAL_EARTH_MASS_PARAMETER_M3_S2 * m_planet_earth
+    ) / ((r_planet_earth * NOMINAL_EARTH_EQUATORIAL_RADIUS_M) ** 2)
+    mu_kg = mean_molecular_weight * PROTON_MASS_KG
+    h_meters = (BOLTZMANN_CONSTANT_J_K * t_eq_kelvin) / (mu_kg * g_p)
     return h_meters / 1000.0
 
 
@@ -202,7 +221,7 @@ def calculate_transmission_signal_ppm(
         or n_scale_heights <= 0
     ):
         raise ValueError("physical parameters must be positive")
-    r_star_km = r_star_solar * 695700.0
-    r_planet_km = r_planet_earth * 6371.0
+    r_star_km = r_star_solar * NOMINAL_SOLAR_RADIUS_KM
+    r_planet_km = r_planet_earth * NOMINAL_EARTH_EQUATORIAL_RADIUS_M / 1.0e3
     delta_trans = (2.0 * r_planet_km * n_scale_heights * scale_height_km) / (r_star_km**2)
     return delta_trans * 1.0e6

@@ -582,49 +582,67 @@ def test_catalog_record_ephemeris_cli_writes_candidate_local_evidence(tmp_path, 
     assert "decisions/known_signal_ephemerides.json" in capsys.readouterr().out
 
 
-def test_ephemeris_half_period_alias_review_required(tmp_path):
-    """Candidate at P_cand = 2 × P_eb must route to review, not no-match."""
-    from exonym.ephemeris_matching import _compare_record
+def test_ephemeris_half_period_alias_uses_shortest_period_folding(tmp_path):
+    """A P/2 catalog alias must fold a one-known-period epoch offset to zero."""
+    candidate = _candidate(tmp_path)
+    _write_candidate_ephemeris(candidate, period_days=10.0, epoch_btjd=100.0)
+    body = (
+        b"pl_orbper,pl_tranmid,pl_trandur,pl_tranmid_systemref,pl_name\n"
+        b"5.0,2457105.0,2.0,BJD_TDB,Known EB\n"
+    )
+    fetch_catalog(candidate, ["nasa-exoplanet-archive"], _transport(200, body))
 
-    candidate = {"period_days": 4.0, "epoch_btjd": 2000.0, "duration_hours": 2.0}
-    source = {
-        "pl_orbper": 2.0,
-        "pl_tranmid": 2459000.0,
-        "pl_trandur": 2.0,
-        "pl_tranmid_systemref": "BJD_TDB",
-        "pl_name": "EB-Half",
-    }
-    snapshot = {"provider": "nasa-exoplanet-archive", "retrieval_id": "a" * 32, "snapshot": {"path": "test", "sha256": "b" * 64}}
+    record = json.loads(match_known_signal_ephemerides(candidate).read_text(encoding="utf-8"))
+    comparison = record["comparisons"][0]
 
-    result = _compare_record(candidate, source, 0, snapshot)
-    assert result is not None
-    assert result["period_harmonic_match"] is True
-    assert result["nearest_harmonic_factor"] == 0.5
-    # Must NOT be "no-ephemeris-match" — epoch match is at least "harmonic-parity-ambiguous"
-    assert result["epoch_match"] is not False or result["epoch_match"] == "harmonic-parity-ambiguous"
-    assert result["review_required"] is True
+    assert record["status"] == "review-required-known-signal-match"
+    assert comparison["nearest_harmonic_factor"] == 0.5
+    assert comparison["epoch_phase_delta_days"] == pytest.approx(0.0)
+    assert comparison["epoch_match"] is True
+    assert comparison["harmonic_parity_ambiguous"] is False
+    assert comparison["review_required"] is True
+    assert _audit(tmp_path).ok
 
 
-def test_ephemeris_double_period_alias_review_required(tmp_path):
-    """Candidate at P_cand = 0.5 × P_eb must route to review, not no-match."""
-    from exonym.ephemeris_matching import _compare_record
+def test_ephemeris_double_period_alias_remains_review_required(tmp_path):
+    """A 2P catalog alias must remain a reviewed harmonic match."""
+    candidate = _candidate(tmp_path)
+    _write_candidate_ephemeris(candidate, period_days=2.5, epoch_btjd=100.0)
+    body = (
+        b"pl_orbper,pl_tranmid,pl_trandur,pl_tranmid_systemref,pl_name\n"
+        b"5.0,2457102.5,2.0,BJD_TDB,Known EB\n"
+    )
+    fetch_catalog(candidate, ["nasa-exoplanet-archive"], _transport(200, body))
 
-    candidate = {"period_days": 1.0, "epoch_btjd": 2000.0, "duration_hours": 2.0}
-    source = {
-        "pl_orbper": 2.0,
-        "pl_tranmid": 2459000.0,
-        "pl_trandur": 2.0,
-        "pl_tranmid_systemref": "BJD_TDB",
-        "pl_name": "EB-Double",
-    }
-    snapshot = {"provider": "nasa-exoplanet-archive", "retrieval_id": "a" * 32, "snapshot": {"path": "test", "sha256": "b" * 64}}
+    record = json.loads(match_known_signal_ephemerides(candidate).read_text(encoding="utf-8"))
+    comparison = record["comparisons"][0]
 
-    result = _compare_record(candidate, source, 0, snapshot)
-    assert result is not None
-    assert result["period_harmonic_match"] is True
-    assert result["nearest_harmonic_factor"] == 2.0
-    assert result["epoch_match"] is not False or result["epoch_match"] == "harmonic-parity-ambiguous"
-    assert result["review_required"] is True
+    assert record["status"] == "review-required-known-signal-match"
+    assert comparison["nearest_harmonic_factor"] == 2.0
+    assert comparison["epoch_match"] is True
+    assert comparison["harmonic_parity_ambiguous"] is False
+    assert comparison["review_required"] is True
+    assert _audit(tmp_path).ok
+
+
+def test_ephemeris_harmonic_parity_mismatch_is_schema_valid_and_review_required(tmp_path):
+    """A non-unity harmonic with an unmatched epoch must not become no-match."""
+    candidate = _candidate(tmp_path)
+    _write_candidate_ephemeris(candidate, period_days=10.0, epoch_btjd=100.0)
+    body = (
+        b"pl_orbper,pl_tranmid,pl_trandur,pl_tranmid_systemref,pl_name\n"
+        b"5.0,2457102.5,2.0,BJD_TDB,Known EB\n"
+    )
+    fetch_catalog(candidate, ["nasa-exoplanet-archive"], _transport(200, body))
+
+    record = json.loads(match_known_signal_ephemerides(candidate).read_text(encoding="utf-8"))
+    comparison = record["comparisons"][0]
+
+    assert record["status"] == "review-required-period-harmonic"
+    assert comparison["epoch_match"] is False
+    assert comparison["harmonic_parity_ambiguous"] is True
+    assert comparison["review_required"] is True
+    assert _audit(tmp_path).ok
 
 
 def test_catalog_cli_dispatches_only_allowlisted_provider_names(tmp_path, monkeypatch, capsys):

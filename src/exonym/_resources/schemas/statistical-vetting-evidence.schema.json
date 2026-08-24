@@ -19,7 +19,7 @@
         "additionalProperties": false,
         "required": ["name", "status", "reason", "artifact", "calibration_source", "input_representation", "score", "uncertainty", "applicability_limits"],
         "properties": {
-          "name": { "enum": ["screening", "archive", "localization", "activity", "dilution"] },
+          "name": { "enum": ["screening", "archive", "localization", "activity", "dilution", "radial-velocity"] },
           "status": { "enum": ["pass", "review-required", "blocked"] },
           "reason": { "type": "string", "minLength": 1 },
           "artifact": {
