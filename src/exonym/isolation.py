@@ -568,10 +568,11 @@ def _is_excluded_neutral_directory(relative: Path) -> bool:
 
 
 def _allowed_neutral_file(relative: Path, path: Path) -> bool:
-    """Allow ordinary neutral text plus the exact target-neutral paper template."""
+    """Allow ordinary neutral text and the exact target-neutral paper sources."""
     if path.suffix.lower() in NEUTRAL_EXTENSIONS:
         return True
     return relative.as_posix() in {
+        "paper/paper.bib",
         "templates/paper/paper_template.tex",
         "src/exonym/_resources/templates/paper/paper_template.tex",
     }

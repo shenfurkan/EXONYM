@@ -102,9 +102,26 @@ def detrend_by_sector(
             trend_input = run_flux.copy()
             if not np.all(valid_flux):
                 indices = np.arange(run_flux.size)
-                trend_input[~valid_flux] = np.interp(
-                    indices[~valid_flux], indices[valid_flux], run_flux[valid_flux]
-                )
+                valid_idx = indices[valid_flux]
+                valid_vals = run_flux[valid_flux]
+                # NUMERICAL_GUARD: linear slope extrapolation instead of
+                # np.interp flat-clamping, mirroring the sector-edge guard in
+                # detrending._running_median_trend.
+                if valid_idx.size >= 2:
+                    from scipy.interpolate import interp1d
+
+                    interpolator = interp1d(
+                        valid_idx,
+                        valid_vals,
+                        kind="linear",
+                        fill_value="extrapolate",
+                        assume_sorted=True,
+                    )
+                    trend_input[~valid_flux] = interpolator(indices[~valid_flux])
+                else:
+                    trend_input[~valid_flux] = np.interp(
+                        indices[~valid_flux], valid_idx, valid_vals
+                    )
             trend = median_filter(trend_input, size=width, mode="nearest")
             patched = ~np.isfinite(trend) | (trend == 0)
             if patched.any():

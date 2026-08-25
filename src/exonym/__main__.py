@@ -193,7 +193,7 @@ def _build_parser() -> argparse.ArgumentParser:
     survey_auto_vet_parser.add_argument("--all", action="store_true", help="Process every registered candidate workspace.")
     survey_auto_vet_parser.add_argument("--sectors", nargs="+", type=int, default=None)
     survey_auto_vet_parser.add_argument("--n-draws", type=int, default=2000)
-    survey_auto_vet_parser.add_argument("--fit-samples", type=int, default=3000)
+    survey_auto_vet_parser.add_argument("--fit-samples", type=int, default=5000)
     survey_auto_vet_parser.add_argument("--no-download", action="store_true")
     survey_loop_parser = survey_commands.add_parser(
         "run-loop", help="Run bounded harvest and candidate-local vetting cycles; never reports a validation claim."
@@ -214,7 +214,7 @@ def _build_parser() -> argparse.ArgumentParser:
     survey_loop_parser.add_argument("--timeout", type=float, default=20.0)
     survey_loop_parser.add_argument("--freshness-hours", type=float, default=24.0)
     survey_loop_parser.add_argument("--n-draws", type=int, default=2000)
-    survey_loop_parser.add_argument("--fit-samples", type=int, default=3000)
+    survey_loop_parser.add_argument("--fit-samples", type=int, default=5000)
 
     engine_parser = commands.add_parser(
         "engine", help="Inspect and validate analytical and vetting engines."
@@ -539,6 +539,22 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use exactly one recorded candidate-local LDTk quadratic limb-darkening prior.",
     )
+    fit_parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=1,
+        help="Number of parallel worker processes for ensemble likelihood evaluation (default 1).",
+    )
+    fit_parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Report per-step sampling progress on stderr.",
+    )
+    fit_parser.add_argument(
+        "--resume",
+        default=None,
+        help="Path to a previous checkpoint .npz to resume from.",
+    )
 
     phasecurve_parser = commands.add_parser(
         "phasecurve", help="Phase curve and secondary eclipse harmonic search."
@@ -553,6 +569,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--signal",
         default=None,
         help="Per-signal transit config name (e.g. .01 -> config/signals/transit_config.01.json).",
+    )
+    ttv_parser.add_argument(
+        "--fit-orbital-decay",
+        action="store_true",
+        help="Include a formal quadratic-ephemeris period-derivative diagnostic.",
     )
 
     activity_parser = commands.add_parser(
@@ -607,6 +628,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Test a declared anomalous-transit hypothesis from data/external/anomalous_transit_hypothesis.json.",
     )
     pyppluss_parser.add_argument("candidate_id")
+    catwoman_parser = commands.add_parser(
+        "catwoman",
+        help="Test a declared terminator-asymmetry hypothesis with the optional Catwoman adapter.",
+    )
+    catwoman_parser.add_argument("candidate_id")
+    squishyplanet_parser = commands.add_parser(
+        "squishyplanet",
+        help="Test a declared terminator-asymmetry hypothesis with the optional SquishyPlanet adapter.",
+    )
+    squishyplanet_parser.add_argument("candidate_id")
     return parser
 
 
@@ -931,11 +962,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(output.relative_to(repository_root).as_posix())
             return 0
 
-        if args.command in ("planetsynth", "pyppluss"):
-            from .specialized_models import run_planetsynth, run_pyppluss
+        if args.command in ("planetsynth", "pyppluss", "catwoman", "squishyplanet"):
+            from .specialized_models import (
+                run_catwoman,
+                run_planetsynth,
+                run_pyppluss,
+                run_squishyplanet,
+            )
 
             candidate = load_candidate(repository_root, args.candidate_id)
-            result = run_planetsynth(candidate) if args.command == "planetsynth" else run_pyppluss(candidate)
+            runners = {
+                "planetsynth": run_planetsynth,
+                "pyppluss": run_pyppluss,
+                "catwoman": run_catwoman,
+                "squishyplanet": run_squishyplanet,
+            }
+            result = runners[args.command](candidate)
             output = result.report_path or result.manifest_path
             print(output.relative_to(repository_root).as_posix())
             return 0 if result.status == "succeeded" else 1
@@ -1174,6 +1216,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 use_ldtk_prior=args.ldtk_prior,
                 sampler=args.sampler,
                 detrending_method=args.detrending_method,
+                n_jobs=args.n_jobs,
+                progress=args.progress,
+                resume=args.resume,
             )
             print(output.relative_to(repository_root).as_posix())
             return 0
@@ -1188,7 +1233,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "ttv":
             from .ttv import run_ttv_analysis
 
-            output = run_ttv_analysis(candidate, signal=args.signal)
+            output = run_ttv_analysis(
+                candidate,
+                signal=args.signal,
+                fit_orbital_decay=args.fit_orbital_decay,
+            )
             print(output.relative_to(repository_root).as_posix())
             return 0
 

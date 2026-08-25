@@ -470,10 +470,12 @@ def localize_difference_image(
     weights = core_differences / float(np.sum(core_differences))
     centroid_x = float(np.sum(xx[core_mask] * weights))
     centroid_y = float(np.sum(yy[core_mask] * weights))
-    # Convert pixel offsets to equatorial arcseconds.
-    # NUMERICAL_GUARD: clamp cos(dec) ≥ 0.01 so RA offsets do not diverge
-    # for near-polar targets where cos(δ) → 0.
-    ra_offset = (centroid_x - float(target_x)) * pixel_scale_arcsec * max(cos_dec, 0.01)
+    # Convert pixel offsets to on-sky projected equatorial arcseconds.
+    # ASTROPHYSICAL_GUARD: the pixel X-axis already measures the projected
+    # displacement Δα·cos(δ); multiplying again by cos(δ) here (and again in
+    # vetting/centroid.py) compressed RA offsets by cos²(δ), silently
+    # suppressing centroid-shift significance for high-declination targets.
+    ra_offset = (centroid_x - float(target_x)) * pixel_scale_arcsec
     dec_offset = (centroid_y - float(target_y)) * pixel_scale_arcsec
     return {
         "ra_offset_arcsec": round(ra_offset, 4),

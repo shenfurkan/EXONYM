@@ -57,6 +57,8 @@ docs/
 !/README.md
 !/plan.md
 !/SECURITY.md
+!/CONTRIBUTING.md
+!/paper/paper.md
 !/templates/**/*.md
 !/src/exonym/_resources/templates/**/*.md
 .txt
@@ -93,7 +95,6 @@ desktop.ini
 .antigravity/
 .cursor/
 .opencode/
-SECURITY.md
 plan.md
 templates/notebooks/evidence_review.ipynb
 .gitignore

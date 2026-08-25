@@ -33,10 +33,15 @@ from .workspace import CandidateWorkspace
 
 PLANETSYNTH_ENGINE = "planetsynth"
 PYPPLUSS_ENGINE = "pyppluss"
+CATWOMAN_ENGINE = "catwoman"
+SQUISHYPLANET_ENGINE = "squishyplanet"
 PLANETSYNTH_INPUT = Path("data/external/planetsynth_characterization.json")
 PYPPLUSS_INPUT = Path("data/external/anomalous_transit_hypothesis.json")
+ASYMMETRIC_TRANSIT_INPUT = Path("data/external/asymmetric_transit_hypothesis.json")
 PLANETSYNTH_OUTPUT_PREFIX = "planetsynth_interpretation"
 PYPPLUSS_OUTPUT_PREFIX = "pyppluss_hypothesis_test"
+CATWOMAN_OUTPUT_PREFIX = "catwoman_terminator_asymmetry_test"
+SQUISHYPLANET_OUTPUT_PREFIX = "squishyplanet_terminator_asymmetry_test"
 MAX_INPUT_BYTES = 5 * 1024 * 1024
 
 
@@ -177,6 +182,73 @@ def _validate_pyppluss_applicability(payload: Mapping[str, Any]) -> None:
         ring_outer = _finite_value(hypothesis["ring_outer_radius_ratio"], "ring_outer_radius_ratio")
         if not planet_radius < ring_inner < ring_outer:
             raise ValueError("ringed-transit applicability requires planet_radius_ratio < ring_inner_radius_ratio < ring_outer_radius_ratio")
+
+
+def _validate_asymmetric_transit_applicability(
+    workspace: CandidateWorkspace, payload: Mapping[str, Any]
+) -> List[Dict[str, str]]:
+    """Validate one declared terminator-asymmetry observation and its inputs."""
+    observation = payload["observation"]
+    time_days = observation["time_days"]["values"]
+    flux = observation["normalized_flux"]["values"]
+    flux_error = observation["normalized_flux_error"]["values"]
+    if len(time_days) != len(flux) or len(time_days) != len(flux_error):
+        raise ValueError("asymmetric-transit time, flux, and uncertainty arrays must have equal length")
+    previous: Optional[float] = None
+    for index, value in enumerate(time_days):
+        current = _finite_value(value, "time_days[{0}]".format(index))
+        if previous is not None and current <= previous:
+            raise ValueError("asymmetric-transit time_days values must be strictly increasing")
+        previous = current
+    for index, (value, error) in enumerate(zip(flux, flux_error)):
+        normalized_flux = _finite_value(value, "normalized_flux[{0}]".format(index))
+        normalized_error = _finite_value(error, "normalized_flux_error[{0}]".format(index))
+        if not 0.5 <= normalized_flux <= 1.5:
+            raise ValueError("terminator-asymmetry applicability requires normalized flux between 0.5 and 1.5")
+        if normalized_error <= 0.0:
+            raise ValueError("terminator-asymmetry applicability requires positive flux uncertainties")
+    geometry = payload["geometry"]
+    period_days = _finite_value(geometry["period_days"], "period_days")
+    scaled_semimajor_axis = _finite_value(
+        geometry["scaled_semimajor_axis"], "scaled_semimajor_axis"
+    )
+    impact_parameter = _finite_value(geometry["impact_parameter"], "impact_parameter")
+    limb_darkening = geometry["quadratic_limb_darkening"]
+    _finite_value(limb_darkening["u1"], "quadratic_limb_darkening.u1")
+    _finite_value(limb_darkening["u2"], "quadratic_limb_darkening.u2")
+    if period_days <= 0.0 or scaled_semimajor_axis <= 1.0:
+        raise ValueError("terminator-asymmetry geometry requires positive period and scaled semimajor axis above 1")
+    if not 0.0 <= impact_parameter <= 1.5:
+        raise ValueError("terminator-asymmetry impact_parameter must be between 0 and 1.5")
+    hypothesis = payload["hypothesis"]
+    morning_radius = _finite_value(hypothesis["morning_radius_ratio"], "morning_radius_ratio")
+    evening_radius = _finite_value(hypothesis["evening_radius_ratio"], "evening_radius_ratio")
+    if not 0.0 < morning_radius <= 0.3 or not 0.0 < evening_radius <= 0.3:
+        raise ValueError("terminator-asymmetry radius ratios must be in (0, 0.3]")
+
+    artifacts = payload["provenance"]["input_artifacts"]
+    if not isinstance(artifacts, list) or not artifacts:
+        raise ValueError("terminator-asymmetry provenance requires candidate-owned input artifacts")
+    verified: List[Dict[str, str]] = []
+    workspace_root = workspace.path.resolve()
+    for index, artifact in enumerate(artifacts):
+        if not isinstance(artifact, Mapping):
+            raise ValueError("input_artifacts[{0}] must be an object".format(index))
+        relative_value = artifact.get("path")
+        digest = artifact.get("sha256")
+        role = artifact.get("role")
+        if not isinstance(relative_value, str) or not isinstance(digest, str) or not isinstance(role, str):
+            raise ValueError("input_artifacts[{0}] must declare path, sha256, and role".format(index))
+        relative_path = Path(relative_value)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise ValueError("input_artifacts[{0}] path must remain in the candidate workspace".format(index))
+        path = workspace.path / relative_path
+        if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(workspace_root):
+            raise ValueError("input_artifacts[{0}] must reference a regular candidate-owned file".format(index))
+        if _sha256(path) != digest:
+            raise ValueError("input_artifacts[{0}] SHA-256 does not match its candidate-owned file".format(index))
+        verified.append({"path": relative_path.as_posix(), "sha256": digest, "role": role})
+    return verified
 
 
 def _finite_json(value: Any) -> Any:
@@ -579,3 +651,189 @@ def run_pyppluss(workspace: CandidateWorkspace) -> AdapterRun:
         + [(report_path, "pyppluss-hypothesis-test")],
     )
     return AdapterRun("succeeded", manifest_path, report_path)
+
+
+def _run_terminator_asymmetry_adapter(
+    workspace: CandidateWorkspace,
+    engine: str,
+    module_name: str,
+    distribution: str,
+    output_prefix: str,
+) -> AdapterRun:
+    """Run one pinned external terminator-asymmetry adapter.
+
+    A supported package version must expose ``model_terminator_asymmetry`` with
+    keyword arguments for the declared time series, geometry, and asymmetric
+    radius ratios. It must return a mapping containing cadence-aligned finite
+    ``model_flux`` values. Unknown package APIs fail closed as unavailable
+    rather than being guessed at runtime.
+    """
+    input_path, payload = _read_input(
+        workspace, ASYMMETRIC_TRANSIT_INPUT, "asymmetric-transit-hypothesis.schema.json"
+    )
+    source_artifacts = _validate_asymmetric_transit_applicability(workspace, payload)
+    started_at = datetime.now(timezone.utc).isoformat()
+    try:
+        runtime, runtime_report = _resolve_runtime(module_name, distribution)
+    except LookupError as exc:
+        code, _, message = str(exc).partition(": ")
+        return _unavailable_run(
+            workspace, engine, input_path, started_at, code, message or code
+        )
+    run_id, run_dir = _create_run_dir(workspace, engine)
+    try:
+        module = _run_in_directory(run_dir, importlib.import_module, module_name)
+    except Exception as exc:
+        _clear_partial_run_outputs(run_dir)
+        manifest_path = _write_manifest(
+            workspace,
+            engine,
+            run_id,
+            run_dir,
+            started_at,
+            runtime,
+            input_path,
+            "failed",
+            [],
+            {"code": "module-import-failed", "message": str(exc)},
+        )
+        return AdapterRun("failed", manifest_path, None)
+    model = getattr(module, "model_terminator_asymmetry", None)
+    if not callable(model):
+        _clear_partial_run_outputs(run_dir)
+        return _unavailable_run(
+            workspace,
+            engine,
+            input_path,
+            started_at,
+            "unsupported-interface",
+            "{0} must expose callable model_terminator_asymmetry; no hypothesis test was written.".format(
+                distribution
+            ),
+            runtime,
+            run_id,
+            run_dir,
+        )
+
+    observation = payload["observation"]
+    geometry = payload["geometry"]
+    hypothesis = payload["hypothesis"]
+    try:
+        result = _finite_json(
+            _run_in_directory(
+                run_dir,
+                model,
+                time_days=observation["time_days"]["values"],
+                geometry=geometry,
+                morning_radius_ratio=hypothesis["morning_radius_ratio"],
+                evening_radius_ratio=hypothesis["evening_radius_ratio"],
+            )
+        )
+        if not isinstance(result, dict) or not isinstance(result.get("model_flux"), list):
+            raise ValueError("terminator-asymmetry result must provide a model_flux array")
+        model_flux = result["model_flux"]
+        measured_flux = observation["normalized_flux"]["values"]
+        flux_errors = observation["normalized_flux_error"]["values"]
+        if len(model_flux) != len(measured_flux):
+            raise ValueError("terminator-asymmetry model_flux length does not match the declared observation")
+        residuals = [
+            float(measured) - _finite_value(modeled, "terminator-asymmetry model_flux")
+            for measured, modeled in zip(measured_flux, model_flux)
+        ]
+        chi_square = sum(
+            (residual / float(error)) ** 2 for residual, error in zip(residuals, flux_errors)
+        )
+        rms = math.sqrt(sum(value * value for value in residuals) / len(residuals))
+        maximum = max(abs(value) for value in residuals)
+    except Exception as exc:
+        _clear_partial_run_outputs(run_dir)
+        manifest_path = _write_manifest(
+            workspace,
+            engine,
+            run_id,
+            run_dir,
+            started_at,
+            runtime,
+            input_path,
+            "failed",
+            [],
+            {"code": "adapter-execution-failed", "message": str(exc)},
+        )
+        return AdapterRun("failed", manifest_path, None)
+
+    raw_path = run_dir / "raw_result.json"
+    _write_json(raw_path, result)
+    package_outputs = _package_output_paths(run_dir, raw_path)
+    report_path = workspace.path / "outputs" / "{0}.{1}.json".format(output_prefix, run_id)
+    morning_radius = float(hypothesis["morning_radius_ratio"])
+    evening_radius = float(hypothesis["evening_radius_ratio"])
+    mean_radius = 0.5 * (morning_radius + evening_radius)
+    report = {
+        "schema_version": 1,
+        "candidate_id": workspace.candidate_id,
+        "run_id": run_id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "status": "succeeded",
+        "engine": engine,
+        "model": "terminator-asymmetry",
+        "input_artifact": _artifact(workspace, input_path, "asymmetric-transit-hypothesis"),
+        "source_artifacts": source_artifacts,
+        "raw_result_artifact": _artifact(workspace, raw_path, "{0}-raw-result".format(engine)),
+        "runtime": runtime_report,
+        "hypothesis": {
+            "morning_radius_ratio": morning_radius,
+            "evening_radius_ratio": evening_radius,
+            "radius_difference_ratio": evening_radius - morning_radius,
+            "fractional_radius_difference": abs(evening_radius - morning_radius) / mean_radius,
+        },
+        "fit_diagnostics": {
+            "chi_square_fixed_hypothesis": chi_square,
+            "rms_residual": {"value": rms, "unit": "relative_flux"},
+            "max_abs_residual": {"value": maximum, "unit": "relative_flux"},
+            "cadence_count": len(measured_flux),
+        },
+        "validation_eligible": False,
+        "claim_eligible": False,
+        "caveat": (
+            "This fixed terminator-asymmetry comparison tests one declared geometry only. "
+            "It does not establish clouds, rule out a symmetric planet, validate a planet, "
+            "or change a candidate disposition."
+        ),
+    }
+    _write_json(report_path, report)
+    manifest_path = _write_manifest(
+        workspace,
+        engine,
+        run_id,
+        run_dir,
+        started_at,
+        runtime,
+        input_path,
+        "succeeded",
+        [(raw_path, "{0}-raw-result".format(engine))]
+        + [(path, "package-output") for path in package_outputs]
+        + [(report_path, "{0}-terminator-asymmetry-test".format(engine))],
+    )
+    return AdapterRun("succeeded", manifest_path, report_path)
+
+
+def run_catwoman(workspace: CandidateWorkspace) -> AdapterRun:
+    """Run the candidate-owned Catwoman terminator-asymmetry diagnostic."""
+    return _run_terminator_asymmetry_adapter(
+        workspace,
+        CATWOMAN_ENGINE,
+        "catwoman",
+        "catwoman",
+        CATWOMAN_OUTPUT_PREFIX,
+    )
+
+
+def run_squishyplanet(workspace: CandidateWorkspace) -> AdapterRun:
+    """Run the candidate-owned SquishyPlanet terminator-asymmetry diagnostic."""
+    return _run_terminator_asymmetry_adapter(
+        workspace,
+        SQUISHYPLANET_ENGINE,
+        "squishyplanet",
+        "squishyplanet",
+        SQUISHYPLANET_OUTPUT_PREFIX,
+    )

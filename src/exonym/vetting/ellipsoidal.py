@@ -16,6 +16,11 @@ from __future__ import annotations
 import math
 from typing import Tuple
 
+from ..constants import ASTRONOMICAL_UNIT_M, NOMINAL_SOLAR_RADIUS_M
+
+# Single-source-of-truth conversion (IAU nominal values from constants.py).
+SOLAR_RADIUS_TO_AU = NOMINAL_SOLAR_RADIUS_M / ASTRONOMICAL_UNIT_M
+
 # ASTROPHYSICAL_HEURISTIC: The retained amplitude threshold is a conservative
 # binary-scenario screen, not a calibrated population probability.
 ELLIPSOIDAL_THRESHOLD_PPM = 100.0
@@ -38,7 +43,7 @@ def ellipsoidal_variation_amplitude_ppm(
     ):
         raise ValueError("physical parameters must be positive")
     sin_i = math.sin(math.radians(inclination_deg))
-    r_host_au = r_host_solar * 0.00465047
+    r_host_au = r_host_solar * SOLAR_RADIUS_TO_AU
     r_over_a = r_host_au / semi_major_axis_au
     amplitude_fraction = (
         alpha_ellip * (m_companion_solar / m_host_solar) * (r_over_a**3) * (sin_i**2)

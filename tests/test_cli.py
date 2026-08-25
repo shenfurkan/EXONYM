@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from exonym.__main__ import main
+from exonym.__main__ import main, _build_parser
 
 
 def _repo(tmp_path):
@@ -515,6 +515,34 @@ def test_cli_fit_passes_dynesty_sampler(tmp_path, capsys, mocker):
     assert main(root + ["fit", "candidate-alpha", "--sampler", "dynesty"]) == 0
     assert mock_fit.call_args.kwargs["sampler"] == "dynesty"
     assert "mcmc_transit_fit.json" in capsys.readouterr().out
+
+
+def test_cli_fit_n_jobs_flag(tmp_path):
+    """--n-jobs accepts integer and defaults to 1."""
+    repo = _repo(tmp_path)
+    root = ["--root", str(repo)]
+    parser = _build_parser()
+    ns = parser.parse_args(["fit", "tic-123", "--n-jobs", "2"])
+    assert ns.n_jobs == 2
+    # Default
+    ns_default = parser.parse_args(["fit", "tic-123"])
+    assert ns_default.n_jobs == 1
+
+
+def test_cli_fit_progress_flag(tmp_path):
+    """--progress is a boolean store_true."""
+    parser = _build_parser()
+    ns = parser.parse_args(["fit", "tic-123", "--progress"])
+    assert ns.progress is True
+
+
+def test_cli_fit_resume_flag(tmp_path):
+    """--resume accepts a string path."""
+    parser = _build_parser()
+    ns = parser.parse_args(["fit", "tic-123", "--resume", "checkpoint.npz"])
+    assert ns.resume == "checkpoint.npz"
+    ns_default = parser.parse_args(["fit", "tic-123"])
+    assert ns_default.resume is None
 
 
 def test_cli_eccentric_fit_requires_candidate_derived_inputs(tmp_path):

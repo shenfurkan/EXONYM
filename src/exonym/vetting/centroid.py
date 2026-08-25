@@ -38,9 +38,13 @@ def centroid_offset_z(
     """Return centroid-offset significance in sigma units.
 
     Args:
-        ra_offset_arcsec: Right-ascension offset in arcseconds.
+        ra_offset_arcsec: On-sky projected right-ascension offset in
+            arcseconds (i.e. already including the cos(dec) projection from
+            the detector pixel grid).
         dec_offset_arcsec: Declination offset in arcseconds.
-        dec_deg: Target declination in degrees.
+        dec_deg: Target declination in degrees; retained for interface
+            compatibility and physical-range validation only, since the
+            incoming offsets are already on-sky projected arcseconds.
         sigma_arcsec: One-sigma centroid uncertainty in arcseconds.
 
     Raises:
@@ -54,9 +58,10 @@ def centroid_offset_z(
         raise ValueError("dec_deg must be between -90 and 90 degrees")
     if sigma_arcsec <= 0.0:
         raise ValueError("sigma_arcsec must be positive")
-    separation = math.hypot(
-        ra_offset_arcsec * math.cos(math.radians(dec_deg)), dec_offset_arcsec
-    )
+    # ASTROPHYSICAL_GUARD: localization.py already reports on-sky projected
+    # arcseconds (pixel scale maps directly to Δα·cos(δ)); applying cos(dec)
+    # here a second time suppressed separation significance by cos²(δ).
+    separation = math.hypot(ra_offset_arcsec, dec_offset_arcsec)
     return separation / sigma_arcsec
 
 

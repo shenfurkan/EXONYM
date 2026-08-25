@@ -357,7 +357,7 @@ def _baseline_aware_frequency_factor(
     # NUMERICAL_GUARD: at least 2 trials to define a frequency span.
     natural_trials = max(2, int(np.ceil(frequency_span / natural_step)) + 1)
     # Scale frequency_factor so the evaluated grid size matches requested_minimum_trials.
-    return max(1e-4, natural_trials / float(requested_minimum_trials))
+    return min(1.0, max(1e-4, natural_trials / float(requested_minimum_trials)))
 
 
 def _distinct_transit_events(

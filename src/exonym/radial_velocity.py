@@ -192,7 +192,8 @@ def _solve_kepler_equation(
 
     A fixed number of Newton iterations can silently return a non-solution for
     high eccentricity or an unfortunate starting phase.  This vectorized
-    solver rejects non-finite inputs and raises if every requested cadence has
+    solver uses a Danby (1988) starter and Halley third-order iterations,
+    rejects non-finite inputs, and raises if every requested cadence has
     not converged to the declared angular residual tolerance.
     """
     mean_anomaly = np.asarray(mean_anomaly_rad, dtype=float)
@@ -211,11 +212,16 @@ def _solve_kepler_equation(
         return mean_anomaly.copy()
 
     reduced_mean_anomaly = np.mod(mean_anomaly, _TAU)
-    eccentric_anomaly = reduced_mean_anomaly + eccentricity * np.sin(reduced_mean_anomaly)
+    # Danby (1988) cubic starter: improves first-order convergence for high e
+    # and near-periastron phases relative to the naive E0 = M seed.
+    eccentric_anomaly = reduced_mean_anomaly + 0.85 * eccentricity * np.sign(np.sin(reduced_mean_anomaly))
     for _ in range(max_iterations):
-        residual = eccentric_anomaly - eccentricity * np.sin(eccentric_anomaly) - reduced_mean_anomaly
-        derivative = 1.0 - eccentricity * np.cos(eccentric_anomaly)
-        correction = residual / derivative
+        sin_e = np.sin(eccentric_anomaly)
+        cos_e = np.cos(eccentric_anomaly)
+        residual = eccentric_anomaly - eccentricity * sin_e - reduced_mean_anomaly
+        derivative = 1.0 - eccentricity * cos_e
+        # Halley's third-order Householder correction for cubic convergence.
+        correction = residual / (derivative - 0.5 * eccentricity * sin_e * residual / derivative)
         eccentric_anomaly -= correction
         if np.all(np.isfinite(correction)) and float(np.max(np.abs(correction))) <= tolerance_rad:
             break
@@ -796,7 +802,7 @@ def fit_radial_velocity(
                 ),
             },
             "kepler_equation_solver": {
-                "method": "Newton-Raphson with residual convergence check",
+                "method": "Danby starter + Halley third-order iteration with residual convergence check",
                 "tolerance_rad": KEPLER_SOLVER_TOLERANCE_RAD,
                 "max_iterations": KEPLER_SOLVER_MAX_ITERATIONS,
             },

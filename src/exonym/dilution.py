@@ -131,10 +131,26 @@ def _extract_cube_light_curves(
     return {"time": time, "light_curves": light_curves}
 
 
+def gaia_g_to_tess_mag(g_mag: float, bp_rp_color: Optional[float]) -> float:
+    """Convert a Gaia G magnitude to the approximate TESS T magnitude.
+
+    Uses the Stassun et al. (2019) cubic polynomial in ``G_BP - G_RP`` when a
+    color is available; otherwise applies the mean FGK offset ``T - G ~ -0.4``.
+    """
+    if bp_rp_color is None or not math.isfinite(bp_rp_color):
+        return g_mag - 0.4
+    c = float(bp_rp_color)
+    delta_t_g = (
+        -0.00522555 * c**3 + 0.0891337 * c**2 - 0.633923 * c + 0.0324473
+    )
+    return g_mag + delta_t_g
+
+
 def gaia_contamination_factor(
     neighbors: Sequence[Dict[str, Any]],
     search_radius_arcsec: float = 60.0,
     target_g_mag: Optional[float] = None,
+    target_bp_rp_color: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Summarize usable catalog-band neighbor flux ratios near the target.
 
@@ -160,6 +176,7 @@ def gaia_contamination_factor(
     total_ratio = 0.0
     included = 0
     valid_target_g_mag = _finite_float(target_g_mag)
+    valid_target_bp_rp = _finite_float(target_bp_rp_color)
     for row in neighbors:
         separation_arcsec = _finite_float(row.get("separation_arcsec"))
         if separation_arcsec is None or separation_arcsec > search_radius_arcsec:
@@ -170,7 +187,13 @@ def gaia_contamination_factor(
         if ratio is None and valid_target_g_mag is not None:
             g_mag = _finite_float(row.get("g_mag"))
             if g_mag is not None:
-                ratio = 10.0 ** (-0.4 * (g_mag - valid_target_g_mag))
+                # Bandpass-aware ratio: convert both magnitudes to the TESS
+                # T band when BP-RP colors are available (Stassun et al.
+                # 2019); otherwise retain the conservative Gaia G-band ratio.
+                neighbor_bp_rp = _finite_float(row.get("bp_rp_color"))
+                target_t_mag = gaia_g_to_tess_mag(valid_target_g_mag, valid_target_bp_rp)
+                neighbor_t_mag = gaia_g_to_tess_mag(g_mag, neighbor_bp_rp)
+                ratio = 10.0 ** (-0.4 * (neighbor_t_mag - target_t_mag))
         if ratio is None or ratio < 0.0:
             continue
         total_ratio += ratio
@@ -201,6 +224,13 @@ def _load_archival_gaia_neighbor_rows(
     target_g_mag = _finite_float(target.get("phot_g_mean_mag"))
     if target_g_mag is None:
         return [], None, metadata
+    # Optional BP-RP color enables the Stassun et al. (2019) Gaia G -> TESS T
+    # transformation; absent colors retain the conservative G-band ratios.
+    target_bp = _finite_float(target.get("phot_bp_mean_mag"))
+    target_rp = _finite_float(target.get("phot_rp_mean_mag"))
+    target_bp_rp_color: Optional[float] = None
+    if target_bp is not None and target_rp is not None:
+        target_bp_rp_color = target_bp - target_rp
 
     rows: List[Dict[str, Any]] = []
     for source in sources:
@@ -210,9 +240,15 @@ def _load_archival_gaia_neighbor_rows(
         g_mag = _finite_float(source.get("phot_g_mean_mag"))
         if separation_arcsec is None or g_mag is None:
             continue
+        neighbor_bp_rp_color: Optional[float] = None
+        neighbor_bp = _finite_float(source.get("phot_bp_mean_mag"))
+        neighbor_rp = _finite_float(source.get("phot_rp_mean_mag"))
+        if neighbor_bp is not None and neighbor_rp is not None:
+            neighbor_bp_rp_color = neighbor_bp - neighbor_rp
         rows.append(
             {
                 "g_mag": g_mag,
+                "bp_rp_color": neighbor_bp_rp_color,
                 "separation_arcsec": separation_arcsec,
                 "flux_ratio": None,
                 "is_target": False,
@@ -221,7 +257,8 @@ def _load_archival_gaia_neighbor_rows(
 
     metadata["target_g_mag"] = target_g_mag
     metadata["target_g_mag_unit"] = "mag"
-    return rows, target_g_mag, metadata
+    metadata["target_bp_rp_color"] = target_bp_rp_color
+    return rows, target_g_mag, metadata, target_bp_rp_color
 
 
 def _synthetic_tpf_cube() -> Dict[str, Any]:
@@ -313,7 +350,7 @@ def run_dilution_sensitivity(workspace: CandidateWorkspace) -> Path:
     ):
         raise RuntimeError("dilution sensitivity requires a complete candidate-derived transit ephemeris")
     source = "candidate-data"
-    neighbor_rows, target_g_mag, contamination_metadata = _load_archival_gaia_neighbor_rows(
+    neighbor_rows, target_g_mag, contamination_metadata, target_bp_rp_color = _load_archival_gaia_neighbor_rows(
         workspace
     )
 
@@ -334,7 +371,9 @@ def run_dilution_sensitivity(workspace: CandidateWorkspace) -> Path:
                 }
             )
 
-    contamination = gaia_contamination_factor(neighbor_rows, target_g_mag=target_g_mag)
+    contamination = gaia_contamination_factor(
+        neighbor_rows, target_g_mag=target_g_mag, target_bp_rp_color=target_bp_rp_color
+    )
     contamination.update(contamination_metadata)
     if not aperture_rows:
         raise RuntimeError("no measurable aperture light curves produced")

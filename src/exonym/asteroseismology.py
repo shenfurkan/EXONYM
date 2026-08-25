@@ -501,6 +501,10 @@ def seismic_uncertainty_summary(
     dnu_ratio = dnu_corrected_draws / DNU_SUN_UHZ
     teff_ratio = teff_draws / TEFF_SUN_K
     radius_draws = numax_ratio * np.sqrt(teff_ratio) / dnu_ratio**2
+    # ASTROPHYSICAL_NOTE: mass is derived from radius (not sampled independently),
+    # so rho = M / R^3 reduces exactly to dnu_ratio^2 with no Teff variance.
+    # This preserves the analytic cancellation required by the seismic scaling
+    # relations; do not replace this with an independent mass draw.
     mass_draws = radius_draws**3 * dnu_ratio**2
     return {
         "status": "resolution-and-temperature-monte-carlo",

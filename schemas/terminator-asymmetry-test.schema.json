@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/terminator-asymmetry-test-1.0.json",
+  "title": "Candidate-local terminator-asymmetry adapter report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "candidate_id", "run_id", "generated_at", "status", "engine", "model", "input_artifact", "source_artifacts", "raw_result_artifact", "runtime", "hypothesis", "fit_diagnostics", "validation_eligible", "claim_eligible", "caveat"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "candidate_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+    "run_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "status": {"const": "succeeded"},
+    "engine": {"enum": ["catwoman", "squishyplanet"]},
+    "model": {"const": "terminator-asymmetry"},
+    "input_artifact": {"$ref": "#/$defs/input-artifact"},
+    "source_artifacts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/artifact"}},
+    "raw_result_artifact": {"$ref": "#/$defs/raw-artifact"},
+    "runtime": {"$ref": "#/$defs/runtime"},
+    "hypothesis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["morning_radius_ratio", "evening_radius_ratio", "radius_difference_ratio", "fractional_radius_difference"],
+      "properties": {
+        "morning_radius_ratio": {"type": "number", "exclusiveMinimum": 0},
+        "evening_radius_ratio": {"type": "number", "exclusiveMinimum": 0},
+        "radius_difference_ratio": {"type": "number"},
+        "fractional_radius_difference": {"type": "number", "minimum": 0}
+      }
+    },
+    "fit_diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["chi_square_fixed_hypothesis", "rms_residual", "max_abs_residual", "cadence_count"],
+      "properties": {
+        "chi_square_fixed_hypothesis": {"type": "number", "minimum": 0},
+        "rms_residual": {"$ref": "#/$defs/flux"},
+        "max_abs_residual": {"$ref": "#/$defs/flux"},
+        "cadence_count": {"type": "integer", "minimum": 5}
+      }
+    },
+    "validation_eligible": {"const": false},
+    "claim_eligible": {"const": false},
+    "caveat": {"type": "string", "minLength": 1}
+  },
+  "$defs": {
+    "artifact": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "role"], "properties": {"path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "role": {"type": "string", "minLength": 1}}},
+    "input-artifact": {"allOf": [{"$ref": "#/$defs/artifact"}, {"properties": {"path": {"const": "data/external/asymmetric_transit_hypothesis.json"}, "role": {"const": "asymmetric-transit-hypothesis"}}}]},
+    "raw-artifact": {"allOf": [{"$ref": "#/$defs/artifact"}, {"properties": {"role": {"enum": ["catwoman-raw-result", "squishyplanet-raw-result"]}}}]},
+    "runtime": {"type": "object", "additionalProperties": false, "required": ["package", "version", "python_requires"], "properties": {"package": {"enum": ["catwoman", "squishyplanet"]}, "version": {"type": "string", "minLength": 1}, "python_requires": {"type": "string", "minLength": 1}}},
+    "flux": {"type": "object", "additionalProperties": false, "required": ["value", "unit"], "properties": {"value": {"type": "number", "minimum": 0}, "unit": {"const": "relative_flux"}}}
+  }
+}

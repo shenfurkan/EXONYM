@@ -369,9 +369,25 @@ def _running_median_trend(
             if mask.all():
                 raise ValueError("transit_mask must retain at least one out-of-transit cadence")
             indices = np.arange(values.size)
-            working[mask] = np.interp(
-                indices[mask], indices[~mask], values[~mask]
-            )
+            unmasked_idx = indices[~mask]
+            unmasked_vals = values[~mask]
+            # NUMERICAL_GUARD: np.interp flat-clamps masked cadences beyond the
+            # outermost unmasked samples (sector-edge transits), introducing an
+            # artificial gradient discontinuity into the running median. Linear
+            # slope extrapolation preserves the local trend at sector edges.
+            if unmasked_idx.size >= 2:
+                from scipy.interpolate import interp1d
+
+                interpolator = interp1d(
+                    unmasked_idx,
+                    unmasked_vals,
+                    kind="linear",
+                    fill_value="extrapolate",
+                    assume_sorted=True,
+                )
+                working[mask] = interpolator(indices[mask])
+            else:
+                working[mask] = np.interp(indices[mask], unmasked_idx, unmasked_vals)
     return median_filter(working, size=width, mode="nearest")
 
 

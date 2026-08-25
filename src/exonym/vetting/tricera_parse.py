@@ -225,6 +225,11 @@ def _prepare_observed_transit_input(workspace: Any, signal: Optional[str]) -> Di
         raise ValueError("TRICERATOPS could not determine the observed cadence")
     exposure_days = float(np.median(exposure_steps))
     flux_err_scalar = float(np.mean(phase_err))
+    # NUMERICAL_GUARD: adopt the inverse-variance effective error so mixed-cadence
+    # or multi-sector phase bins weight their uncertainties correctly instead of
+    # over-trusting a simple arithmetic mean of reported standard errors.
+    if np.all(phase_err > 0.0) and np.isfinite(phase_err).all():
+        flux_err_scalar = float(np.sqrt(phase_err.size / float(np.sum(1.0 / (phase_err ** 2)))))
     if not math.isfinite(exposure_days) or exposure_days <= 0.0 or not math.isfinite(flux_err_scalar):
         raise ValueError("TRICERATOPS observed photometry has invalid cadence or uncertainty")
 

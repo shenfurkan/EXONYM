@@ -3,7 +3,7 @@
   <br><br>
   <p>
     <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg" alt="Python 3.9+"></a>
-    <img src="https://img.shields.io/badge/version-1.4.0--beta-green.svg" alt="Version 1.4.0-beta">
+    <img src="https://img.shields.io/badge/version-1.4.0-green.svg" alt="Version 1.4.0">
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-orange.svg" alt="License"></a>
   </p>
 </div>
@@ -88,6 +88,10 @@ exonym --help
 ```
 
 Networked operations need access to their upstream services. In particular, SPOC ingestion needs a catalog identifier and network access, Gaia and ExoFOP queries depend on remote services, and TRICERATOPS and TLS require their optional dependency groups.
+
+## Citation and contributions
+
+The JOSS manuscript source is in `paper/`. `CITATION.cff` provides machine-readable citation metadata, and `CONTRIBUTING.md` describes development, testing, and research-isolation expectations. Replace the marked author and archival placeholders before making a release or submission.
 
 ## First discovery run
 
@@ -284,7 +288,7 @@ All commands accept the global form `exonym [--root <repository-root>] <command>
 | `sed <candidate-id>` | None | Writes `outputs/sed_fit_results.json` and an MCMC chain array. |
 | `fit <candidate-id>` | `--n-samples`, `--eccentric`, `--signal`, `--detrending-method` | Writes `outputs/mcmc_transit_fit.json` and an MCMC chain array. The default chain length is 5000 samples. |
 | `phasecurve <candidate-id>` | None | Writes `outputs/phase_curve_results.json`. |
-| `ttv <candidate-id>` | `--signal` | Writes `outputs/ttv_analysis_results.json` and may create a timing diagram. |
+| `ttv <candidate-id>` | `--signal`, `--fit-orbital-decay` | Writes `outputs/ttv_analysis_results.json` and may create a timing diagram. The optional derivative is a formal diagnostic, not evidence for orbital decay. |
 | `activity <candidate-id>` | None | Writes `outputs/stellar_activity_results.json`. |
 | `dilution <candidate-id>` | None | Writes `outputs/dilution_sensitivity_results.json` using supplied or previously archived neighbor information. |
 

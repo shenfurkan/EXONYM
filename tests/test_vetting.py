@@ -1,4 +1,4 @@
-import json
+﻿import json
 import hashlib
 import sys
 from types import SimpleNamespace
@@ -27,10 +27,16 @@ def test_legacy_numpy_scalar_compatibility_only_fills_missing_aliases():
 
 
 def test_centroid_offset_z_uses_cos_dec():
+    """Offsets are on-sky projected arcseconds; cos(dec) must NOT rescale again."""
     z = centroid_offset_z(ra_offset_arcsec=0.0, dec_offset_arcsec=3.0, dec_deg=0.0, sigma_arcsec=1.0)
     assert z == pytest.approx(3.0)
     z_on_target = centroid_offset_z(0.5, 0.5, 0.0, 1.0)
     assert z_on_target < 3.0
+    # Regression guard (Finding: double cos(dec)): a high-declination target
+    # must produce the same significance as an equatorial one for identical
+    # projected offsets.
+    z_high_dec = centroid_offset_z(ra_offset_arcsec=0.0, dec_offset_arcsec=3.0, dec_deg=69.5, sigma_arcsec=1.0)
+    assert z_high_dec == pytest.approx(3.0)
 
 
 def test_centroid_gate_threshold():
@@ -302,7 +308,7 @@ def test_run_triceratops_prefers_signal_config_over_bls(tmp_path, period_key):
         encoding="utf-8",
     )
 
-    # No TIC in stub → Monte Carlo cannot run; allow_fallback=True to test
+    # No TIC in stub â†’ Monte Carlo cannot run; allow_fallback=True to test
     # ephemeris routing (signal config takes priority over BLS).
     report_path = run_triceratops_simulation(stub, signal=".01", allow_fallback=True)
     report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -367,7 +373,7 @@ def test_run_triceratops_defaults_to_bls_without_signal(tmp_path):
         encoding="utf-8",
     )
 
-    # No TIC in stub → Monte Carlo cannot run; allow_fallback=True to test
+    # No TIC in stub â†’ Monte Carlo cannot run; allow_fallback=True to test
     # ephemeris routing (BLS results used when no signal is given).
     report_path = run_triceratops_simulation(stub, signal=None, allow_fallback=True)
     report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -380,7 +386,7 @@ def test_run_triceratops_falls_back_when_signal_config_missing(tmp_path):
     from exonym.vetting.tricera_parse import run_triceratops_simulation
 
     stub, _ = _vet_workspace_stub(tmp_path)
-    # No TIC → Monte Carlo cannot run; allow_fallback=True required.
+    # No TIC â†’ Monte Carlo cannot run; allow_fallback=True required.
     with pytest.warns(UserWarning, match="could not read signal transit config"):
         report_path = run_triceratops_simulation(stub, signal=".99", allow_fallback=True)
     report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -544,7 +550,7 @@ def test_run_triceratops_allow_fallback_writes_null_fpp_without_claim(tmp_path):
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["FPP"] is None, "FPP must be null, not a hardcoded passing value"
     assert report["source"] in ("not-run",), f"unexpected source: {report['source']}"
-    assert report["triceratops_error"] is None  # no error — just no TIC
+    assert report["triceratops_error"] is None  # no error â€” just no TIC
 
     claim_path = tmp_path / "claims" / "fpp_claim.json"
     assert not claim_path.exists()
@@ -778,7 +784,7 @@ def test_asteroseismology_recovers_injected_comb():
 
 
 def test_solar_analog_dnu_recovery():
-    """A solar-like comb (Δν ≈ 135.1 µHz) must be recoverable after raising DNU_MAX_UHZ."""
+    """A solar-like comb (Î”Î½ â‰ˆ 135.1 ÂµHz) must be recoverable after raising DNU_MAX_UHZ."""
     import math
 
     import numpy as np
@@ -805,7 +811,7 @@ def test_solar_analog_dnu_recovery():
 
     result = estimate_oscillation_envelope(time, flux, 100.0, 2000.0)
     assert result["dnu_candidate_uhz"] == pytest.approx(135.1, abs=10.0), (
-        "solar analog Δν recovery must succeed within 10 µHz"
+        "solar analog Î”Î½ recovery must succeed within 10 ÂµHz"
     )
 
 
@@ -2811,7 +2817,7 @@ def test_dilution_reads_validated_archival_neighbors(tmp_path):
     )
 
     # Act
-    rows, target_g_mag, metadata = _load_archival_gaia_neighbor_rows(workspace)
+    rows, target_g_mag, metadata, target_bp_rp_color = _load_archival_gaia_neighbor_rows(workspace)
 
     # Assert
     assert target_g_mag == pytest.approx(10.0)
@@ -2849,7 +2855,7 @@ def test_dilution_rejects_unvalidated_archival_neighbors(tmp_path):
     )
 
     # Act
-    rows, target_g_mag, metadata = _load_archival_gaia_neighbor_rows(workspace)
+    rows, target_g_mag, metadata, target_bp_rp_color = _load_archival_gaia_neighbor_rows(workspace)
 
     # Assert
     assert rows == []

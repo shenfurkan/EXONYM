@@ -172,6 +172,20 @@ _ENGINE_CATALOG: Tuple[EngineDescriptor, ...] = (
         description="Optional ringed or oblate anomalous-transit hypothesis adapter.",
     ),
     EngineDescriptor(
+        name="catwoman",
+        capability="physical-hypothesis-test",
+        optional_group="specialized",
+        module_name="catwoman",
+        description="Optional terminator-asymmetry transit hypothesis adapter.",
+    ),
+    EngineDescriptor(
+        name="squishyplanet",
+        capability="physical-hypothesis-test",
+        optional_group="specialized",
+        module_name="squishyplanet",
+        description="Optional terminator-asymmetry transit hypothesis adapter.",
+    ),
+    EngineDescriptor(
         name="localization",
         capability="astrometry",
         optional_group="core",
@@ -518,7 +532,7 @@ def run_engine(
                 output_files.append(out)
         elif engine_name == "ttv":
             from .ttv import run_ttv_analysis
-            out = run_ttv_analysis(workspace, signal=signal)
+            out = run_ttv_analysis(workspace, signal=signal, **kwargs)
             if out is not None:
                 output_files.append(out)
         elif engine_name == "phasecurve":

@@ -94,6 +94,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import multiprocessing
+import os
+
 import numpy as np
 
 from .constants import (
@@ -146,6 +149,54 @@ PARAMETER_NAMES_ECCENTRIC = PARAMETER_NAMES_CIRCULAR + (
 JITTER_LOG_LOWER = -12.0
 JITTER_LOG_UPPER = -2.0
 JITTER_HALF_CAUCHY_SCALE = 1.0e-3
+
+
+# --- Parallel worker context (module-level globals set once per worker) ---
+# These hold the fixed data arrays that every lnprob evaluation needs.
+# Setting them via Pool(initializer=...) avoids repeated pickle overhead
+# (emcee documentation confirms args/kwargs can cause 3x slowdown).
+
+_worker_context: Optional[Dict[str, Any]] = None
+
+
+def _init_worker(context: Dict[str, Any]) -> None:
+    """Initialise one multiprocessing worker with the full data context."""
+    global _worker_context
+    _worker_context = context
+    # Prevent NumPy MKL/OpenBLAS oversubscription inside workers.
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"
+    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+
+
+def _log_prob_worker(theta: np.ndarray) -> float:
+    """Negative log-posterior wrapper callable by emcee's pool.map.
+
+    The data arrays are read from the module-level ``_worker_context`` global,
+    set once per worker by ``_init_worker``.
+    """
+    ctx = _worker_context
+    if ctx is None:
+        raise RuntimeError("_log_prob_worker called without _init_worker context")
+
+    return float(
+        -_neg_log_posterior(
+            theta,
+            ctx["phase_days"],
+            ctx["native_flux"],
+            ctx["native_error"],
+            ctx["ephemeris"],
+            ctx["rho_prior_solar"],
+            ctx["rho_prior_log10_sigma"],
+            ctx["eccentric"],
+            ctx["ldtk_prior"],
+            sector_index=ctx["sector_index"],
+            exposure_seconds_by_sector=ctx["exposure_seconds_by_sector"],
+            n_sectors=ctx["n_sectors"],
+        )
+    )
 
 
 def stellar_density_a_rs(rho_solar: float, period_days: float) -> float:
@@ -1395,6 +1446,29 @@ def _quantile_summary(chain: np.ndarray) -> Dict[str, float]:
     }
 
 
+def _thin_joint_posterior(chain: np.ndarray, target_samples: int = 1000) -> np.ndarray:
+    """Thin a joint posterior matrix with a uniform stride, preserving covariance.
+
+    Every retained row is an actual joint draw from the MCMC chain; no
+    cross-row pairing occurs. This replaces per-column chunk medians, which
+    synthesized physically impossible parameter combinations by breaking the
+    joint ``(rp/rs, a/Rs, b, q1, q2)`` probability manifold.
+
+    Args:
+        chain: 2-D array of shape ``(n_samples, n_params)`` of joint draws.
+        target_samples: Maximum number of joint rows to retain.
+
+    Returns:
+        Thinned array of shape ``(min(n_samples, target_samples), n_params)``.
+    """
+    samples = np.asarray(chain, dtype=float)
+    n_rows = samples.shape[0]
+    if n_rows <= target_samples:
+        return samples
+    step = max(1, n_rows // target_samples)
+    return samples[::step][:target_samples]
+
+
 def _posterior_summaries(
     chain: np.ndarray,
     ephemeris: Dict[str, Any],
@@ -1467,15 +1541,24 @@ def _posterior_summaries(
     )
     inc_samples = np.degrees(np.arccos(np.clip(projection_samples, 0.0, 1.0)))
     area_ppm = (rp_samples**2) * 1e6
+    # COVARIANCE_GUARD: thin the joint parameter matrix with a uniform stride
+    # so every evaluated tuple is an actual posterior draw. Independent
+    # per-column chunk medians would pair samples from different iterations,
+    # synthesizing unphysical (rp/rs, a/Rs, b, q1, q2) combinations.
+    joint_depth_columns = np.column_stack(
+        [
+            rp_samples,
+            a_rs_samples,
+            b_samples,
+            q1_samples,
+            q2_samples,
+            eccentricity_samples,
+            omega_samples,
+        ]
+    )
     depth_values = []
-    for median_rp, median_a, median_b, median_q1, median_q2, median_eccentricity, median_omega in zip(
-        _chunk_medians(rp_samples),
-        _chunk_medians(a_rs_samples),
-        _chunk_medians(b_samples),
-        _chunk_medians(q1_samples),
-        _chunk_medians(q2_samples),
-        _chunk_medians(eccentricity_samples),
-        _chunk_medians(omega_samples),
+    for median_rp, median_a, median_b, median_q1, median_q2, median_eccentricity, median_omega in _thin_joint_posterior(
+        joint_depth_columns, target_samples=1000
     ):
         model = batman_transit_flux(
             np.array([0.0]),
@@ -1488,6 +1571,11 @@ def _posterior_summaries(
             1.0,
             eccentricity=float(median_eccentricity),
             omega_deg=float(median_omega),
+            # ASTROPHYSICAL_GUARD: evaluate the instantaneous mid-transit depth
+            # at native TESS cadence. The default 480 s supersampling window
+            # smears short transits and biases the derived depth low relative
+            # to the geometric area ratio (rp/rs)^2.
+            exposure_seconds=EXPTIME_SECONDS,
         )
         if model is None or model.shape != (1,) or not np.isfinite(model[0]):
             raise RuntimeError(
@@ -1496,11 +1584,16 @@ def _posterior_summaries(
         depth_values.append(1.0 - model[0])
     depth_ppm_samples = np.asarray(depth_values) * 1e6
 
-    u1_samples, u2_samples = [], []
-    for q1_val, q2_val in zip(q1_samples[::7], q2_samples[::7]):
-        u1_val, u2_val = kipping_to_quadratic_limb_darkening(q1_val, q2_val)
-        u1_samples.append(u1_val)
-        u2_samples.append(u2_val)
+    if not (
+        np.all(np.isfinite(q1_samples))
+        and np.all(np.isfinite(q2_samples))
+        and np.all((q1_samples >= 0.0) & (q1_samples <= 1.0))
+        and np.all((q2_samples >= 0.0) & (q2_samples <= 1.0))
+    ):
+        raise ValueError("transit posterior q1 and q2 samples must be finite values in [0, 1]")
+    sqrt_q1 = np.sqrt(q1_samples)
+    u1_samples = 2.0 * sqrt_q1 * q2_samples
+    u2_samples = sqrt_q1 * (1.0 - 2.0 * q2_samples)
 
     inclination_summary = _quantile_summary(inc_samples)
     inclination_summary["conjunction_distance_clip_fraction"] = float(
@@ -1512,8 +1605,8 @@ def _posterior_summaries(
     posteriors["rho_star_solar"] = _quantile_summary(rho_samples)
     posteriors["area_ratio_ppm"] = _quantile_summary(area_ppm)
     posteriors["mid_transit_depth_ppm"] = _quantile_summary(depth_ppm_samples)
-    posteriors["u1"] = _quantile_summary(np.asarray(u1_samples))
-    posteriors["u2"] = _quantile_summary(np.asarray(u2_samples))
+    posteriors["u1"] = _quantile_summary(u1_samples)
+    posteriors["u2"] = _quantile_summary(u2_samples)
     if eccentric:
         posteriors["eccentricity"] = _quantile_summary(eccentricity_samples)
         posteriors["omega_deg"] = _quantile_summary(omega_samples)
@@ -1658,7 +1751,7 @@ def _make_dynesty_prior_transform(
         # The emcee path uses uniform Kipping parameters multiplied by the LDTk
         # density. Build its equivalent normalized two-dimensional prior once,
         # then use inverse-CDF sampling so it remains a prior for the evidence.
-        from scipy.integrate import cumulative_trapezoid
+        from scipy.integrate import cumulative_trapezoid, trapezoid
 
         q_grid = np.linspace(0.01, 0.99, 513)
         q1_grid, q2_grid = np.meshgrid(q_grid, q_grid, indexing="ij")
@@ -1668,7 +1761,9 @@ def _make_dynesty_prior_transform(
         log_density = -0.5 * ((u1_grid - ldtk_prior["u1"]) / ldtk_prior["u1_err"]) ** 2
         log_density += -0.5 * ((u2_grid - ldtk_prior["u2"]) / ldtk_prior["u2_err"]) ** 2
         density = np.exp(log_density - float(np.max(log_density)))
-        marginal = np.trapz(density, q_grid, axis=1)
+        # COMPATIBILITY: np.trapz was removed in NumPy 2.0+; scipy.integrate
+        # trapezoid is the drop-in replacement with identical numerics.
+        marginal = trapezoid(density, q_grid, axis=1)
         q1_cdf = cumulative_trapezoid(marginal, q_grid, initial=0.0)
         q1_cdf /= q1_cdf[-1]
 
@@ -1860,6 +1955,10 @@ def run_mcmc_transit_fit(
     sampler: str = "emcee",
     detrending_method: Optional[str] = None,
     dlogz_tolerance: float = 0.5,
+    n_jobs: int = 1,
+    progress: bool = False,
+    resume: Optional[str] = None,
+    checkpoint_interval: int = 250,
 ) -> Path:
     """Run an emcee or dynesty transit fit and write the historical output paths.
 
@@ -1900,6 +1999,16 @@ def run_mcmc_transit_fit(
     dlogz_tolerance : float, optional
         dynesty initial convergence tolerance in :math:`\\Delta\\ln Z`
         (default 0.5).
+    n_jobs : int, optional
+        Number of parallel worker processes for ensemble likelihood evaluation
+        (``pool`` via ``multiprocessing``; default 1, i.e. serial).
+    progress : bool, optional
+        Report per-step progress on stderr (default False).
+    resume : str, optional
+        Path to a previous checkpoint ``.npz`` file to resume from
+        (only valid for emcee; default None).
+    checkpoint_interval : int, optional
+        Number of steps between intermediate chain saves (default 250).
 
     Returns
     -------
@@ -1915,6 +2024,7 @@ def run_mcmc_transit_fit(
         If ``sampler`` is unrecognised.
     """
     signal = validate_signal_suffix(signal)
+    suffix = f".{signal.lstrip('.')}" if signal else ""
     if sampler == "dynesty":
         return _run_dynesty_transit_fit(
             workspace,
@@ -1994,71 +2104,85 @@ def run_mcmc_transit_fit(
 
     ndim = int(map_point.size)
     if n_walkers is None:
-        n_walkers = max(2 * ndim, min(48, n_samples // 20))
-    n_walkers = max(n_walkers, 2 * ndim)
+        # Cap walkers at 48 regardless of dimensionality (emcee community
+        # standard; prevents sector-baseline parameters from inflating
+        # the ensemble — a 44-sector candidate would otherwise get 104 walkers).
+        n_walkers = min(max(2 * ndim, n_samples // 50), 48)
     if burn_in is None:
         burn_in = max(50, n_samples // 5)
     # ASTROPHYSICAL_HEURISTIC: burn-in fraction defaults to max(50, n_samples/5)
     # to discard the initial exploration phase where walkers are migrating
     # from their MAP-ball initialisation to the typical set.  The floor of
     # 50 steps guards against very short chains.
-    if burn_in is None:
-        burn_in = max(50, n_samples // 5)
-    # ASTROPHYSICAL_HEURISTIC: default walker count is twice the number of
-    # parameters (minimum per Foreman-Mackey et al. 2013) or up to 48, but
-    # at least 1 walker per 20 production steps so that the chain has
-    # adequate length relative to the ensemble size.
     rng = np.random.default_rng(seed=seed)
 
-    def valid_walker_start(candidate_theta: np.ndarray) -> bool:
-        return math.isfinite(
-            _neg_log_posterior(
-                candidate_theta,
-                phase_days,
-                native_flux,
-                native_error,
-                ephemeris,
-                rho_prior_solar,
-                rho_prior_log10_sigma,
-                eccentric,
-                ldtk_prior,
-                sector_index=sector_index,
-                exposure_seconds_by_sector=exposure_seconds_by_sector,
-                n_sectors=n_sectors,
+    if resume is None:
+        def valid_walker_start(candidate_theta: np.ndarray) -> bool:
+            return math.isfinite(
+                _neg_log_posterior(
+                    candidate_theta,
+                    phase_days,
+                    native_flux,
+                    native_error,
+                    ephemeris,
+                    rho_prior_solar,
+                    rho_prior_log10_sigma,
+                    eccentric,
+                    ldtk_prior,
+                    sector_index=sector_index,
+                    exposure_seconds_by_sector=exposure_seconds_by_sector,
+                    n_sectors=n_sectors,
+                )
             )
-        )
 
-    p0 = np.empty((n_walkers, ndim), dtype=float)
-    for walker_index in range(n_walkers):
-        accepted_start = None
-        for center in (map_point, start):
-            for _attempt in range(100):
-                candidate_theta = center + 1e-3 * rng.normal(size=ndim)
-                candidate_theta[2] = np.clip(candidate_theta[2], 0.0, 1.1)
-                baseline_stop = 3 + n_sectors
-                candidate_theta[3:baseline_stop] = np.clip(
-                    candidate_theta[3:baseline_stop], 0.995, 1.005
-                )
-                candidate_theta[baseline_stop + 1] = np.clip(
-                    candidate_theta[baseline_stop + 1], 0.01, 0.99
-                )
-                candidate_theta[baseline_stop + 2] = np.clip(
-                    candidate_theta[baseline_stop + 2], 0.01, 0.99
-                )
-                if eccentric:
-                    eccentric_radius = math.hypot(
-                        candidate_theta[baseline_stop + 3], candidate_theta[baseline_stop + 4]
+        p0 = np.empty((n_walkers, ndim), dtype=float)
+        for walker_index in range(n_walkers):
+            accepted_start = None
+            for center in (map_point, start):
+                for _attempt in range(100):
+                    candidate_theta = center + 1e-3 * rng.normal(size=ndim)
+                    candidate_theta[2] = np.clip(candidate_theta[2], 0.0, 1.1)
+                    baseline_stop = 3 + n_sectors
+                    candidate_theta[3:baseline_stop] = np.clip(
+                        candidate_theta[3:baseline_stop], 0.995, 1.005
                     )
-                    if eccentric_radius >= 0.99:
-                        candidate_theta[baseline_stop + 3:baseline_stop + 5] *= 0.99 / eccentric_radius
-                if valid_walker_start(candidate_theta):
-                    accepted_start = candidate_theta
+                    candidate_theta[baseline_stop + 1] = np.clip(
+                        candidate_theta[baseline_stop + 1], 0.01, 0.99
+                    )
+                    candidate_theta[baseline_stop + 2] = np.clip(
+                        candidate_theta[baseline_stop + 2], 0.01, 0.99
+                    )
+                    if eccentric:
+                        eccentric_radius = math.hypot(
+                            candidate_theta[baseline_stop + 3], candidate_theta[baseline_stop + 4]
+                        )
+                        if eccentric_radius >= 0.99:
+                            candidate_theta[baseline_stop + 3:baseline_stop + 5] *= 0.99 / eccentric_radius
+                    if valid_walker_start(candidate_theta):
+                        accepted_start = candidate_theta
+                        break
+                if accepted_start is not None:
                     break
-            if accepted_start is not None:
-                break
-        if accepted_start is None:
-            raise RuntimeError("could not initialize a physically valid transit-fit walker")
-        p0[walker_index] = accepted_start
+            if accepted_start is None:
+                raise RuntimeError("could not initialize a physically valid transit-fit walker")
+            p0[walker_index] = accepted_start
+        saved_rstate = np.random.RandomState(seed).get_state()
+        remaining_steps = burn_in + n_samples
+    else:
+        ck = np.load(resume, allow_pickle=True)
+        saved_chain = ck["chain"]        # shape (n_iter, n_walkers, ndim)
+        saved_iter = int(ck["iteration"])
+        saved_burn = int(ck["burn_in"])
+        saved_rstate = ck["random_state"].item()
+        p0 = saved_chain[-1]             # last walker positions
+        remaining_steps = burn_in + n_samples - saved_iter
+        if remaining_steps <= 0:
+            # Chain already finished; skip sampling, go straight to posterior.
+            raw_chain = saved_chain[saved_burn:] if saved_burn < saved_chain.shape[0] else saved_chain
+            chain = raw_chain.reshape((-1, raw_chain.shape[-1]))
+            _resume_done = True
+        else:
+            _resume_done = False
 
     # Reproducibility: walker positions and emcee's StretchMove RNG are both
     # explicitly seeded without mutating NumPy's process-global RNG.
@@ -2066,10 +2190,37 @@ def run_mcmc_transit_fit(
     # (2010) recommended value for general-purpose MCMC; it yields an
     # acceptance fraction near the optimal ~25% for multi-dimensional
     # Gaussians.
+
+    # ---- Parallel worker pool -------------------------------------------------
+    if n_jobs > 1:
+        worker_context: Dict[str, Any] = {
+            "phase_days": phase_days,
+            "native_flux": native_flux,
+            "native_error": native_error,
+            "ephemeris": ephemeris,
+            "rho_prior_solar": rho_prior_solar,
+            "rho_prior_log10_sigma": rho_prior_log10_sigma,
+            "eccentric": eccentric,
+            "ldtk_prior": ldtk_prior,
+            "sector_index": sector_index,
+            "exposure_seconds_by_sector": exposure_seconds_by_sector,
+            "n_sectors": n_sectors,
+        }
+        # Prevent MKL/OpenBLAS oversubscription before spawning workers.
+        for _env_var in (
+            "OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+            "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
+        ):
+            os.environ.setdefault(_env_var, "1")
+        ctx = multiprocessing.get_context("spawn")
+        pool: Any = ctx.Pool(n_jobs, initializer=_init_worker, initargs=(worker_context,))
+    else:
+        pool = None
+
     sampler = emcee.EnsembleSampler(
         n_walkers,
         ndim,
-        lambda x: -_neg_log_posterior(
+        _log_prob_worker if pool is not None else lambda x: -_neg_log_posterior(
             x,
             phase_days,
             native_flux,
@@ -2083,12 +2234,62 @@ def run_mcmc_transit_fit(
             exposure_seconds_by_sector=exposure_seconds_by_sector,
             n_sectors=n_sectors,
         ),
+        pool=pool,
         moves=emcee.moves.StretchMove(a=1.5),
     )
-    sampler.random_state = np.random.RandomState(seed).get_state()
-    sampler.run_mcmc(p0, burn_in + n_samples, progress=False)
-    raw_chain = sampler.get_chain(discard=burn_in, flat=False)
-    chain = raw_chain.reshape((-1, raw_chain.shape[-1]))
+    sampler.random_state = saved_rstate
+    total_steps = remaining_steps
+    checkpoint_path = outputs_dir / f"mcmc_transit_fit_chain{suffix}.checkpoint.npz"
+    old_tau: Optional[float] = float("inf")
+    early_stop = False
+
+    # ---- Sampling loop (generator: progress + checkpoint + early stop) -------
+    try:
+        if not _resume_done:
+            for _state in sampler.sample(p0, iterations=total_steps, progress=progress):
+                iteration: int = getattr(sampler, "iteration", 0)
+                # Periodic checkpoint save (best-effort).
+                if checkpoint_interval > 0 and iteration % checkpoint_interval == 0 and iteration > 0:
+                    try:
+                        raw_snap = sampler.get_chain(flat=False)
+                        np.savez(
+                            str(checkpoint_path),
+                            chain=raw_snap,
+                            iteration=iteration,
+                            burn_in=burn_in,
+                            random_state=sampler.random_state,
+                        )
+                    except Exception:
+                        pass
+
+                # Autocorrelation-based early convergence (every 100 steps).
+                if iteration % 100 == 0 and iteration >= burn_in + 100:
+                    try:
+                        tau_values = sampler.get_autocorr_time(tol=0)
+                        tau_mean = float(np.mean(tau_values))
+                        if np.isfinite(tau_mean) and tau_mean > 0:
+                            prod_steps = int(iteration) - int(burn_in)
+                            if old_tau is not None and prod_steps >= max(100 * tau_mean, 500):
+                                if abs(old_tau - tau_mean) / tau_mean < 0.01:
+                                    early_stop = True
+                                    break
+                            old_tau = tau_mean
+                    except Exception:
+                        pass
+    finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
+
+    if not _resume_done:
+        raw_chain = sampler.get_chain(discard=burn_in, flat=False)
+        chain = raw_chain.reshape((-1, raw_chain.shape[-1]))
+    # Clean up checkpoint on successful completion.
+    if checkpoint_path.exists():
+        try:
+            checkpoint_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     names = _parameter_names(eccentric, n_sectors, sector_labels)
     posteriors = _posterior_summaries(
@@ -2161,6 +2362,10 @@ def run_mcmc_transit_fit(
             "walkers": int(n_walkers),
             "burn_in": int(burn_in),
             "production": int(n_samples),
+            "actual_production": int(chain.shape[0]),
+            "stopped_early": early_stop,
+            "stopped_early_reason": "autocorrelation_converged" if early_stop else None,
+            "n_jobs": int(n_jobs),
             "flat_samples": int(chain.shape[0]),
             "random_seed": int(seed),
             "random_generator": "numpy.random.RandomState (MT19937)",
@@ -2185,7 +2390,6 @@ def run_mcmc_transit_fit(
             "not an adopted posterior or validation claim."
         ),
     }
-    suffix = f".{signal.lstrip('.')}" if signal else ""
     output_path = outputs_dir / f"mcmc_transit_fit{suffix}.json"
     output_path.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     np.save(str(outputs_dir / f"mcmc_transit_fit_chain{suffix}.npy"), chain)
@@ -2483,31 +2687,3 @@ def _run_dynesty_transit_fit(
     output_path.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     np.save(str(outputs_dir / f"mcmc_transit_fit_chain{suffix}.npy"), chain)
     return output_path
-
-
-def _chunk_medians(samples: np.ndarray) -> List[float]:
-    r"""Median down a large sample chain to ~1000 values for model evaluation.
-
-    This is a throughput optimisation: evaluating the batman forward model
-    on a full posterior chain of O(10\ :sup:`5`) samples would be
-    prohibitively slow for model visualisation.  The chunk-median
-    compression preserves the median transit shape while reducing the
-    evaluation budget by roughly two orders of magnitude.
-
-    Parameters
-    ----------
-    samples : ndarray
-        1-D array of samples.
-
-    Returns
-    -------
-    list of float
-        Medians of consecutive chunks; length ≤ 1000.
-    """
-    samples = np.asarray(samples, dtype=float)
-    if samples.size <= 1000:
-        return [float(value) for value in samples]
-    # ASTROPHYSICAL_HEURISTIC: 1000-sample cap is sufficient for
-    # visualising the median transit model and its credible interval.
-    step = int(np.ceil(samples.size / 1000.0))
-    return [float(np.median(samples[index : index + step])) for index in range(0, samples.size, step)]

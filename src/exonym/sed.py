@@ -27,15 +27,18 @@ Scientific Boundary:
 
 from __future__ import annotations
 
+import csv
+import hashlib
 import json
 import logging
 import math
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.constants import c, h, k
+from scipy.interpolate import LinearNDInterpolator
 
 from .constants import (
     NOMINAL_SOLAR_EFFECTIVE_TEMPERATURE_K as TEFF_SUN_K,
@@ -44,9 +47,20 @@ from .constants import (
     PARSEC_M as PC_M,
 )
 from .inputs import load_photometry, load_stellar_parameters
+from .resources import read_schema_text
 from .workspace import CandidateWorkspace
 
 MAG_SYSTEMATIC_FLOOR = 0.05             # Minimum systematic magnitude uncertainty floor
+MIST_MAIN_SEQUENCE_INPUT = Path("data/external/mist_main_sequence_input.json")
+MIST_ISOCHRONE_GRID = Path("data/external/mist_isochrone_grid.csv")
+MIST_ABSOLUTE_MAGNITUDE_COLUMNS = {
+    "gaia_g": "gaia_g_abs_mag",
+    "gaia_bp": "gaia_bp_abs_mag",
+    "gaia_rp": "gaia_rp_abs_mag",
+    "twomass_j": "twomass_j_abs_mag",
+    "twomass_h": "twomass_h_abs_mag",
+    "twomass_ks": "twomass_ks_abs_mag",
+}
 
 # 2MASS (Cohen et al. 2003) & AllWISE (Wright et al. 2010) bandpass pivot wavelengths and Vega zero-point fluxes (Jy)
 BAND_ZERO_POINTS: Dict[str, Tuple[float, float]] = {
@@ -230,6 +244,313 @@ def _run_emcee(
     return samples, sampler
 
 
+def _sha256(path: Path) -> str:
+    """Return the SHA-256 digest of one candidate-owned artifact."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _reject_nonfinite_json_constant(value: str) -> object:
+    raise ValueError("non-finite JSON constant: {0}".format(value))
+
+
+def _parse_finite_json_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite JSON number")
+    return parsed
+
+
+def _reject_duplicate_json_keys(pairs: Sequence[Tuple[str, object]]) -> Dict[str, object]:
+    payload: Dict[str, object] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise ValueError("duplicate JSON key: {0}".format(key))
+        payload[key] = value
+    return payload
+
+
+def _candidate_artifact(
+    workspace: CandidateWorkspace, artifact: Mapping[str, Any], label: str
+) -> Dict[str, str]:
+    """Verify and normalize one hash-bound candidate-local input artifact."""
+    relative_value = artifact.get("path")
+    digest = artifact.get("sha256")
+    role = artifact.get("role")
+    if not isinstance(relative_value, str) or not isinstance(digest, str) or not isinstance(role, str):
+        raise RuntimeError("{0} must declare path, sha256, and role".format(label))
+    relative_path = Path(relative_value)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise RuntimeError("{0} must remain inside the candidate workspace".format(label))
+    path = workspace.path / relative_path
+    if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(workspace.path.resolve()):
+        raise RuntimeError("{0} must reference a regular candidate-owned file".format(label))
+    if _sha256(path) != digest:
+        raise RuntimeError("{0} SHA-256 does not match its candidate-owned file".format(label))
+    return {"path": relative_path.as_posix(), "sha256": digest, "role": role}
+
+
+def _read_mist_main_sequence_input(
+    workspace: CandidateWorkspace,
+) -> Optional[Tuple[Path, Dict[str, Any], Path, List[Dict[str, str]]]]:
+    """Load one schema-valid frozen MIST manifest and all bound source hashes."""
+    manifest_path = workspace.path / MIST_MAIN_SEQUENCE_INPUT
+    grid_path = workspace.path / MIST_ISOCHRONE_GRID
+    if not manifest_path.exists() and not grid_path.exists():
+        return None
+    if not manifest_path.is_file() or manifest_path.is_symlink() or not grid_path.is_file() or grid_path.is_symlink():
+        raise RuntimeError(
+            "MIST main-sequence checking requires both candidate-owned manifest and frozen grid files"
+        )
+    try:
+        payload = json.loads(
+            manifest_path.read_text(encoding="utf-8"),
+            parse_constant=_reject_nonfinite_json_constant,
+            parse_float=_parse_finite_json_float,
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("MIST main-sequence input is not valid finite UTF-8 JSON: {0}".format(exc)) from exc
+    try:
+        import jsonschema
+    except ImportError as exc:
+        raise RuntimeError("jsonschema is required to validate MIST main-sequence input") from exc
+    try:
+        schema = json.loads(
+            read_schema_text(workspace.repository_root, "mist-main-sequence-input.schema.json")
+        )
+        jsonschema.validate(payload, schema, format_checker=jsonschema.FormatChecker())
+    except (OSError, ValueError, jsonschema.ValidationError) as exc:
+        raise RuntimeError("MIST main-sequence input schema violation: {0}".format(exc)) from exc
+    if not isinstance(payload, dict) or payload.get("candidate_id") != workspace.candidate_id:
+        raise RuntimeError("MIST main-sequence input candidate_id does not match the workspace")
+
+    grid_artifact = _candidate_artifact(workspace, payload["grid_artifact"], "MIST grid artifact")
+    if grid_artifact["path"] != MIST_ISOCHRONE_GRID.as_posix():
+        raise RuntimeError("MIST grid artifact must reference data/external/mist_isochrone_grid.csv")
+    source_artifacts = [
+        _candidate_artifact(workspace, artifact, "MIST source artifact")
+        for artifact in payload["provenance"]["input_artifacts"]
+    ]
+    return manifest_path, payload, grid_path, source_artifacts
+
+
+def _mist_measurement(payload: Mapping[str, Any], catalog: str, band: str) -> Tuple[float, float]:
+    """Return one finite frozen magnitude and uncertainty in magnitudes."""
+    measurement = payload["photometry"][catalog][band]
+    value = float(measurement["value"])
+    uncertainty = float(measurement["uncertainty"])
+    if not math.isfinite(value) or not math.isfinite(uncertainty) or uncertainty <= 0.0:
+        raise RuntimeError("MIST photometry must contain finite magnitudes and positive uncertainties")
+    return value, uncertainty
+
+
+def _load_mist_main_sequence_grid(grid_path: Path) -> Dict[str, np.ndarray]:
+    """Read main-sequence rows from a frozen MIST grid without nearest-grid fallback."""
+    required_columns = {
+        "evolutionary_stage",
+        "teff_k",
+        "logg_cgs",
+        "feh",
+        *MIST_ABSOLUTE_MAGNITUDE_COLUMNS.values(),
+    }
+    rows: Dict[str, List[float]] = {name: [] for name in required_columns if name != "evolutionary_stage"}
+    try:
+        with grid_path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            if reader.fieldnames is None or not required_columns.issubset(reader.fieldnames):
+                raise RuntimeError("frozen MIST grid lacks required main-sequence columns")
+            for row in reader:
+                if row.get("evolutionary_stage") != "main_sequence":
+                    continue
+                parsed = {
+                    name: float(row[name])
+                    for name in rows
+                }
+                if all(math.isfinite(value) for value in parsed.values()):
+                    for name, value in parsed.items():
+                        rows[name].append(value)
+    except (OSError, UnicodeError, TypeError, ValueError, csv.Error) as exc:
+        raise RuntimeError("frozen MIST grid is unreadable or non-finite: {0}".format(exc)) from exc
+    if len(rows["teff_k"]) < 4:
+        raise RuntimeError("frozen MIST grid requires at least four finite main-sequence rows")
+    return {name: np.asarray(values, dtype=float) for name, values in rows.items()}
+
+
+def _mist_main_sequence_check(
+    workspace: CandidateWorkspace, stellar: Mapping[str, Any]
+) -> Dict[str, Any]:
+    """Compare frozen Gaia/2MASS absolute magnitudes to MIST main-sequence rows."""
+    loaded = _read_mist_main_sequence_input(workspace)
+    if loaded is None:
+        return {
+            "status": "not-configured",
+            "validation_eligible": False,
+            "claim_eligible": False,
+            "interpretation": "No frozen MIST main-sequence manifest and grid were supplied for this exploratory SED run.",
+        }
+    manifest_path, payload, grid_path, source_artifacts = loaded
+    if stellar.get("source") != "candidate-data":
+        return {
+            "status": "insufficient-input",
+            "input_artifact": {
+                "path": MIST_MAIN_SEQUENCE_INPUT.as_posix(),
+                "sha256": _sha256(manifest_path),
+                "role": "mist-main-sequence-input",
+            },
+            "grid_artifact": {
+                "path": MIST_ISOCHRONE_GRID.as_posix(),
+                "sha256": _sha256(grid_path),
+                "role": "mist-isochrone-grid",
+            },
+            "source_artifacts": source_artifacts,
+            "validation_eligible": False,
+            "claim_eligible": False,
+            "interpretation": "MIST comparison requires complete candidate-owned stellar parameters.",
+        }
+    stellar_parameters_path = workspace.path / "data" / "external" / "stellar_params.json"
+    if (
+        not stellar_parameters_path.is_file()
+        or stellar_parameters_path.is_symlink()
+        or not stellar_parameters_path.resolve().is_relative_to(workspace.path.resolve())
+    ):
+        raise RuntimeError(
+            "MIST comparison requires a regular candidate-owned stellar_params.json artifact"
+        )
+    stellar_parameters_artifact = {
+        "path": "data/external/stellar_params.json",
+        "sha256": _sha256(stellar_parameters_path),
+        "role": "stellar-parameters",
+    }
+    try:
+        parallax = float(stellar["parallax_mas"])
+        parallax_error = float(stellar["parallax_mas_err"])
+        target = np.array(
+            [float(stellar["teff_k"]), float(stellar["logg_cgs"]), float(stellar["feh"])],
+            dtype=float,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("MIST comparison requires finite candidate-owned parallax and stellar parameters") from exc
+    if (
+        not np.all(np.isfinite(target))
+        or not math.isfinite(parallax)
+        or not math.isfinite(parallax_error)
+        or parallax <= 0.0
+        or parallax_error <= 0.0
+    ):
+        raise RuntimeError("MIST comparison requires positive finite parallax and finite stellar parameters")
+    parallax_snr = parallax / parallax_error
+    if parallax_snr < 5.0:
+        return {
+            "status": "insufficient-input",
+            "input_artifact": {
+                "path": MIST_MAIN_SEQUENCE_INPUT.as_posix(),
+                "sha256": _sha256(manifest_path),
+                "role": "mist-main-sequence-input",
+            },
+            "grid_artifact": {
+                "path": MIST_ISOCHRONE_GRID.as_posix(),
+                "sha256": _sha256(grid_path),
+                "role": "mist-isochrone-grid",
+            },
+            "source_artifacts": source_artifacts,
+            "parallax_snr": parallax_snr,
+            "validation_eligible": False,
+            "claim_eligible": False,
+            "interpretation": "MIST color-magnitude comparison requires parallax SNR of at least 5.",
+        }
+
+    grid = _load_mist_main_sequence_grid(grid_path)
+    points = np.column_stack((grid["teff_k"], grid["logg_cgs"], grid["feh"]))
+    base_result: Dict[str, Any] = {
+        "input_artifact": {
+            "path": MIST_MAIN_SEQUENCE_INPUT.as_posix(),
+            "sha256": _sha256(manifest_path),
+            "role": "mist-main-sequence-input",
+        },
+        "grid_artifact": {
+            "path": MIST_ISOCHRONE_GRID.as_posix(),
+            "sha256": _sha256(grid_path),
+            "role": "mist-isochrone-grid",
+        },
+        "stellar_parameters_artifact": stellar_parameters_artifact,
+        "source_artifacts": source_artifacts,
+        "parallax_snr": parallax_snr,
+        "interpolation_parameters": {
+            "teff_k": float(target[0]),
+            "logg_cgs": float(target[1]),
+            "feh": float(target[2]),
+        },
+        "validation_eligible": False,
+        "claim_eligible": False,
+    }
+    if any(target[index] < np.min(points[:, index]) or target[index] > np.max(points[:, index]) for index in range(points.shape[1])):
+        return {
+            **base_result,
+            "status": "outside-grid",
+            "interpretation": "Candidate stellar parameters fall outside the frozen MIST main-sequence grid; no nearest-grid fallback was used.",
+        }
+    try:
+        predicted = {
+            band: float(LinearNDInterpolator(points, grid[column])(target))
+            for band, column in MIST_ABSOLUTE_MAGNITUDE_COLUMNS.items()
+        }
+    except Exception as exc:
+        raise RuntimeError("frozen MIST grid cannot interpolate the declared stellar parameters: {0}".format(exc)) from exc
+    if not all(math.isfinite(value) for value in predicted.values()):
+        return {
+            **base_result,
+            "status": "outside-grid",
+            "interpretation": "Candidate stellar parameters fall outside the frozen MIST interpolation hull; no nearest-grid fallback was used.",
+        }
+
+    distance_pc = 1000.0 / parallax
+    distance_modulus = 5.0 * math.log10(distance_pc / 10.0)
+    distance_modulus_uncertainty = 5.0 * parallax_error / (math.log(10.0) * parallax)
+    band_locations = {
+        "gaia_g": ("gaia_dr3", "g"),
+        "gaia_bp": ("gaia_dr3", "bp"),
+        "gaia_rp": ("gaia_dr3", "rp"),
+        "twomass_j": ("twomass", "j"),
+        "twomass_h": ("twomass", "h"),
+        "twomass_ks": ("twomass", "ks"),
+    }
+    observed_absolute: Dict[str, float] = {}
+    observed_uncertainty: Dict[str, float] = {}
+    residuals: Dict[str, float] = {}
+    extinction = payload["extinction"]["band_extinction_mag"]
+    for band, (catalog, measurement_name) in band_locations.items():
+        magnitude, magnitude_uncertainty = _mist_measurement(payload, catalog, measurement_name)
+        extinction_mag = float(extinction[band])
+        if not math.isfinite(extinction_mag):
+            raise RuntimeError("MIST extinction values must be finite")
+        absolute_magnitude = magnitude - distance_modulus - extinction_mag
+        uncertainty = math.sqrt(magnitude_uncertainty**2 + distance_modulus_uncertainty**2)
+        observed_absolute[band] = absolute_magnitude
+        observed_uncertainty[band] = uncertainty
+        residuals[band] = absolute_magnitude - predicted[band]
+    chi_square = float(
+        sum((residuals[band] / observed_uncertainty[band]) ** 2 for band in band_locations)
+    )
+    return {
+        **base_result,
+        "status": "evaluated",
+        "method": "frozen-mist-main-sequence-linear-interpolation",
+        "observed_absolute_magnitudes": observed_absolute,
+        "absolute_magnitude_uncertainties": observed_uncertainty,
+        "interpolated_main_sequence_absolute_magnitudes": predicted,
+        "residuals_mag": residuals,
+        "chi_square_fixed_stellar_parameters": chi_square,
+        "interpretation": (
+            "This frozen-grid color-magnitude comparison is descriptive only. It does not "
+            "validate a main-sequence classification, infer an age, or replace an isochrone posterior."
+        ),
+    }
+
+
 def _fit_blackbody(
     observations: Sequence[Tuple[str, float, float]],
     stellar: Dict[str, Any],
@@ -252,6 +573,17 @@ def _fit_blackbody(
     parallax_error = float(stellar.get("parallax_mas_err", float("nan")))
     if not math.isfinite(parallax) or parallax <= 0 or not math.isfinite(parallax_error) or parallax_error <= 0:
         raise RuntimeError("blackbody SED fitting requires positive candidate-owned parallax_mas and parallax_mas_err")
+    # ASTROPHYSICAL_GUARD: direct 1/parallax inversion produces a severe
+    # Lutz-Kelker-type distance bias when the fractional parallax error is
+    # large (Bailer-Jones 2015). Require astrometric SNR >= 5 before trusting
+    # the geometric distance prior in this approximate blackbody SED model.
+    parallax_snr = parallax / parallax_error
+    if parallax_snr < 5.0:
+        raise RuntimeError(
+            "blackbody SED fitting requires parallax SNR >= 5.0; "
+            "observed SNR {0:.2f} would introduce a severe Lutz-Kelker "
+            "distance bias into the derived stellar radius".format(parallax_snr)
+        )
     distance_pc = 1000.0 / parallax
     teff_prior = float(stellar["teff_k"])
     initial_scale = 1.0 * RSUN_M / (distance_pc * PC_M)
@@ -316,6 +648,16 @@ def _fit_blackbody(
         float(median[0]), float(median[1]), float(median[2]), band_data
     )
     residuals = magnitudes - model_at_median
+    distance_model = {
+        "method": "geometric-parallax-inversion",
+        "parallax_snr": float(parallax_snr),
+    }
+    if parallax_snr <= 10.0:
+        distance_model["caveat"] = (
+            "At parallax SNR from 5 to 10, direct geometric 1/parallax distance "
+            "inversion retains an approximately 1-4% second-order distance asymmetry. "
+            "This approximate SED fit does not replace a Bayesian distance inference."
+        )
     return {
         "model": "reddened blackbody at catalog pivot wavelengths",
         "posterior": {
@@ -356,6 +698,7 @@ def _fit_blackbody(
                 ),
             },
         },
+        "metadata": {"distance_model": distance_model},
         "samples": samples,
     }
 
@@ -521,6 +864,7 @@ def run_sed_fit(workspace: CandidateWorkspace) -> Path:
     grid_used = False
     if observations is None:
         raise RuntimeError("SED fitting requires candidate-owned broadband photometry")
+    mist_main_sequence_check = _mist_main_sequence_check(workspace, stellar)
     grid_model = load_atmosphere_grid_model(
         workspace, [name for name, _, _ in observations]
     )
@@ -539,6 +883,7 @@ def run_sed_fit(workspace: CandidateWorkspace) -> Path:
 
     payload = {
         "schema_version": "1.0",
+        "candidate_id": workspace.candidate_id,
         "work_package": "SED_FIT",
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "source": source,
@@ -557,6 +902,8 @@ def run_sed_fit(workspace: CandidateWorkspace) -> Path:
         "posterior": fit["posterior"],
         "photometry": fit["photometry"],
         "fit_quality": fit["fit_quality"],
+        "metadata": fit.get("metadata", {}),
+        "mist_main_sequence_check": mist_main_sequence_check,
         "caveats": [
             "Pivot-wavelength monochromatic models approximate passband-integrated photometry.",
             "Radius and luminosity are derived only for the blackbody path via the parallax prior.",

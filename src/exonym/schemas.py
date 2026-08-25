@@ -47,6 +47,11 @@ PLANETSYNTH_CHARACTERIZATION_SCHEMA = "planetsynth-characterization.schema.json"
 ANOMALOUS_TRANSIT_HYPOTHESIS_SCHEMA = "anomalous-transit-hypothesis.schema.json"
 PLANETSYNTH_INTERPRETATION_SCHEMA = "planetsynth-interpretation.schema.json"
 PYPPLUSS_HYPOTHESIS_TEST_SCHEMA = "pyppluss-hypothesis-test.schema.json"
+ASYMMETRIC_TRANSIT_HYPOTHESIS_SCHEMA = "asymmetric-transit-hypothesis.schema.json"
+TERMINATOR_ASYMMETRY_TEST_SCHEMA = "terminator-asymmetry-test.schema.json"
+MIST_MAIN_SEQUENCE_INPUT_SCHEMA = "mist-main-sequence-input.schema.json"
+SED_FIT_SCHEMA = "sed-fit-results.schema.json"
+TTV_ANALYSIS_SCHEMA = "ttv-analysis.schema.json"
 STATISTICAL_VETTING_EVIDENCE_SCHEMA = "statistical-vetting-evidence.schema.json"
 DECISIVE_REJECTION_SCHEMA = "decisive-rejection.schema.json"
 CATALOG_QUERY_MANIFEST_SCHEMA = "catalog-query-manifest.schema.json"
@@ -604,6 +609,11 @@ def _load_schemas(root: Path, report: IsolationReport) -> Dict[str, object]:
         ANOMALOUS_TRANSIT_HYPOTHESIS_SCHEMA,
         PLANETSYNTH_INTERPRETATION_SCHEMA,
         PYPPLUSS_HYPOTHESIS_TEST_SCHEMA,
+        ASYMMETRIC_TRANSIT_HYPOTHESIS_SCHEMA,
+        TERMINATOR_ASYMMETRY_TEST_SCHEMA,
+        MIST_MAIN_SEQUENCE_INPUT_SCHEMA,
+        SED_FIT_SCHEMA,
+        TTV_ANALYSIS_SCHEMA,
         STATISTICAL_VETTING_EVIDENCE_SCHEMA,
         DECISIVE_REJECTION_SCHEMA,
         CATALOG_QUERY_MANIFEST_SCHEMA,
@@ -995,6 +1005,11 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
     anomalous_transit_hypothesis_schema = schemas.get(ANOMALOUS_TRANSIT_HYPOTHESIS_SCHEMA)
     planetsynth_interpretation_schema = schemas.get(PLANETSYNTH_INTERPRETATION_SCHEMA)
     pyppluss_hypothesis_test_schema = schemas.get(PYPPLUSS_HYPOTHESIS_TEST_SCHEMA)
+    asymmetric_transit_hypothesis_schema = schemas.get(ASYMMETRIC_TRANSIT_HYPOTHESIS_SCHEMA)
+    terminator_asymmetry_test_schema = schemas.get(TERMINATOR_ASYMMETRY_TEST_SCHEMA)
+    mist_main_sequence_input_schema = schemas.get(MIST_MAIN_SEQUENCE_INPUT_SCHEMA)
+    sed_fit_schema = schemas.get(SED_FIT_SCHEMA)
+    ttv_analysis_schema = schemas.get(TTV_ANALYSIS_SCHEMA)
     statistical_vetting_schema = schemas.get(STATISTICAL_VETTING_EVIDENCE_SCHEMA)
     decisive_rejection_schema = schemas.get(DECISIVE_REJECTION_SCHEMA)
     catalog_query_schema = schemas.get(CATALOG_QUERY_MANIFEST_SCHEMA)
@@ -1595,6 +1610,99 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
                 else:
                     _validate(report, phase_curve_path, phase_curve_instance, phase_curve_schema, validate_func)
 
+        if sed_fit_schema is not None:
+            sed_fit_path = workspace_dir / "outputs" / "sed_fit_results.json"
+            if sed_fit_path.is_file():
+                try:
+                    sed_fit_instance = _read_json(sed_fit_path)
+                except (OSError, UnicodeError, ValueError) as exc:
+                    report.add(sed_fit_path, "schema-violation", "invalid JSON: {0}".format(exc))
+                else:
+                    _validate(report, sed_fit_path, sed_fit_instance, sed_fit_schema, validate_func)
+                    if isinstance(sed_fit_instance, dict):
+                        candidate_id = sed_fit_instance.get("candidate_id")
+                        if candidate_id is not None and candidate_id != workspace_dir.name:
+                            report.add(sed_fit_path, "schema-violation", "SED result candidate_id does not match its workspace")
+                        mist_check = sed_fit_instance.get("mist_main_sequence_check")
+                        if isinstance(mist_check, dict):
+                            artifacts = [
+                                mist_check.get("input_artifact"),
+                                mist_check.get("grid_artifact"),
+                                mist_check.get("stellar_parameters_artifact"),
+                            ]
+                            _validate_artifacts(
+                                report,
+                                sed_fit_path,
+                                workspace_dir,
+                                [artifact for artifact in artifacts if artifact is not None],
+                                "SED MIST inputs",
+                            )
+                            source_artifacts = mist_check.get("source_artifacts")
+                            if isinstance(source_artifacts, list):
+                                _validate_artifacts(
+                                    report,
+                                    sed_fit_path,
+                                    workspace_dir,
+                                    source_artifacts,
+                                    "SED MIST source inputs",
+                                )
+
+        if ttv_analysis_schema is not None:
+            for ttv_path in sorted((workspace_dir / "outputs").glob("ttv_analysis_results*.json")):
+                try:
+                    ttv_instance = _read_json(ttv_path)
+                except (OSError, UnicodeError, ValueError) as exc:
+                    report.add(ttv_path, "schema-violation", "invalid JSON: {0}".format(exc))
+                    continue
+                _validate(report, ttv_path, ttv_instance, ttv_analysis_schema, validate_func)
+                if not isinstance(ttv_instance, dict):
+                    continue
+                signal = ttv_instance.get("signal")
+                expected_name = "ttv_analysis_results{0}.json".format(signal or "")
+                if (
+                    ttv_instance.get("candidate_id") != workspace_dir.name
+                    or ttv_path.name != expected_name
+                ):
+                    report.add(
+                        ttv_path,
+                        "schema-violation",
+                        "TTV analysis does not match candidate or signal filename ownership",
+                    )
+                provenance = ttv_instance.get("input_provenance")
+                timing = ttv_instance.get("timing")
+                if not isinstance(provenance, dict) or not isinstance(timing, dict):
+                    continue
+                transit_fit_artifact = provenance.get("transit_fit_artifact")
+                expected_transit_fit_path = "outputs/mcmc_transit_fit{0}.json".format(
+                    signal or ""
+                )
+                if (
+                    not isinstance(transit_fit_artifact, dict)
+                    or transit_fit_artifact.get("path") != expected_transit_fit_path
+                    or transit_fit_artifact.get("signal") != signal
+                ):
+                    report.add(
+                        ttv_path,
+                        "schema-violation",
+                        "TTV analysis transit-fit artifact does not match its selected signal",
+                    )
+                else:
+                    _validate_artifacts(
+                        report,
+                        ttv_path,
+                        workspace_dir,
+                        [transit_fit_artifact],
+                        "TTV transit-fit input",
+                    )
+                template = timing.get("template")
+                template_artifact = template.get("artifact") if isinstance(template, dict) else None
+                if template_artifact != transit_fit_artifact:
+                    report.add(
+                        ttv_path,
+                        "schema-violation",
+                        "TTV template provenance does not match the recorded transit-fit input",
+                    )
+
         specialized_records = [
             (
                 workspace_dir / "data" / "external" / "planetsynth_characterization.json",
@@ -1608,10 +1716,24 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
                 "anomalous-transit hypothesis",
                 None,
             ),
+            (
+                workspace_dir / "data" / "external" / "asymmetric_transit_hypothesis.json",
+                asymmetric_transit_hypothesis_schema,
+                "terminator-asymmetry hypothesis",
+                None,
+            ),
+            (
+                workspace_dir / "data" / "external" / "mist_main_sequence_input.json",
+                mist_main_sequence_input_schema,
+                "frozen MIST main-sequence input",
+                None,
+            ),
         ]
         for filename_pattern, record_schema, label, engine in (
             ("planetsynth_interpretation.*.json", planetsynth_interpretation_schema, "PlanetSynth interpretation", "planetsynth"),
             ("pyppluss_hypothesis_test.*.json", pyppluss_hypothesis_test_schema, "pyPplusS hypothesis test", "pyppluss"),
+            ("catwoman_terminator_asymmetry_test.*.json", terminator_asymmetry_test_schema, "Catwoman terminator-asymmetry test", "catwoman"),
+            ("squishyplanet_terminator_asymmetry_test.*.json", terminator_asymmetry_test_schema, "SquishyPlanet terminator-asymmetry test", "squishyplanet"),
         ):
             for record_path in sorted((workspace_dir / "outputs").glob(filename_pattern)):
                 specialized_records.append((record_path, record_schema, label, "raw_result_artifact", engine))
@@ -1630,8 +1752,38 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
                 continue
             if instance.get("candidate_id") != workspace_dir.name:
                 report.add(record_path, "schema-violation", "{0} candidate_id does not match its workspace".format(label))
+            if record_path.name == "asymmetric_transit_hypothesis.json":
+                provenance = instance.get("provenance")
+                if isinstance(provenance, dict) and isinstance(provenance.get("input_artifacts"), list):
+                    _validate_artifacts(
+                        report,
+                        record_path,
+                        workspace_dir,
+                        provenance["input_artifacts"],
+                        "{0} source inputs".format(label),
+                    )
+            if record_path.name == "mist_main_sequence_input.json":
+                _validate_artifacts(
+                    report,
+                    record_path,
+                    workspace_dir,
+                    [instance.get("grid_artifact")],
+                    "{0} grid input".format(label),
+                )
+                provenance = instance.get("provenance")
+                if isinstance(provenance, dict) and isinstance(provenance.get("input_artifacts"), list):
+                    _validate_artifacts(
+                        report,
+                        record_path,
+                        workspace_dir,
+                        provenance["input_artifacts"],
+                        "{0} source inputs".format(label),
+                    )
             if raw_artifact_field is not None:
                 _validate_artifacts(report, record_path, workspace_dir, [instance.get("input_artifact")], "{0} input".format(label))
+                source_artifacts = instance.get("source_artifacts")
+                if isinstance(source_artifacts, list):
+                    _validate_artifacts(report, record_path, workspace_dir, source_artifacts, "{0} source inputs".format(label))
                 _validate_artifacts(report, record_path, workspace_dir, [instance.get(raw_artifact_field)], "{0} raw result".format(label))
                 run_id = instance.get("run_id")
                 expected_name = "{0}.{1}.json".format(record_path.name.split(".", 1)[0], run_id)
@@ -1647,7 +1799,11 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
                 except (OSError, UnicodeError, ValueError) as exc:
                     report.add(record_path, "schema-violation", "matching engine manifest is unreadable: {0}".format(exc))
                     continue
-                if not isinstance(manifest, dict) or manifest.get("status") != "succeeded":
+                if (
+                    not isinstance(manifest, dict)
+                    or manifest.get("status") != "succeeded"
+                    or manifest.get("engine") != engine
+                ):
                     report.add(record_path, "schema-violation", "{0} requires a successful matching engine manifest".format(label))
                     continue
                 output_path = record_path.relative_to(workspace_dir).as_posix()
@@ -1957,6 +2113,12 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
             "RV fit reports must be direct files in candidate/<id>/outputs/",
         ),
         (
+            "sed_fit_results.json",
+            ("outputs", "sed_fit_results.json"),
+            "sed-fit-results-outside-candidate",
+            "SED fit reports must be direct files in candidate/<id>/outputs/",
+        ),
+        (
             "planetsynth_characterization.json",
             ("data", "external", "planetsynth_characterization.json"),
             "planetsynth-characterization-outside-candidate",
@@ -1967,6 +2129,18 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
             ("data", "external", "anomalous_transit_hypothesis.json"),
             "anomalous-transit-hypothesis-outside-candidate",
             "anomalous-transit hypothesis inputs must be direct files in candidate/<id>/data/external/",
+        ),
+        (
+            "asymmetric_transit_hypothesis.json",
+            ("data", "external", "asymmetric_transit_hypothesis.json"),
+            "asymmetric-transit-hypothesis-outside-candidate",
+            "terminator-asymmetry hypothesis inputs must be direct files in candidate/<id>/data/external/",
+        ),
+        (
+            "mist_main_sequence_input.json",
+            ("data", "external", "mist_main_sequence_input.json"),
+            "mist-main-sequence-input-outside-candidate",
+            "frozen MIST main-sequence inputs must be direct files in candidate/<id>/data/external/",
         ),
         (
             "decisive_rejection.json",
@@ -2000,6 +2174,16 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
             "pyppluss_hypothesis_test.*.json",
             "pyppluss-hypothesis-test-outside-candidate",
             "pyPplusS hypothesis test reports must be direct files in candidate/<id>/outputs/",
+        ),
+        (
+            "catwoman_terminator_asymmetry_test.*.json",
+            "catwoman-terminator-asymmetry-test-outside-candidate",
+            "Catwoman terminator-asymmetry reports must be direct files in candidate/<id>/outputs/",
+        ),
+        (
+            "squishyplanet_terminator_asymmetry_test.*.json",
+            "squishyplanet-terminator-asymmetry-test-outside-candidate",
+            "SquishyPlanet terminator-asymmetry reports must be direct files in candidate/<id>/outputs/",
         ),
     ):
         for path in sorted(root.rglob(filename_pattern)):

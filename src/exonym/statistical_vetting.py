@@ -659,7 +659,11 @@ def _require_real_data_prerequisites(workspace: CandidateWorkspace, signal: Opti
             missing.append(name)
             continue
         data = _load_object(path)
-        if data is None or data.get(field) != expected:
+        if (
+            data is None
+            or data.get(field) != expected
+            or (name == "timing" and data.get("candidate_id") != workspace.candidate_id)
+        ):
             missing.append(name)
     if not _has_detected_hash_bound_bls_result(workspace, signal):
         missing.append("detected hash-bound BLS search")

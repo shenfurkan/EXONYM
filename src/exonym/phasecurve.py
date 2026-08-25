@@ -10,7 +10,7 @@ components based on the BEER (Beaming, Ellipsoidal, and Reflection/emission) mod
    Relativistic modulation proportional to radial velocity K_RV / c (Loeb & Gaudi 2003).
 3. Tidal Ellipsoidal Variations: -A_ellip * cos(2*phi)
    Tidal distortion of the host star by the companion, producing double-frequency modulation
-   with minima at quadrature (phi = 0.25, 0.75) and maxima at conjunctions.
+   with maxima at quadrature (phi = 0.25, 0.75) and minima at conjunctions.
 4. Second Harmonic Sine Control: A_sin2 * sin(2*phi)
    Astrophysically forbidden symmetric component used as a systematic / stellar activity null control.
 5. Secondary Eclipse Box: a circular phase-0.5 control unless a compatible
@@ -450,7 +450,11 @@ def cluster_sandwich_covariance(
         correction = float(n_points) / max(n_points - n_params, 1)
     else:
         correction = n_groups / (n_groups - 1.0) * (n_points - 1.0) / (n_points - n_params)
-    return correction * bread @ meat @ bread, n_groups
+    # NUMERICAL_GUARD: floating-point asymmetry in the triple product can
+    # leave tiny negative values on the covariance diagonal; explicit
+    # symmetrization keeps sqrt(diag(...)) free of NaN warnings.
+    raw_cov = correction * (bread @ meat @ bread)
+    return 0.5 * (raw_cov + raw_cov.T), n_groups
 
 
 def build_design_matrix(

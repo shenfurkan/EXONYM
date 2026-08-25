@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/mist-main-sequence-input-1.0.json",
+  "title": "Candidate-local frozen MIST main-sequence input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "candidate_id", "purpose", "photometry", "extinction", "grid_artifact", "provenance"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "candidate_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+    "purpose": {"const": "mist-main-sequence-check"},
+    "photometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gaia_dr3", "twomass"],
+      "properties": {
+        "gaia_dr3": {"$ref": "#/$defs/gaia"},
+        "twomass": {"$ref": "#/$defs/twomass"}
+      }
+    },
+    "extinction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["band_extinction_mag"],
+      "properties": {
+        "band_extinction_mag": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["gaia_g", "gaia_bp", "gaia_rp", "twomass_j", "twomass_h", "twomass_ks"],
+          "properties": {
+            "gaia_g": {"type": "number"},
+            "gaia_bp": {"type": "number"},
+            "gaia_rp": {"type": "number"},
+            "twomass_j": {"type": "number"},
+            "twomass_h": {"type": "number"},
+            "twomass_ks": {"type": "number"}
+          }
+        }
+      }
+    },
+    "grid_artifact": {"$ref": "#/$defs/grid-artifact"},
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_description", "recorded_at", "mist_release", "filters", "input_artifacts"],
+      "properties": {
+        "source_description": {"type": "string", "minLength": 1, "maxLength": 500},
+        "recorded_at": {"type": "string", "format": "date-time"},
+        "mist_release": {"type": "string", "minLength": 1},
+        "filters": {"type": "array", "minItems": 6, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "input_artifacts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/artifact"}}
+      }
+    }
+  },
+  "$defs": {
+    "measurement": {"type": "object", "additionalProperties": false, "required": ["value", "uncertainty", "unit"], "properties": {"value": {"type": "number"}, "uncertainty": {"type": "number", "exclusiveMinimum": 0}, "unit": {"const": "mag"}}},
+    "gaia": {"type": "object", "additionalProperties": false, "required": ["g", "bp", "rp"], "properties": {"g": {"$ref": "#/$defs/measurement"}, "bp": {"$ref": "#/$defs/measurement"}, "rp": {"$ref": "#/$defs/measurement"}}},
+    "twomass": {"type": "object", "additionalProperties": false, "required": ["j", "h", "ks"], "properties": {"j": {"$ref": "#/$defs/measurement"}, "h": {"$ref": "#/$defs/measurement"}, "ks": {"$ref": "#/$defs/measurement"}}},
+    "artifact": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "role"], "properties": {"path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "role": {"type": "string", "minLength": 1}}},
+    "grid-artifact": {"allOf": [{"$ref": "#/$defs/artifact"}, {"properties": {"path": {"const": "data/external/mist_isochrone_grid.csv"}, "role": {"const": "mist-isochrone-grid"}}}]}
+  }
+}

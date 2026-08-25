@@ -127,7 +127,11 @@ def _top_window_peaks(
     limit: int = WINDOW_PEAK_LIMIT,
 ) -> List[Dict[str, float]]:
     """Retain separated local maxima of a sampling window for reviewer context."""
-    valid = np.isfinite(frequency_days_inverse) & np.isfinite(window_power)
+    valid = (
+        np.isfinite(frequency_days_inverse)
+        & (frequency_days_inverse > 0.0)
+        & np.isfinite(window_power)
+    )
     candidates = np.flatnonzero(valid)
     if candidates.size == 0:
         return []

@@ -39,6 +39,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
+from .constants import JULIAN_YEAR_DAYS, SECONDS_PER_DAY
 from .inputs import load_light_curve_table, load_stellar_parameters, load_transit_ephemeris
 from .lightcurve import kipping_to_quadratic_limb_darkening
 from .search import calculate_ttv_super_period
@@ -52,6 +53,9 @@ GRID_STEP_DAYS = 0.001          # Fine grid resolution for initial transit cente
 MIN_EPOCH_DEPTH_SNR = 3.0       # Formal local-template detection threshold
 MIN_TIMING_SIGMA_DAYS = 0.0005  # Lower reporting bound for a finite timing error
 MAX_TIMING_SIGMA_DAYS = 0.05    # Upper reporting bound for a finite timing error
+MIN_ORBITAL_DECAY_TRANSITS = 4  # Leaves one quadratic-fit residual degree of freedom
+TTV_TEMPLATE_WORK_PACKAGES = ("MCMC_TRANSIT_FIT", "NESTED_TRANSIT_FIT")
+_ECCENTRIC_TEMPLATE_PARAMETERS = frozenset(("sqe_cosw", "sqe_sinw"))
 
 
 def _parse_finite_json_float(value: str) -> float:
@@ -211,9 +215,10 @@ def _load_transit_fit_template(
         ) from exc
     if not isinstance(payload, dict):
         raise RuntimeError("TTV template artifact {0} must contain a JSON object".format(relative_path))
-    if payload.get("work_package") != "MCMC_TRANSIT_FIT":
+    work_package = payload.get("work_package")
+    if work_package not in TTV_TEMPLATE_WORK_PACKAGES:
         raise RuntimeError(
-            "TTV template artifact {0} is not an MCMC_TRANSIT_FIT output".format(relative_path)
+            "TTV template artifact {0} is not a supported transit-fit output".format(relative_path)
         )
     if payload.get("source") != "candidate-data":
         raise RuntimeError(
@@ -223,6 +228,42 @@ def _load_transit_fit_template(
         raise RuntimeError(
             "TTV template artifact {0} is not bound to signal {1!r}".format(relative_path, signal)
         )
+    parameter_names = payload.get("parameter_names")
+    if not isinstance(parameter_names, list) or not all(
+        isinstance(name, str) for name in parameter_names
+    ):
+        raise RuntimeError(
+            "TTV template artifact {0} has no valid parameter_names contract".format(relative_path)
+        )
+    if _ECCENTRIC_TEMPLATE_PARAMETERS.intersection(parameter_names):
+        raise RuntimeError(
+            "TTV template artifact {0} uses an eccentric fit, which the circular timing template cannot use".format(
+                relative_path
+            )
+        )
+    fitted_ephemeris = payload.get("ephemeris")
+    if not isinstance(fitted_ephemeris, dict):
+        raise RuntimeError(
+            "TTV template artifact {0} has no fitted ephemeris contract".format(relative_path)
+        )
+    for field in ("period_days", "epoch_btjd"):
+        try:
+            fitted_value = float(fitted_ephemeris[field])
+            current_value = float(ephemeris[field])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "TTV template artifact {0} has an invalid fitted {1}".format(
+                    relative_path, field
+                )
+            ) from exc
+        if not (
+            math.isfinite(fitted_value)
+            and math.isfinite(current_value)
+            and math.isclose(fitted_value, current_value, rel_tol=1e-12, abs_tol=1e-12)
+        ):
+            raise RuntimeError(
+                "TTV template artifact {0} has a stale fitted {1}".format(relative_path, field)
+            )
     posterior = payload.get("posterior")
     if not isinstance(posterior, dict):
         raise RuntimeError("TTV template artifact {0} has no posterior object".format(relative_path))
@@ -249,7 +290,7 @@ def _load_transit_fit_template(
         "artifact": {
             "path": relative_path,
             "sha256": hashlib.sha256(artifact_bytes).hexdigest(),
-            "work_package": "MCMC_TRANSIT_FIT",
+            "work_package": work_package,
             "source": "candidate-data",
             "signal": signal,
             "scientific_status": scientific_status if isinstance(scientific_status, str) else None,
@@ -824,6 +865,130 @@ def compare_ephemeris_models(
     }
 
 
+def fit_orbital_decay(
+    epochs: np.ndarray,
+    observed_btjd: np.ndarray,
+    timing_errors_days: np.ndarray,
+) -> Dict[str, Any]:
+    """Describe a quadratic timing trend as a formal orbital-period derivative.
+
+    The quadratic ephemeris is ``t(E) = t_ref + P E + q E**2`` around the
+    fitted reference epoch. It implies ``dP/dE = 2q`` and, at that reference
+    epoch, ``dP/dt = 2q / P`` in days per day. This transformation does not
+    distinguish orbital decay from apsidal motion, light-travel-time effects,
+    additional companions, correlated timing noise, or a cycle-count error.
+    """
+    linear_ephemeris = fit_weighted_linear_ephemeris(
+        epochs, observed_btjd, timing_errors_days
+    )
+    quadratic_ephemeris = fit_weighted_quadratic_ephemeris(
+        epochs, observed_btjd, timing_errors_days
+    )
+    comparison = compare_ephemeris_models(linear_ephemeris, quadratic_ephemeris)
+    n_transits = int(quadratic_ephemeris["n_transits_used"])
+    result: Dict[str, Any] = {
+        "status": "not-fit-insufficient-transits",
+        "method": "weighted-quadratic-ephemeris-period-derivative",
+        "n_transits_used": n_transits,
+        "reference_epoch": quadratic_ephemeris.get("reference_epoch"),
+        "reference_epoch_btjd": quadratic_ephemeris.get("reference_epoch_btjd"),
+        "quadratic_coefficient_days_per_epoch2": None,
+        "quadratic_coefficient_uncertainty_days_per_epoch2": None,
+        "period_change_per_epoch_days": None,
+        "period_change_per_epoch_uncertainty_days": None,
+        "period_derivative_days_per_day": None,
+        "period_derivative_uncertainty_days_per_day": None,
+        "period_derivative_ms_per_julian_year": None,
+        "period_derivative_uncertainty_ms_per_julian_year": None,
+        "covariance_matrix": None,
+        "covariance_parameter_order": None,
+        "covariance_parameter_units": None,
+        "ephemeris_model_comparison": comparison,
+        "validation_eligible": False,
+        "claim_eligible": False,
+        "interpretation": (
+            "A quadratic timing trend requires at least four accepted timings and remains "
+            "a formal descriptive diagnostic, not evidence for orbital decay."
+        ),
+    }
+    if n_transits < MIN_ORBITAL_DECAY_TRANSITS:
+        return result
+    if linear_ephemeris.get("status") != "fit" or quadratic_ephemeris.get("status") != "fit":
+        result["status"] = "not-fit-singular-or-invalid-ephemeris"
+        result["interpretation"] = (
+            "The accepted timings did not support both formal ephemeris fits; no period "
+            "derivative was calculated."
+        )
+        return result
+
+    try:
+        period_days = float(quadratic_ephemeris["period_days"])
+        coefficient = float(quadratic_ephemeris["quadratic_coefficient_days_per_epoch2"])
+        covariance = np.asarray(quadratic_ephemeris["covariance_matrix_days2"], dtype=float)
+    except (KeyError, TypeError, ValueError):
+        result["status"] = "not-fit-invalid-quadratic-solution"
+        return result
+    if (
+        not math.isfinite(period_days)
+        or period_days <= 0.0
+        or not math.isfinite(coefficient)
+        or covariance.shape != (3, 3)
+        or not np.all(np.isfinite(covariance))
+    ):
+        result["status"] = "not-fit-invalid-quadratic-solution"
+        return result
+    coefficient_variance = float(covariance[2, 2])
+    if not math.isfinite(coefficient_variance) or coefficient_variance < 0.0:
+        result["status"] = "not-fit-invalid-quadratic-solution"
+        return result
+
+    derivative_days_per_day = 2.0 * coefficient / period_days
+    jacobian = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -2.0 * coefficient / period_days**2, 2.0 / period_days],
+        ],
+        dtype=float,
+    )
+    transformed_covariance = jacobian @ covariance @ jacobian.T
+    transformed_covariance = 0.5 * (transformed_covariance + transformed_covariance.T)
+    variances = np.diag(transformed_covariance)
+    if not np.all(np.isfinite(variances)) or np.any(variances < 0.0):
+        result["status"] = "not-fit-invalid-transformed-covariance"
+        return result
+    conversion = JULIAN_YEAR_DAYS * SECONDS_PER_DAY * 1000.0
+    coefficient_uncertainty = math.sqrt(coefficient_variance)
+    derivative_uncertainty = math.sqrt(float(variances[2]))
+    result.update(
+        {
+            "status": "fit",
+            "quadratic_coefficient_days_per_epoch2": coefficient,
+            "quadratic_coefficient_uncertainty_days_per_epoch2": coefficient_uncertainty,
+            "period_change_per_epoch_days": 2.0 * coefficient,
+            "period_change_per_epoch_uncertainty_days": 2.0 * coefficient_uncertainty,
+            "period_derivative_days_per_day": derivative_days_per_day,
+            "period_derivative_uncertainty_days_per_day": derivative_uncertainty,
+            "period_derivative_ms_per_julian_year": derivative_days_per_day * conversion,
+            "period_derivative_uncertainty_ms_per_julian_year": derivative_uncertainty * conversion,
+            "covariance_matrix": transformed_covariance.tolist(),
+            "covariance_parameter_order": [
+                "reference_epoch_btjd",
+                "period_days",
+                "period_derivative_days_per_day",
+            ],
+            "covariance_parameter_units": ["days", "days", "days_per_day"],
+            "interpretation": (
+                "This formal quadratic-ephemeris period derivative is descriptive only. "
+                "A quadratic preference does not identify orbital decay over apsidal motion, "
+                "light-travel-time effects, additional companions, correlated timing noise, "
+                "template evolution, timing-error clipping, or a cycle-count error."
+            ),
+        }
+    )
+    return result
+
+
 def _ephemeris_calculated_times(
     fit: Dict[str, Any], epochs: np.ndarray, model: str
 ) -> Optional[np.ndarray]:
@@ -852,6 +1017,7 @@ def transit_timing_analysis(
     template: Dict[str, Any],
     window_days: float = WINDOW_DAYS,
     ephemeris_model: str = "linear",
+    include_orbital_decay: bool = False,
 ) -> Dict[str, Any]:
     """Fit measurable epochs and construct a provenance-ready O-C report.
 
@@ -874,6 +1040,8 @@ def transit_timing_analysis(
         ephemeris_model (str): O-C reference model, ``"linear"`` by default
             or ``"quadratic"`` when the optional formal quadratic fit is
             available. Both fits and their BIC comparison are always reported.
+        include_orbital_decay (bool): Include the opt-in formal period-
+            derivative diagnostic without changing the selected O-C reference.
 
     Returns:
         Dict[str, Any]: Accepted and rejected epoch records, O-C values in
@@ -885,6 +1053,8 @@ def transit_timing_analysis(
     """
     if ephemeris_model not in ("linear", "quadratic"):
         raise ValueError("ephemeris_model must be one of: linear, quadratic")
+    if not isinstance(include_orbital_decay, bool):
+        raise ValueError("include_orbital_decay must be a Boolean")
     period_days = float(ephemeris["period_days"])
     t0_reference = float(ephemeris["epoch_btjd"])
     n_min = int(np.floor((np.min(time) - t0_reference) / period_days))
@@ -990,7 +1160,7 @@ def transit_timing_analysis(
     oc_errors_minutes = t_errors_arr * 1440.0
     rms_oc = float(np.sqrt(np.mean(oc_minutes**2))) if oc_minutes.size else None
     mean_uncertainty = float(np.mean(oc_errors_minutes)) if oc_errors_minutes.size else None
-    return {
+    result = {
         "epochs": [int(epoch) for epoch in epochs_arr],
         "t_observed_btjd": [float(value) for value in t_observed_arr],
         "t_calculated_btjd": [float(value) for value in t_calculated_arr],
@@ -1019,6 +1189,11 @@ def transit_timing_analysis(
         "ephemeris_model_used": ephemeris_model_used,
         "ephemeris_model_comparison": ephemeris_comparison,
     }
+    if include_orbital_decay:
+        result["orbital_decay_fit"] = fit_orbital_decay(
+            epochs_arr, t_observed_arr, t_errors_arr
+        )
+    return result
 
 
 def _is_timing_number(value: object) -> bool:
@@ -1107,7 +1282,9 @@ def _record_timing_float(record: Dict[str, Any], field: str, label: str) -> floa
 
 
 def _recompute_and_validate_timing_summary(
-    analysis: Dict[str, Any], ephemeris: Dict[str, Any]
+    analysis: Dict[str, Any],
+    ephemeris: Dict[str, Any],
+    include_orbital_decay: bool = False,
 ) -> Dict[str, Any]:
     """Recompute TTV aggregates from timing arrays before writing an artifact.
 
@@ -1218,6 +1395,11 @@ def _recompute_and_validate_timing_summary(
     recomputed_comparison = compare_ephemeris_models(
         recomputed_linear, recomputed_quadratic
     )
+    recomputed_orbital_decay = (
+        fit_orbital_decay(epochs, observed, timing_errors_days)
+        if include_orbital_decay
+        else None
+    )
     requested_model = analysis.get("ephemeris_model_requested", "linear")
     if requested_model not in ("linear", "quadratic"):
         raise ValueError("timing ephemeris_model_requested must be linear or quadratic")
@@ -1279,6 +1461,11 @@ def _recompute_and_validate_timing_summary(
     ):
         if field in analysis and not _timing_values_agree(analysis.get(field), expected):
             raise ValueError("timing {0} does not match its recomputed value".format(field))
+    if include_orbital_decay:
+        if not _timing_values_agree(analysis.get("orbital_decay_fit"), recomputed_orbital_decay):
+            raise ValueError("timing orbital_decay_fit does not match its recomputed value")
+    elif "orbital_decay_fit" in analysis:
+        raise ValueError("timing orbital_decay_fit requires an explicit opt-in request")
     if "ephemeris_model_requested" in analysis and analysis.get("ephemeris_model_requested") != requested_model:
         raise ValueError("timing ephemeris_model_requested does not match its recomputed value")
     if "ephemeris_model_used" in analysis and analysis.get("ephemeris_model_used") != used_model:
@@ -1298,7 +1485,7 @@ def _recompute_and_validate_timing_summary(
     if not isinstance(analysis.get("epoch_acceptance"), dict):
         raise ValueError("timing epoch_acceptance must be an object")
 
-    return {
+    result = {
         "n_transits_fit": int(expected_length),
         "n_rejected_epochs": len(rejected_records),
         "n_template_failures": sum(
@@ -1323,6 +1510,9 @@ def _recompute_and_validate_timing_summary(
         "ephemeris_model_used": used_model,
         "ephemeris_model_comparison": recomputed_comparison,
     }
+    if recomputed_orbital_decay is not None:
+        result["orbital_decay_fit"] = recomputed_orbital_decay
+    return result
 
 
 def plot_timing_diagram(
@@ -1529,6 +1719,7 @@ def run_ttv_analysis(
     workspace: CandidateWorkspace,
     signal: Optional[str] = None,
     ephemeris_model: str = "linear",
+    fit_orbital_decay: bool = False,
 ) -> Path:
     """Run candidate-local exploratory timing analysis for one signal.
 
@@ -1546,6 +1737,8 @@ def run_ttv_analysis(
         ephemeris_model (str): O-C reference ephemeris, ``"linear"`` by
             default or optional ``"quadratic"`` when the formal fit is
             available. Both model records and their BIC comparison are kept.
+        fit_orbital_decay (bool): Include the opt-in formal period-derivative
+            diagnostic. The default keeps this result absent.
 
     Returns:
         Path: Candidate-local ``outputs/ttv_analysis_results`` JSON path for
@@ -1565,6 +1758,8 @@ def run_ttv_analysis(
     signal = validate_signal_suffix(signal)
     if ephemeris_model not in ("linear", "quadratic"):
         raise ValueError("ephemeris_model must be one of: linear, quadratic")
+    if not isinstance(fit_orbital_decay, bool):
+        raise ValueError("fit_orbital_decay must be a Boolean")
     outputs_dir = workspace.path / "outputs"
     figures_dir = workspace.path / "figures"
     outputs_dir.mkdir(parents=True, exist_ok=True)
@@ -1590,16 +1785,16 @@ def run_ttv_analysis(
         workspace, signal, ephemeris, a_rs
     )
 
+    analysis_kwargs: Dict[str, Any] = {"ephemeris_model": ephemeris_model}
+    if fit_orbital_decay:
+        analysis_kwargs["include_orbital_decay"] = True
     analysis = transit_timing_analysis(
-        table["time"],
-        table["flux"],
-        table["flux_err"],
-        ephemeris,
-        template,
-        ephemeris_model=ephemeris_model,
+        table["time"], table["flux"], table["flux_err"], ephemeris, template, **analysis_kwargs
     )
     try:
-        timing = _recompute_and_validate_timing_summary(analysis, ephemeris)
+        timing = _recompute_and_validate_timing_summary(
+            analysis, ephemeris, include_orbital_decay=fit_orbital_decay
+        )
     except (TypeError, ValueError, KeyError, OverflowError) as exc:
         raise RuntimeError(
             "TTV timing summary failed recompute-and-validate: {0}".format(exc)
@@ -1622,6 +1817,7 @@ def run_ttv_analysis(
 
     payload = {
         "schema_version": "1.0",
+        "candidate_id": workspace.candidate_id,
         "work_package": "TTV_ANALYSIS",
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "source": source,
@@ -1656,7 +1852,8 @@ def run_ttv_analysis(
             "Per-transit timing is exploratory. Epochs require a positive local fixed-template "
             "depth with formal SNR at least 3, but this does not calibrate detection probability. "
             "Linear and optional quadratic ephemeris covariances/BIC are formal descriptive fits "
-            "only, and no TTV detection or companion inference is claimed by this artifact."
+            "only. An optional period derivative is not evidence for orbital decay, and no TTV "
+            "detection or companion inference is claimed by this artifact."
         ),
     }
     output_path = outputs_dir / f"ttv_analysis_results{suffix}.json"

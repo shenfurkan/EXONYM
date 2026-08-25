@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use EXONYM, please cite the software record and the accompanying paper."
+title: "EXONYM"
+version: "1.4.0"
+date-released: "2026-08-25"
+license: "GPL-3.0-only"
+url: "REPOSITORY URL PENDING"
+authors:
+  - family-names: "AUTHOR METADATA PENDING"
+    given-names: "AUTHOR METADATA PENDING"
+preferred-citation:
+  type: software
+  title: "EXONYM: candidate-isolated, reproducible transit-signal research"
+  authors:
+    - family-names: "AUTHOR METADATA PENDING"
+      given-names: "AUTHOR METADATA PENDING"
+  year: 2026
+  url: "REPOSITORY URL PENDING"

@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/asymmetric-transit-hypothesis-1.0.json",
+  "title": "Candidate-local terminator-asymmetry hypothesis input",
+  "description": "A declared normalized light curve, fixed geometry, and morning/evening radius-ratio hypothesis for optional external adapters.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "candidate_id", "purpose", "observation", "geometry", "hypothesis", "provenance"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "candidate_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+    "purpose": {"const": "terminator-asymmetry-hypothesis-test"},
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["time_days", "normalized_flux", "normalized_flux_error"],
+      "properties": {
+        "time_days": {"$ref": "#/$defs/time-series"},
+        "normalized_flux": {"$ref": "#/$defs/flux-series"},
+        "normalized_flux_error": {"$ref": "#/$defs/flux-series"}
+      }
+    },
+    "geometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["period_days", "reference_epoch_days", "scaled_semimajor_axis", "impact_parameter", "quadratic_limb_darkening"],
+      "properties": {
+        "period_days": {"type": "number", "exclusiveMinimum": 0},
+        "reference_epoch_days": {"type": "number"},
+        "scaled_semimajor_axis": {"type": "number", "exclusiveMinimum": 1},
+        "impact_parameter": {"type": "number", "minimum": 0, "maximum": 1.5},
+        "quadratic_limb_darkening": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["u1", "u2"],
+          "properties": {
+            "u1": {"type": "number", "minimum": -2, "maximum": 2},
+            "u2": {"type": "number", "minimum": -2, "maximum": 2}
+          }
+        }
+      }
+    },
+    "hypothesis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "morning_radius_ratio", "evening_radius_ratio"],
+      "properties": {
+        "model": {"const": "terminator-asymmetry"},
+        "morning_radius_ratio": {"type": "number", "exclusiveMinimum": 0, "maximum": 0.3},
+        "evening_radius_ratio": {"type": "number", "exclusiveMinimum": 0, "maximum": 0.3}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_description", "recorded_at", "input_artifacts"],
+      "properties": {
+        "source_description": {"type": "string", "minLength": 1, "maxLength": 500},
+        "recorded_at": {"type": "string", "format": "date-time"},
+        "input_artifacts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/artifact"}}
+      }
+    }
+  },
+  "$defs": {
+    "time-series": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["values", "unit"],
+      "properties": {
+        "values": {"type": "array", "minItems": 5, "maxItems": 10000, "items": {"type": "number"}},
+        "unit": {"const": "days"}
+      }
+    },
+    "flux-series": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["values", "unit"],
+      "properties": {
+        "values": {"type": "array", "minItems": 5, "maxItems": 10000, "items": {"type": "number"}},
+        "unit": {"const": "relative_flux"}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "role"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "role": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}
