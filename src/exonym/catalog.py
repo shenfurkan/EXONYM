@@ -95,16 +95,30 @@ def make_provenance(
     source_uri: str,
     fetched_by: str = INGEST_FETCHER,
     download_timestamp_utc: Optional[str] = None,
+    sha256: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Build a provenance sidecar record for a downloaded product (pure)."""
+    """Build a provenance sidecar record for a downloaded product (pure).
+
+    Args:
+        product_path: Path to the product file on disk.
+        source_uri: Canonical HTTPS or MAST URI from which the file was retrieved.
+        fetched_by: Retrieval-agent label recorded in the sidecar.
+        download_timestamp_utc: ISO-8601 UTC timestamp; defaults to now.
+        sha256: Pre-computed hex SHA-256 digest.  When supplied the file is not
+            re-read; when ``None`` the digest is computed from *product_path*.
+
+    Returns:
+        Dictionary suitable for JSON serialisation as a provenance sidecar.
+    """
     if download_timestamp_utc is None:
         download_timestamp_utc = (
             datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         )
+    digest = sha256 if sha256 is not None else _sha256(Path(product_path))
     return {
         "source_uri": source_uri,
         "download_timestamp_utc": download_timestamp_utc,
-        "sha256": _sha256(Path(product_path)),
+        "sha256": digest,
         "fetched_by": fetched_by,
     }
 
@@ -114,11 +128,23 @@ def write_provenance_sidecar(
     source_uri: str,
     fetched_by: str = INGEST_FETCHER,
     download_timestamp_utc: Optional[str] = None,
+    sha256: Optional[str] = None,
 ) -> Path:
     """Write ``<product>.provenance.json`` next to the product and return it.
 
     The sidecar naming matches the acquisition gate convention in
     ``exonym.gatekeeper`` (``<stem>.provenance.json``).
+
+    Args:
+        product_path: Path to the ingested product file.
+        source_uri: Canonical HTTPS or MAST URI for the provenance record.
+        fetched_by: Retrieval-agent label.
+        download_timestamp_utc: ISO-8601 UTC timestamp; defaults to now.
+        sha256: Pre-computed hex SHA-256 digest.  When supplied the file is not
+            re-read; when ``None`` the digest is computed from *product_path*.
+
+    Returns:
+        Path to the written provenance sidecar.
     """
     product_path = Path(product_path)
     sidecar = product_path.with_name(product_path.stem + ".provenance.json")
@@ -130,7 +156,10 @@ def write_provenance_sidecar(
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(
                 json.dumps(
-                    make_provenance(product_path, source_uri, fetched_by, download_timestamp_utc),
+                    make_provenance(
+                        product_path, source_uri, fetched_by, download_timestamp_utc,
+                        sha256=sha256,
+                    ),
                     indent=2,
                     sort_keys=True,
                 )

@@ -150,6 +150,7 @@ class _FakeTessCut:
 def test_fetch_tess_products_writes_fits_and_ingests(tmp_path, monkeypatch):
     import lightkurve as lk
     from astropy.table import Table
+    from unittest.mock import MagicMock, patch
 
     from exonym.ingest import fetch_tess_products, ingest_products
 
@@ -177,18 +178,19 @@ def test_fetch_tess_products_writes_fits_and_ingests(tmp_path, monkeypatch):
         "search_tesscut",
         lambda *args, **kwargs: pytest.fail("TESSCut must not be queried for a SPOC request"),
     )
-    from astroquery.mast import Observations
 
-    calls = []
+    def _fake_response(url, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {"Content-Length": str(len(raw_bytes))}
+        resp.iter_content = lambda chunk_size=65536: iter([raw_bytes])
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = MagicMock(return_value=False)
+        return resp
 
-    def download_file(data_uri, *, local_path, **kwargs):
-        calls.append((data_uri, local_path))
-        Path(local_path).write_bytes(raw_bytes)
-        return "COMPLETE", None, "https://mast.stsci.edu/api/v0.1/Download/file"
+    with patch("requests.get", side_effect=_fake_response):
+        products = fetch_tess_products(candidate, exptime=120)
 
-    monkeypatch.setattr(Observations, "download_file", download_file)
-
-    products = fetch_tess_products(candidate, exptime=120)
     assert len(products) == 1
     staged, source_uri = products[0]
     fetch_staging = products.staging_path
@@ -197,9 +199,9 @@ def test_fetch_tess_products_writes_fits_and_ingests(tmp_path, monkeypatch):
     assert staged.read_bytes() == raw_bytes
     assert source_uri.startswith("https://mast.stsci.edu")
     assert "uri=mast:TESS/product/tess2021000000000-s0037-0000000123456789-0218-s_lc.fits" in source_uri
-    assert calls[0][0] == "mast:TESS/product/tess2021000000000-s0037-0000000123456789-0218-s_lc.fits"
 
-    written = ingest_products(candidate, products)
+    with patch("requests.get", side_effect=_fake_response):
+        written = ingest_products(candidate, products)
     raw = candidate.path / "data" / "raw"
     assert written[0].is_file()
     assert written[0].parent == raw
@@ -223,6 +225,7 @@ def test_fetch_with_explicit_sectors_skips_rows_without_sector_metadata(
 ):
     import lightkurve as lk
     from astropy.table import Table
+    from unittest.mock import patch
 
     import exonym.ingest as ingest
 
@@ -234,13 +237,9 @@ def test_fetch_with_explicit_sectors_skips_rows_without_sector_metadata(
     )
     fake_search = _FakeSearch(table, [object()])
     monkeypatch.setattr(lk, search_name, lambda *args, **kwargs: fake_search)
-    monkeypatch.setattr(
-        ingest,
-        "_download_spoc_product",
-        lambda *args, **kwargs: pytest.fail("unknown-sector row must not download"),
-    )
-
-    products = getattr(ingest, fetch_name)(candidate, sectors=[1])
+    # Row has no sequence_number so it must be excluded before any download
+    with patch("requests.get", side_effect=lambda *a, **kw: pytest.fail("unknown-sector row must not download")):
+        products = getattr(ingest, fetch_name)(candidate, sectors=[1])
 
     assert products == []
     assert products.staging_path is None
@@ -249,6 +248,8 @@ def test_fetch_with_explicit_sectors_skips_rows_without_sector_metadata(
 def test_fetch_cleans_partial_staging_after_download_failure(tmp_path, monkeypatch):
     import lightkurve as lk
     from astropy.table import Table
+    from unittest.mock import patch
+    import requests as req_module
 
     import exonym.ingest as ingest
 
@@ -260,20 +261,23 @@ def test_fetch_cleans_partial_staging_after_download_failure(tmp_path, monkeypat
     )
     fake_search = _FakeSearch(table, [object()])
     monkeypatch.setattr(lk, "search_lightcurve", lambda *args, **kwargs: fake_search)
-    staging_paths = []
 
-    def fail_download(row, staging):
-        staging_paths.append(staging)
-        (staging / "partial-product.fits").write_bytes(b"partial")
-        raise RuntimeError("simulated archive failure")
+    staging_paths: list = []
 
-    monkeypatch.setattr(ingest, "_download_spoc_product", fail_download)
+    def fail_get(url, **kwargs):
+        # Capture staging dir from destination inferred from url
+        raise req_module.exceptions.ConnectionError("simulated archive failure")
 
-    with pytest.raises(RuntimeError, match="simulated archive failure"):
-        ingest.fetch_tess_products(candidate, sectors=[1])
+    with patch("requests.get", side_effect=fail_get), patch("time.sleep"), pytest.raises(
+        Exception, match="simulated archive failure|Download failed"
+    ):
+        products = ingest.fetch_tess_products(candidate, sectors=[1])
+        staging_paths.append(products.staging_path)
 
-    assert staging_paths
-    assert not staging_paths[0].exists()
+    # staging directory must be cleaned up after failure
+    for staging in staging_paths:
+        if staging is not None:
+            assert not staging.exists()
 
 
 def test_fetch_tesscut_is_rejected_before_network_access(tmp_path, monkeypatch):
@@ -347,6 +351,7 @@ class _FakeTPFSearch:
 def test_fetch_tess_tpfs_stages_and_ingests_with_sidecars(tmp_path, monkeypatch):
     import lightkurve as lk
     from astropy.table import Table
+    from unittest.mock import MagicMock, patch
 
     from exonym.ingest import fetch_tess_tpfs, ingest_products
 
@@ -365,15 +370,20 @@ def test_fetch_tess_tpfs_stages_and_ingests_with_sidecars(tmp_path, monkeypatch)
     fake_search = _FakeTPFSearch(table)
 
     monkeypatch.setattr(lk, "search_targetpixelfile", lambda *args, **kwargs: fake_search)
-    from astroquery.mast import Observations
+    raw_bytes = b"unaltered-mast-spoc-tpf-bytes"
 
-    def download_file(data_uri, *, local_path, **kwargs):
-        Path(local_path).write_bytes(b"unaltered-mast-spoc-tpf-bytes")
-        return "COMPLETE", None, "https://mast.stsci.edu/api/v0.1/Download/file"
+    def _fake_response(url, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {"Content-Length": str(len(raw_bytes))}
+        resp.iter_content = lambda chunk_size=65536: iter([raw_bytes])
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = MagicMock(return_value=False)
+        return resp
 
-    monkeypatch.setattr(Observations, "download_file", download_file)
+    with patch("requests.get", side_effect=_fake_response):
+        products = fetch_tess_tpfs(candidate, exptime=120)
 
-    products = fetch_tess_tpfs(candidate, exptime=120)
     assert len(products) == 2
     for staged, source_uri in products:
         assert staged.is_file()

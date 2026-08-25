@@ -30,25 +30,28 @@ from typing import List, Tuple
 # ---------------------------------------------------------------------------
 # 3D Sphere Raytracing & Space Geometry Constants
 # ---------------------------------------------------------------------------
-# Terminal cells are roughly twice as tall as they are wide, so a circular
-# globe needs GLOBE_RADIUS_Y == GLOBE_RADIUS_X / 2.
-GLOBE_RADIUS_X: float = 15.0
-GLOBE_RADIUS_Y: float = 7.5
-SPACE_WIDTH: int = 64
-SPACE_ROWS: int = 19
-CENTER_X: int = SPACE_WIDTH // 2
-CENTER_Y: int = SPACE_ROWS // 2
+# Terminal character cells are roughly twice as tall as they are wide (~2.1:1).
+# A circular sphere needs radius_x ≈ radius_y * 2.2.
+# In a 19-row vertical canvas with center_y = 9, radius_y = 7.5 guarantees the
+# full sphere (including atmosphere glow) fits perfectly without pole clipping.
 
-# Background space stars (x, y, glyph)
-SPACE_STARS: Tuple[Tuple[int, int, str], ...] = (
-    (3, 1, "."),
-    (7, 15, "*"),
-    (56, 2, "+"),
-    (60, 11, "."),
-    (13, 17, "·"),
-    (51, 16, "·"),
-    (2, 9, "·"),
-    (61, 6, "*"),
+GLOBE_RADIUS_Y_MAX: float = 7.5
+GLOBE_RADIUS_X_MAX: float = 17.0
+_GLOBE_ASPECT: float = GLOBE_RADIUS_X_MAX / GLOBE_RADIUS_Y_MAX
+
+# Fixed vertical geometry (rows) -- designed to fit on standard 24+ row terminals
+SPACE_ROWS: int = 19
+
+# Background space stars as (x_frac, y_frac, glyph) -- scaled to canvas
+_SPACE_STARS_FRAC: Tuple[Tuple[float, float, str], ...] = (
+    (0.047, 0.053, "."),
+    (0.109, 0.789, "*"),
+    (0.875, 0.105, "+"),
+    (0.937, 0.579, "."),
+    (0.203, 0.895, "·"),
+    (0.797, 0.842, "·"),
+    (0.031, 0.474, "·"),
+    (0.953, 0.316, "*"),
 )
 
 SHADES: str = " .:-=+*#%@"
@@ -66,8 +69,7 @@ _LOGO_LINES: Tuple[str, ...] = (
 _TAGLINE: str = "A Framework for Exoplanet Science"
 
 # Frame geometry: one blank line above the logo, the tagline beneath it, one
-# gap line before the globe.  The minimum terminal height keeps every frame
-# from scrolling on redraw.
+# gap line before the globe.
 _FRAME_LINES: int = 1 + len(_LOGO_LINES) + 1 + 1 + SPACE_ROWS
 _FRAME_MIN_ROWS: int = _FRAME_LINES + 1
 
@@ -86,6 +88,36 @@ _GREY_LIGHT  = _fg(250)
 _GREY_MID    = _fg(244)
 _GREY_DARK   = _fg(238)
 _GREY        = _fg(240)
+
+# ---------------------------------------------------------------------------
+# Transit planet — fully opaque pitch-black silhouette disc
+# ---------------------------------------------------------------------------
+_TRANSIT_RADIUS_X: float = 3.5
+_TRANSIT_RADIUS_Y: float = 1.75
+_TRANSIT_CHAR: str = " "
+_TRANSIT_BG: str = _ESC + "[40m"
+_TRANSIT_COLOR: str = _fg(0)
+
+
+def _globe_geometry(term_width: int) -> Tuple[int, int, int, float, float]:
+    """Return (space_width, center_x, center_y, radius_x, radius_y) for terminal width.
+
+    The canvas spans the available terminal width (up to 120 columns) so the
+    starfield expands cleanly across wide PowerShell windows. The globe itself
+    is scaled to fit the 19-row vertical canvas with zero clipping at the poles.
+    """
+    space_width = max(50, min(term_width - 2, 120))
+    center_x = space_width // 2
+    center_y = SPACE_ROWS // 2
+
+    # Vertical geometry constraint guarantees full spherical shape with no clipping
+    radius_y = GLOBE_RADIUS_Y_MAX
+    # Horizontal radius maintains 2.2:1 aspect ratio, bounded by canvas width
+    max_rx_canvas = max(10.0, (space_width // 2) - 4.0)
+    radius_x = min(GLOBE_RADIUS_X_MAX, max_rx_canvas)
+    radius_y = radius_x / _GLOBE_ASPECT
+
+    return space_width, center_x, center_y, radius_x, radius_y
 
 
 def _strip_ansi(text: str) -> str:
@@ -117,7 +149,7 @@ def _check_user_key() -> bool:
         try:
             import msvcrt
             if msvcrt.kbhit():
-                ch = msvcrt.getch()
+                msvcrt.getch()
                 return True
         except ImportError:
             pass
@@ -142,13 +174,40 @@ def _wait_for_user_key(timeout: float = 30.0) -> None:
         time.sleep(0.05)
 
 
-def _render_planet_globe(angle: float) -> List[str]:
-    """Raytrace a high-definition 3D rotating exoplanet globe in space."""
-    grid: List[List[str]] = [[" "] * SPACE_WIDTH for _ in range(SPACE_ROWS)]
+def _render_planet_globe(
+    angle: float,
+    transit_phase: float,
+    space_width: int,
+    center_x: int,
+    center_y: int,
+    radius_x: float,
+    radius_y: float,
+) -> List[str]:
+    """Raytrace a high-definition 3D rotating exoplanet globe in space,
+    with a small pitch-black disc transiting across its face.
 
-    # Draw space stars
-    for sx, sy, sch in SPACE_STARS:
-        grid[sy][sx] = _GREY + sch + _RESET
+    Args:
+        angle: Current rotation angle of the globe in radians.
+        transit_phase: 0-1 transit progression (0 = entering left,
+            0.5 = centred, 1 = exiting right).  Values outside [0,1]
+            mean no transit planet is drawn.
+        space_width: Canvas column count (derived from terminal width).
+        center_x: Horizontal centre of the globe in canvas columns.
+        center_y: Vertical centre of the globe in canvas rows.
+        radius_x: Globe X radius in terminal columns.
+        radius_y: Globe Y radius in terminal rows.
+
+    Returns:
+        Rows of ANSI-coloured space + globe + optional transit planet.
+    """
+    grid: List[List[str]] = [[" "] * space_width for _ in range(SPACE_ROWS)]
+
+    # Draw space stars (fractional positions -> integer cells across space_width)
+    for sx_f, sy_f, sch in _SPACE_STARS_FRAC:
+        sx = int(round(sx_f * (space_width - 1)))
+        sy = int(round(sy_f * (SPACE_ROWS - 1)))
+        if 0 <= sx < space_width and 0 <= sy < SPACE_ROWS:
+            grid[sy][sx] = _GREY + sch + _RESET
 
     # Directional lighting vector
     lx, ly, lz = -0.5, -0.4, 0.76
@@ -156,15 +215,15 @@ def _render_planet_globe(angle: float) -> List[str]:
     lx, ly, lz = lx / norm_l, ly / norm_l, lz / norm_l
 
     # Raytrace each cell in the sphere; loop bounds cover the atmosphere glow.
-    x_span = int(math.ceil(GLOBE_RADIUS_X * 1.15)) + 1
-    y_span = int(math.ceil(GLOBE_RADIUS_Y * 1.15)) + 1
+    x_span = int(math.ceil(radius_x * 1.15)) + 1
+    y_span = int(math.ceil(radius_y * 1.15)) + 1
     for y_idx in range(-y_span, y_span + 1):
-        r_row = CENTER_Y + y_idx
+        r_row = center_y + y_idx
         for x_idx in range(-x_span, x_span + 1):
-            r_col = CENTER_X + x_idx
-            if 0 <= r_row < SPACE_ROWS and 0 <= r_col < SPACE_WIDTH:
-                nx = x_idx / GLOBE_RADIUS_X
-                ny = y_idx / GLOBE_RADIUS_Y
+            r_col = center_x + x_idx
+            if 0 <= r_row < SPACE_ROWS and 0 <= r_col < space_width:
+                nx = x_idx / radius_x
+                ny = y_idx / radius_y
                 dist = nx * nx + ny * ny
                 if dist <= 1.0:
                     nz = math.sqrt(max(0.0, 1.0 - dist))
@@ -202,6 +261,33 @@ def _render_planet_globe(angle: float) -> List[str]:
                     # Atmosphere glow ring
                     grid[r_row][r_col] = _GREY_MID + "·" + _RESET
 
+    # --- Draw the transiting planet (pure black opaque silhouette disc) ---
+    transit_rx = _TRANSIT_RADIUS_X
+    transit_ry = _TRANSIT_RADIUS_Y
+    transit_margin = transit_rx + 2.0
+    if 0.0 <= transit_phase <= 1.0:
+        travel_left = center_x - radius_x - transit_margin
+        travel_right = center_x + radius_x + transit_margin
+        planet_cx = travel_left + transit_phase * (travel_right - travel_left)
+        planet_cy = center_y
+
+        px_span = int(math.ceil(transit_rx * 1.1))
+        py_span = int(math.ceil(transit_ry * 1.1))
+        for dy in range(-py_span, py_span + 1):
+            py = int(round(planet_cy + dy))
+            if not (0 <= py < SPACE_ROWS):
+                continue
+            for dx in range(-px_span, px_span + 1):
+                px = int(round(planet_cx + dx))
+                if not (0 <= px < space_width):
+                    continue
+                cx_f = (px - planet_cx) / transit_rx
+                cy_f = (py - planet_cy) / transit_ry
+                d2 = cx_f * cx_f + cy_f * cy_f
+                if d2 <= 1.0:
+                    # Pure black: black background + black foreground space
+                    grid[py][px] = _TRANSIT_COLOR + _TRANSIT_BG + _TRANSIT_CHAR + _RESET
+
     return ["".join(r) for r in grid]
 
 
@@ -217,8 +303,10 @@ def _tagline_line() -> str:
     return _DIM + _GREY_MID + text + _RESET
 
 
-def _compose_full_screen(angle: float, term_width: int) -> str:
+def _compose_full_screen(angle: float, transit_phase: float, term_width: int) -> str:
     """Compose the full dynamically centered banner frame."""
+    space_width, center_x, center_y, radius_x, radius_y = _globe_geometry(term_width)
+
     lines: List[str] = []
 
     # 1. Centered Logo with version tagline bridge
@@ -228,9 +316,12 @@ def _compose_full_screen(angle: float, term_width: int) -> str:
         lines.append(_center_line(formatted, term_width) + _ESC + "[K")
     lines.append(_center_line(_tagline_line(), term_width) + _ESC + "[K")
 
-    # 2. Centered High-Definition Rotating Exoplanet Globe
+    # 2. Centered High-Definition Rotating Exoplanet Globe + Transit in Space
     lines.append(_ESC + "[K")
-    for g_line in _render_planet_globe(angle):
+    for g_line in _render_planet_globe(
+        angle, transit_phase,
+        space_width, center_x, center_y, radius_x, radius_y,
+    ):
         lines.append(_center_line(g_line, term_width) + _ESC + "[K")
 
     return "\n".join(lines)
@@ -239,9 +330,9 @@ def _compose_full_screen(angle: float, term_width: int) -> str:
 def run_banner(skip: bool = False) -> None:
     """Run the high-definition 3D rotating exoplanet globe animation banner.
 
-    Frames are centered horizontally and vertically.  The animation needs a
-    terminal of at least ``SPACE_WIDTH`` columns by ``_FRAME_MIN_ROWS`` rows;
-    on smaller terminals it is skipped entirely so the frame never scrolls.
+    Frames are centered horizontally and vertically. The animation adjusts
+    dynamically to the terminal width so the planet remains a fully formed
+    sphere without distortion or clipping.
 
     Parameters
     ----------
@@ -260,7 +351,7 @@ def run_banner(skip: bool = False) -> None:
         ts = os.get_terminal_size()
         term_width = max(60, ts.columns)
         term_rows = ts.lines
-        if ts.columns < SPACE_WIDTH or ts.lines < _FRAME_MIN_ROWS:
+        if ts.lines < _FRAME_MIN_ROWS:
             return
     except OSError:
         pass
@@ -284,8 +375,9 @@ def run_banner(skip: bool = False) -> None:
         stdout.flush()
 
         angle = 0.0
+        transit_phase = -1.0       # < 0 -> no planet; starts invisible
         frame_idx = 0
-        # Allow at least 15 frames (~0.6s) before checking keys so Enter keypress doesn't instantly dismiss
+        # Allow at least 12 frames (~0.5s) before checking keys
         while not _interrupted[0]:
             if frame_idx > 12 and _check_user_key():
                 break
@@ -294,18 +386,29 @@ def run_banner(skip: bool = False) -> None:
                 ts = os.get_terminal_size()
                 term_width = max(60, ts.columns)
                 term_rows = ts.lines
-                if ts.columns < SPACE_WIDTH or ts.lines < _FRAME_MIN_ROWS:
+                if ts.lines < _FRAME_MIN_ROWS:
                     break
             except OSError:
                 pass
 
             v_pad = max(0, (term_rows - 1 - _FRAME_LINES) // 2)
-            frame_str = _compose_full_screen(angle, term_width)
+            frame_str = _compose_full_screen(angle, transit_phase, term_width)
             stdout.write(_ESC + "[H" + "\n" * v_pad + frame_str + "\n")
             stdout.flush()
 
-            angle += 0.08
+            angle += 0.04
             frame_idx += 1
+
+            # Transit planet animation: cycle through phases repeatedly
+            # Let the globe rotate solo for ~2s before first transit, then transit every ~3.5s
+            _transit_frame = frame_idx - 50   # start first transit after ~2s
+            _period_frames = 88                # ~3.5 s per transit cycle
+            if _transit_frame >= 0:
+                cycle_pos = (_transit_frame % _period_frames) / _period_frames
+                transit_phase = cycle_pos
+            else:
+                transit_phase = -1.0
+
             time.sleep(0.04)
 
             # After 4 full rotations (~10s), wait for keypress

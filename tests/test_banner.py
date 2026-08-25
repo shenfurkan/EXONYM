@@ -51,13 +51,21 @@ def test_sphere_scene_raytracing():
     """Validate 3D sphere raytracing produces valid character rows and changes with angle."""
     banner = _import_banner()
 
-    scene_0 = banner._render_planet_globe(0.0)
-    scene_pi = banner._render_planet_globe(math.pi)
+    # Use the helper to derive geometry for an 80-column terminal
+    geom = banner._globe_geometry(80)  # (space_width, cx, cy, rx, ry)
+
+    scene_0 = banner._render_planet_globe(0.0, -1.0, *geom)
+    scene_pi = banner._render_planet_globe(math.pi, -1.0, *geom)
 
     assert len(scene_0) == banner.SPACE_ROWS
     assert len(scene_pi) == banner.SPACE_ROWS
     # Different rotation angle produces different surface shading/texture
     assert scene_0 != scene_pi
+
+    # Transit planet with phase 0.5 should place the disc near the centre
+    scene_transit = banner._render_planet_globe(0.0, 0.5, *geom)
+    assert len(scene_transit) == banner.SPACE_ROWS
+    assert scene_transit != scene_0, "transit-bearing frame must differ from clear-globe frame"
 
 
 def test_print_cli_overview_output(capsys):

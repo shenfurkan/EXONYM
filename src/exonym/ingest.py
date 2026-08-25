@@ -19,6 +19,7 @@ from typing import List, Optional, Sequence, Set, Tuple
 from urllib.parse import quote
 
 from .catalog import write_provenance_sidecar
+from .download import DownloadEngine, DownloadItem
 from .workspace import CandidateWorkspace
 
 Product = Tuple[Path, str]  # (local product path, source URI)
@@ -32,12 +33,18 @@ class FetchedProducts(list):
     multiple archive queries. Passing one batch directly to :func:`ingest_products`
     also releases its staging directory after the ingest attempt, whether or
     not the candidate-local commit succeeds.
+
+    Attributes:
+        _sha256_cache: Optional mapping from staged product path to its
+            pre-computed hex SHA-256 digest.  Populated by the download engine
+            to avoid re-reading FITS files during provenance sidecar creation.
     """
 
     def __init__(self, staging_path: Optional[Path] = None) -> None:
         super().__init__()
         self._staging_path = staging_path
         self._cleaned = False
+        self._sha256_cache: dict = {}
 
     @property
     def staging_path(self) -> Optional[Path]:
@@ -130,32 +137,28 @@ def _mast_product_uri(row: object) -> str:
     )
 
 
-def _download_spoc_product(row: object, staging: Path) -> Path:
-    """Download archive bytes directly instead of serializing a Lightkurve object."""
-    try:
-        from astroquery.mast import Observations
-    except ImportError as exc:  # pragma: no cover - declared discovery dependency
-        raise RuntimeError("astroquery is required for SPOC product ingestion") from exc
-
-    destination = staging / _mast_product_filename(row)
-    status, message, _ = Observations.download_file(
-        _mast_product_data_uri(row),
-        local_path=str(destination),
-        cache=False,
-        verbose=False,
-    )
-    if status != "COMPLETE" or not destination.is_file():
-        raise RuntimeError("MAST product download failed: {0}".format(message or status))
-    return destination
-
-
-def _fetch_spoc_products(search: object, sectors: Optional[Sequence[int]]) -> FetchedProducts:
+def _fetch_spoc_products(
+    search: object,
+    sectors: Optional[Sequence[int]],
+    quiet: bool = False,
+    workers: int = 4,
+) -> "FetchedProducts":
     """Download selected archive rows into an owned temporary staging directory.
 
     An explicit sector selection is a provenance constraint. Rows without a
     usable ``sequence_number`` are therefore excluded rather than downloaded
     under an unknown sector. A failed download removes all partially staged
     bytes before propagating the archive error.
+
+    Args:
+        search: Lightkurve search result whose product table is iterated.
+        sectors: Optional sector filter; ``None`` downloads all rows.
+        quiet: Suppress the ``rich.progress`` display (CI / non-TTY mode).
+        workers: Maximum number of concurrent download threads.
+
+    Returns:
+        :class:`FetchedProducts` owning a temporary staging directory, or an
+        empty batch when the sector filter excludes all rows.
     """
     requested_sectors = _requested_sectors(sectors)
     selected_rows: List[object] = []
@@ -170,12 +173,25 @@ def _fetch_spoc_products(search: object, sectors: Optional[Sequence[int]]) -> Fe
     if not selected_rows:
         return FetchedProducts()
 
-    products = FetchedProducts(Path(tempfile.mkdtemp(prefix="exonym-ingest-")))
+    staging = Path(tempfile.mkdtemp(prefix="exonym-ingest-"))
+    products = FetchedProducts(staging)
     completed = False
     try:
-        for row in selected_rows:
-            fits_path = _download_spoc_product(row, products.staging_path)  # type: ignore[arg-type]
-            products.append((fits_path, _mast_product_uri(row)))
+        items = [
+            DownloadItem(
+                url=_mast_product_uri(row),
+                destination=staging / _mast_product_filename(row),
+                label=_mast_product_filename(row),
+            )
+            for row in selected_rows
+        ]
+        engine = DownloadEngine(max_workers=workers, quiet=quiet)
+        results = engine.download_many(items)
+        for result in results:
+            products.append((result.destination, result.source_uri))
+            # Cache the pre-computed SHA-256 so ingest_products can pass it
+            # to write_provenance_sidecar without re-reading the FITS file.
+            products._sha256_cache[result.destination] = result.sha256
         completed = True
         return products
     finally:
@@ -227,6 +243,7 @@ def ingest_products(
         if not planned:
             return []
 
+        sha256_cache: dict = getattr(products, "_sha256_cache", {}) if fetched_products is not None else {}
         staging = Path(tempfile.mkdtemp(prefix=".ingest-staging-", dir=str(raw)))
         committed: List[Path] = []
         try:
@@ -234,8 +251,12 @@ def ingest_products(
             for product, source_uri, destination, sidecar in planned:
                 staged_product = staging / destination.name
                 shutil.copy2(product, staged_product)
+                # Use the pre-computed SHA-256 from the download engine when
+                # available to avoid re-reading large FITS files from disk.
+                precomputed_sha256 = sha256_cache.get(Path(product))
                 staged_sidecar = write_provenance_sidecar(
-                    staged_product, source_uri, fetched_by=fetched_by
+                    staged_product, source_uri, fetched_by=fetched_by,
+                    sha256=precomputed_sha256,
                 )
                 staged_pairs.append((staged_product, staged_sidecar, destination, sidecar))
             for staged_product, staged_sidecar, destination, sidecar in staged_pairs:
@@ -265,6 +286,8 @@ def fetch_tess_products(
     sectors: Optional[Sequence[int]] = None,
     exptime: int = 120,
     provider: str = "spoc",
+    quiet: bool = False,
+    workers: int = 4,
 ) -> FetchedProducts:
     """Fetch official mission light curves into caller-owned staging paths.
 
@@ -278,6 +301,8 @@ def fetch_tess_products(
         sectors: Optional archive-sector selection applied before download.
         exptime: Requested cadence exposure time in seconds.
         provider: Supported official archive provider label.
+        quiet: Suppress the ``rich.progress`` display (CI / non-TTY mode).
+        workers: Maximum number of concurrent download threads.
 
     Returns:
         Context-manageable local staging-path and source-URI pairs for
@@ -304,7 +329,7 @@ def fetch_tess_products(
     if not search:
         return FetchedProducts()
 
-    return _fetch_spoc_products(search, sectors)
+    return _fetch_spoc_products(search, sectors, quiet=quiet, workers=workers)
 
 
 def fetch_tess_tpfs(
@@ -312,6 +337,8 @@ def fetch_tess_tpfs(
     sectors: Optional[Sequence[int]] = None,
     exptime: int = 120,
     provider: str = "spoc",
+    quiet: bool = False,
+    workers: int = 4,
 ) -> FetchedProducts:
     """Fetch official target-pixel files into caller-owned staging paths.
 
@@ -327,6 +354,8 @@ def fetch_tess_tpfs(
         sectors: Optional archive-sector selection applied before download.
         exptime: Requested cadence exposure time in seconds.
         provider: Supported official archive provider label.
+        quiet: Suppress the ``rich.progress`` display (CI / non-TTY mode).
+        workers: Maximum number of concurrent download threads.
 
     Returns:
         Context-manageable local staging-path and source-URI pairs for
@@ -355,4 +384,4 @@ def fetch_tess_tpfs(
 
     # SCIENTIFIC_BOUNDARY: Retain the MAST URI with each downloaded byte stream
     # so later ingestion can record provenance without assigning data quality.
-    return _fetch_spoc_products(search, sectors)
+    return _fetch_spoc_products(search, sectors, quiet=quiet, workers=workers)

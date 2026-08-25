@@ -361,6 +361,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default="spoc",
         help="MAST product provider. Only raw, provenance-bound SPOC products are supported.",
     )
+    ingest_parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        metavar="N",
+        help="Maximum concurrent download threads (default: 4).",
+    )
 
     detrend_parser = commands.add_parser(
         "detrend", help="Write an opt-in candidate-local detrended light-curve artifact."
@@ -1000,6 +1007,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
             from .ingest import fetch_tess_products, fetch_tess_tpfs, ingest_products
 
+            _workers = getattr(args, "workers", 4)
+            _quiet = getattr(args, "quiet", False)
             with ExitStack() as staging_batches:
                 all_products = []
                 if args.products in ("lc", "both"):
@@ -1010,6 +1019,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                 sectors=args.sectors,
                                 exptime=args.exptime,
                                 provider=args.provider,
+                                quiet=_quiet,
+                                workers=_workers,
                             )
                         )
                     )
@@ -1021,6 +1032,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                 sectors=args.sectors,
                                 exptime=args.exptime,
                                 provider=args.provider,
+                                quiet=_quiet,
+                                workers=_workers,
                             )
                         )
                     )
