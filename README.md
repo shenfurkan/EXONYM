@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="images/exonymbanner.gif" alt="EXONYM Banner" width="800">
+  <img src="assets/clianimation.gif" alt="EXONYM CLI" width="800">
   <br><br>
   <p>
     <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg" alt="Python 3.9+"></a>
