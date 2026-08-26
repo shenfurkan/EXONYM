@@ -89,10 +89,6 @@ exonym --help
 
 Networked operations need access to their upstream services. In particular, SPOC ingestion needs a catalog identifier and network access, Gaia and ExoFOP queries depend on remote services, and TRICERATOPS and TLS require their optional dependency groups.
 
-## Citation and contributions
-
-The JOSS manuscript source is in `paper/`. `CITATION.cff` provides machine-readable citation metadata, and `CONTRIBUTING.md` describes development, testing, and research-isolation expectations. Replace the marked author and archival placeholders before making a release or submission.
-
 ## First discovery run
 
 The placeholders below are deliberately generic; do not place real catalog identifiers or target aliases in shared documentation, source code, or tests.
