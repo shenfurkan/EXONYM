@@ -55,11 +55,12 @@ fitted additive jitter term (Foreman-Mackey et al. 2013):
 where :math:`\\sigma_j = e^{\\ln\\sigma_j}` is the jitter fitted in
 natural-log space to enforce positivity.
 
-Posterior sampling is performed with either the Goodman & Weare (2010)
-affine-invariant ensemble sampler via ``emcee`` or dynamic nested sampling
-via ``dynesty`` (Speagle 2020).  The latter reports the log evidence
-:math:`\\ln Z` and its estimated numerical uncertainty; these are descriptive
-and are **not** validation probabilities.
+Posterior sampling is performed with CUDA NUTS via ``NumPyro`` when its
+optional JAX stack is available, the Goodman & Weare (2010) affine-invariant
+ensemble sampler via ``emcee`` otherwise, or dynamic nested sampling via
+``dynesty`` (Speagle 2020) when explicitly selected. The latter reports the
+log evidence :math:`\\ln Z` and its estimated numerical uncertainty; these are
+descriptive and are **not** validation probabilities.
 
 Astrophysical Rationale
 -----------------------
@@ -90,9 +91,10 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import multiprocessing
 import os
@@ -149,6 +151,37 @@ PARAMETER_NAMES_ECCENTRIC = PARAMETER_NAMES_CIRCULAR + (
 JITTER_LOG_LOWER = -12.0
 JITTER_LOG_UPPER = -2.0
 JITTER_HALF_CAUCHY_SCALE = 1.0e-3
+
+# GPU NUTS defaults. These are intentionally independent from the historical
+# candidate-workspace emcee arguments so an automatic accelerator selection does
+# not silently shorten either sampler's production run.
+GPU_NUTS_WARMUP = 1000
+GPU_NUTS_SAMPLES = 2000
+GPU_NUTS_TARGET_ACCEPT_PROB = 0.9
+CPU_EMCEE_WALKERS = 50
+CPU_EMCEE_BURN_IN = 1000
+CPU_EMCEE_PRODUCTION = 2500
+
+
+class _GpuBackendUnavailable(RuntimeError):
+    """Raised when the optional JAX/NumPyro CUDA stack cannot be used."""
+
+
+@dataclass(frozen=True)
+class _AcceleratedTransitFitData:
+    """Validated normalized-flux inputs shared by the accelerator backends."""
+
+    time_days: np.ndarray
+    flux: np.ndarray
+    flux_err: np.ndarray
+    period_days: float
+    t0_days: float
+    rho_star_g_cm3: float
+    rho_star_sigma_g_cm3: float
+    period_sigma_days: Optional[float]
+    t0_sigma_days: Optional[float]
+    exposure_seconds: float
+    eccentric: bool
 
 
 # --- Parallel worker context (module-level globals set once per worker) ---
@@ -240,17 +273,34 @@ def stellar_density_a_rs(rho_solar: float, period_days: float) -> float:
     Raises
     ------
     ValueError
-        If either argument is non-positive.
+        If either argument is non-finite or non-positive, or the calculation
+        cannot produce a finite scaled semi-major axis.
     """
-    if rho_solar <= 0 or period_days <= 0:
-        raise ValueError("stellar density and period must be positive")
+    try:
+        rho_solar = float(rho_solar)
+        period_days = float(period_days)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("stellar density and period must be finite and positive") from exc
+    if (
+        not math.isfinite(rho_solar)
+        or not math.isfinite(period_days)
+        or rho_solar <= 0.0
+        or period_days <= 0.0
+    ):
+        raise ValueError("stellar density and period must be finite and positive")
     # NUMERICAL_GUARD: convert to CGS (period_days * seconds/day) before
     # evaluating the cube root; the exponent 1/3 is exact.
     rho_gcm3 = rho_solar * SOLAR_MEAN_DENSITY_G_CM3
     period_seconds = period_days * SECONDS_PER_DAY
-    return (
+    a_rs_cubed = (
         (GRAVITATIONAL_CONSTANT_CGS * period_seconds**2 * rho_gcm3) / (3.0 * math.pi)
-    ) ** (1.0 / 3.0)
+    )
+    if not math.isfinite(a_rs_cubed) or a_rs_cubed <= 0.0:
+        raise ValueError("stellar density and period produce a non-finite scaled semi-major axis")
+    a_rs = a_rs_cubed ** (1.0 / 3.0)
+    if not math.isfinite(a_rs) or a_rs <= 0.0:
+        raise ValueError("stellar density and period produce a non-finite scaled semi-major axis")
+    return a_rs
 
 
 def conjunction_distance_a_rs(a_rs: float, eccentricity: float, omega_deg: float) -> Optional[float]:
@@ -368,6 +418,746 @@ def _require_batman() -> Any:
             "batman-package is required for transit fitting; install the pinned core dependency."
         ) from exc
     return batman
+
+
+def fit_transit_light_curve(
+    time_days: Sequence[float],
+    flux: Sequence[float],
+    flux_err: Sequence[float],
+    period_days: float,
+    t0_days: float,
+    rho_star_g_cm3: float,
+    rho_star_sigma_g_cm3: float,
+    *,
+    device: str = "auto",
+    eccentric: bool = False,
+    period_sigma_days: Optional[float] = None,
+    t0_sigma_days: Optional[float] = None,
+    exposure_seconds: float = EXPTIME_SECONDS,
+    num_warmup: int = GPU_NUTS_WARMUP,
+    num_samples: int = GPU_NUTS_SAMPLES,
+    target_accept_prob: float = GPU_NUTS_TARGET_ACCEPT_PROB,
+    n_walkers: int = CPU_EMCEE_WALKERS,
+    burn_in: int = CPU_EMCEE_BURN_IN,
+    production: int = CPU_EMCEE_PRODUCTION,
+    seed: int = 5,
+    progress: bool = False,
+) -> Dict[str, Any]:
+    """Fit a normalized transit light curve on CUDA when available.
+
+    ``time_days`` and ``t0_days`` must use the same declared time scale. Flux
+    values must be normalized relative flux and ``rho_star_g_cm3`` must be in
+    cgs units. Supplying a positive period or epoch uncertainty samples that
+    quantity; omitting it keeps the supplied ephemeris fixed while still
+    reporting it in the common posterior schema.
+
+    The returned dictionary always has ``p16``, ``median``, and ``p84`` for
+    ``rp_rstar``, ``a_rstar``, ``period``, ``t0``, ``inclination_deg``,
+    ``q1``, ``q2``, ``u1``, ``u2``, and ``jitter_ppm``. The accelerator path
+    is optional: unavailable or incompatible JAX/CUDA dependencies fall back
+    to the CPU emcee implementation without importing JAX at module import
+    time. A runtime sampling failure on an available GPU is intentionally not
+    converted into a CPU fit because that would hide a scientific failure.
+    """
+    data = _validate_accelerated_transit_fit_data(
+        time_days,
+        flux,
+        flux_err,
+        period_days,
+        t0_days,
+        rho_star_g_cm3,
+        rho_star_sigma_g_cm3,
+        period_sigma_days=period_sigma_days,
+        t0_sigma_days=t0_sigma_days,
+        exposure_seconds=exposure_seconds,
+        eccentric=eccentric,
+    )
+    _validate_accelerated_sampler_arguments(
+        device=device,
+        num_warmup=num_warmup,
+        num_samples=num_samples,
+        target_accept_prob=target_accept_prob,
+        n_walkers=n_walkers,
+        burn_in=burn_in,
+        production=production,
+        seed=seed,
+    )
+
+    if device == "cpu":
+        return _fit_emcee_cpu(
+            data,
+            n_walkers=n_walkers,
+            burn_in=burn_in,
+            production=production,
+            seed=seed,
+            progress=progress,
+            fallback_reason="CPU requested explicitly",
+        )
+
+    try:
+        stack = _load_jax_gpu_stack()
+    except _GpuBackendUnavailable as exc:
+        return _fit_emcee_cpu(
+            data,
+            n_walkers=n_walkers,
+            burn_in=burn_in,
+            production=production,
+            seed=seed,
+            progress=progress,
+            fallback_reason=str(exc),
+        )
+
+    return _fit_numpyro_gpu(
+        data,
+        stack=stack,
+        num_warmup=num_warmup,
+        num_samples=num_samples,
+        target_accept_prob=target_accept_prob,
+        seed=seed,
+        progress=progress,
+    )
+
+
+def _validate_accelerated_transit_fit_data(
+    time_days: Sequence[float],
+    flux: Sequence[float],
+    flux_err: Sequence[float],
+    period_days: float,
+    t0_days: float,
+    rho_star_g_cm3: float,
+    rho_star_sigma_g_cm3: float,
+    *,
+    period_sigma_days: Optional[float],
+    t0_sigma_days: Optional[float],
+    exposure_seconds: float,
+    eccentric: bool,
+) -> _AcceleratedTransitFitData:
+    """Validate one normalized light curve before dispatching a sampler."""
+    try:
+        time = np.ascontiguousarray(np.asarray(time_days, dtype=np.float64))
+        normalized_flux = np.ascontiguousarray(np.asarray(flux, dtype=np.float64))
+        uncertainty = np.ascontiguousarray(np.asarray(flux_err, dtype=np.float64))
+        period = float(period_days)
+        epoch = float(t0_days)
+        density = float(rho_star_g_cm3)
+        density_sigma = float(rho_star_sigma_g_cm3)
+        integration_seconds = float(exposure_seconds)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("transit-fit inputs must be numeric finite arrays and scalars") from exc
+    if (
+        time.ndim != 1
+        or normalized_flux.shape != time.shape
+        or uncertainty.shape != time.shape
+        or time.size < 20
+        or not np.all(np.isfinite(time))
+        or not np.all(np.isfinite(normalized_flux))
+        or not np.all(np.isfinite(uncertainty))
+        or np.any(uncertainty <= 0.0)
+    ):
+        raise ValueError("transit fitting requires at least 20 finite cadences with positive uncertainties")
+    if (
+        not math.isfinite(period)
+        or period <= 0.0
+        or not math.isfinite(epoch)
+        or not math.isfinite(density)
+        or density <= 0.0
+        or not math.isfinite(density_sigma)
+        or density_sigma <= 0.0
+        or not math.isfinite(integration_seconds)
+        or integration_seconds <= 0.0
+    ):
+        raise ValueError("period, stellar-density prior, and exposure time must be finite and positive")
+
+    def optional_positive(value: Optional[float], name: str) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            converted = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("{0} must be a positive finite number or None".format(name)) from exc
+        if not math.isfinite(converted) or converted <= 0.0:
+            raise ValueError("{0} must be a positive finite number or None".format(name))
+        return converted
+
+    if not isinstance(eccentric, (bool, np.bool_)):
+        raise ValueError("eccentric must be a boolean")
+    return _AcceleratedTransitFitData(
+        time_days=time,
+        flux=normalized_flux,
+        flux_err=uncertainty,
+        period_days=period,
+        t0_days=epoch,
+        rho_star_g_cm3=density,
+        rho_star_sigma_g_cm3=density_sigma,
+        period_sigma_days=optional_positive(period_sigma_days, "period_sigma_days"),
+        t0_sigma_days=optional_positive(t0_sigma_days, "t0_sigma_days"),
+        exposure_seconds=integration_seconds,
+        eccentric=bool(eccentric),
+    )
+
+
+def _validate_accelerated_sampler_arguments(
+    *,
+    device: str,
+    num_warmup: int,
+    num_samples: int,
+    target_accept_prob: float,
+    n_walkers: int,
+    burn_in: int,
+    production: int,
+    seed: int,
+) -> None:
+    """Validate sampler controls before any optional backend initialization."""
+    if device not in ("auto", "cpu", "gpu"):
+        raise ValueError("device must be one of: auto, cpu, gpu")
+    integer_values = {
+        "num_warmup": num_warmup,
+        "num_samples": num_samples,
+        "n_walkers": n_walkers,
+        "burn_in": burn_in,
+        "production": production,
+    }
+    if any(not isinstance(value, int) or isinstance(value, bool) or value <= 0 for value in integer_values.values()):
+        raise ValueError("sampler iteration counts and n_walkers must be positive integers")
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        raise ValueError("seed must be an integer")
+    if not isinstance(target_accept_prob, (float, int)) or not math.isfinite(float(target_accept_prob)):
+        raise ValueError("target_accept_prob must be a finite number")
+    if not 0.0 < float(target_accept_prob) < 1.0:
+        raise ValueError("target_accept_prob must lie strictly between zero and one")
+
+
+def _load_jax_gpu_stack() -> Dict[str, Any]:
+    """Load a 64-bit JAX/NumPyro CUDA stack or report why it is unavailable."""
+    try:
+        # This must run before importing JAX arrays or model modules. JAX uses
+        # process-global configuration, so a caller that initialized JAX in
+        # float32 cannot enter this precision-sensitive transit backend.
+        from jax import config as jax_config
+
+        jax_config.update("jax_enable_x64", True)
+        import jax
+
+        if not bool(jax_config.read("jax_enable_x64")):
+            raise RuntimeError("JAX rejected the required 64-bit floating-point configuration")
+        gpu_devices = jax.devices("gpu")
+        if not gpu_devices:
+            raise RuntimeError("JAX reports no CUDA-compatible GPU devices")
+        import jax.numpy as jnp
+        import numpyro
+        import numpyro.distributions as dist
+        from numpyro.infer import MCMC, NUTS
+        from jaxoplanet.orbits import TransitOrbit
+
+        try:
+            # Older jaxoplanet releases exposed this at package scope.
+            from jaxoplanet.light_curves import limb_dark_light_curve
+        except ImportError:
+            # Current releases expose the same callable as light_curve.
+            from jaxoplanet.light_curves.limb_dark import light_curve as limb_dark_light_curve
+    except (ImportError, OSError, RuntimeError, ValueError, AttributeError) as exc:
+        raise _GpuBackendUnavailable(
+            "JAX GPU backend unavailable: {0}: {1}".format(type(exc).__name__, exc)
+        ) from exc
+    return {
+        "jax": jax,
+        "jnp": jnp,
+        "numpyro": numpyro,
+        "dist": dist,
+        "MCMC": MCMC,
+        "NUTS": NUTS,
+        "TransitOrbit": TransitOrbit,
+        "limb_dark_light_curve": limb_dark_light_curve,
+        "device": gpu_devices[0],
+    }
+
+
+def _accelerated_parameter_names(data: _AcceleratedTransitFitData) -> List[str]:
+    """Return the CPU parameter vector layout for the standalone fitter."""
+    names = [
+        "rp_rstar",
+        "log_rho_star",
+        "impact_parameter",
+        "baseline",
+        "log_jitter",
+        "q1",
+        "q2",
+    ]
+    if data.eccentric:
+        names.extend(["sqe_cosw", "sqe_sinw"])
+    if data.period_sigma_days is not None:
+        names.append("period")
+    if data.t0_sigma_days is not None:
+        names.append("t0")
+    return names
+
+
+def _accelerated_unpack_theta(
+    theta: np.ndarray, data: _AcceleratedTransitFitData
+) -> Dict[str, float]:
+    """Map a CPU walker position to physical transit parameters."""
+    names = _accelerated_parameter_names(data)
+    values = np.asarray(theta, dtype=float)
+    if values.shape != (len(names),):
+        raise ValueError("accelerated transit parameter vector has an invalid shape")
+    unpacked = {name: float(values[index]) for index, name in enumerate(names)}
+    unpacked.setdefault("sqe_cosw", 0.0)
+    unpacked.setdefault("sqe_sinw", 0.0)
+    unpacked.setdefault("period", data.period_days)
+    unpacked.setdefault("t0", data.t0_days)
+    return unpacked
+
+
+def _accelerated_a_rstar_from_cgs(
+    rho_star_g_cm3: np.ndarray, period_days: np.ndarray
+) -> np.ndarray:
+    """Vectorize the density-locked scaled semi-major axis in cgs units."""
+    density = np.asarray(rho_star_g_cm3, dtype=float)
+    period = np.asarray(period_days, dtype=float)
+    value = (
+        GRAVITATIONAL_CONSTANT_CGS
+        * np.square(period * SECONDS_PER_DAY)
+        * density
+        / (3.0 * math.pi)
+    )
+    return np.cbrt(value)
+
+
+def _summarize_accelerated_samples(
+    samples: Dict[str, np.ndarray],
+    data: _AcceleratedTransitFitData,
+    *,
+    backend: str,
+    sampler_metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Convert backend-native draws into the public, backend-neutral schema."""
+    required = ("rp_rstar", "log_rho_star", "impact_parameter", "log_jitter", "q1", "q2")
+    if any(name not in samples for name in required):
+        raise RuntimeError("transit sampler did not return all required posterior parameters")
+    normalized = {name: np.asarray(value, dtype=float).reshape(-1) for name, value in samples.items()}
+    sample_count = normalized["rp_rstar"].size
+    if sample_count == 0 or any(values.size != sample_count for values in normalized.values()):
+        raise RuntimeError("transit sampler returned posterior arrays with inconsistent shapes")
+    if any(not np.all(np.isfinite(normalized[name])) for name in required):
+        raise RuntimeError("transit sampler returned non-finite posterior values")
+
+    # NUMERICAL_GUARD: bounded priors keep typical draws physical, but tail
+    # draws (wide period priors, grazing b, e near unity) must degrade to the
+    # same clipped-edge behaviour as the legacy posterior summaries instead of
+    # aborting an otherwise converged fit.
+    period = normalized.get("period", np.full(sample_count, data.period_days, dtype=float))
+    t0 = normalized.get("t0", np.full(sample_count, data.t0_days, dtype=float))
+    rho_star = normalized.get("rho_star_g_cm3", np.exp(normalized["log_rho_star"]))
+    sqe_cosw = normalized.get("sqe_cosw", np.zeros(sample_count, dtype=float))
+    sqe_sinw = normalized.get("sqe_sinw", np.zeros(sample_count, dtype=float))
+    if not np.all(np.isfinite(period)) or not np.all(np.isfinite(t0)):
+        raise RuntimeError("transit sampler returned non-finite ephemeris draws")
+    safe_period = np.maximum(period, np.finfo(float).tiny)
+    safe_rho_star = np.maximum(rho_star, np.finfo(float).tiny)
+    eccentricity = np.clip(
+        np.square(sqe_cosw) + np.square(sqe_sinw), 0.0, 1.0 - np.finfo(float).eps
+    )
+    q1 = normalized["q1"]
+    q2 = normalized["q2"]
+    if np.any(q1 < 0.0) or np.any(q1 > 1.0) or np.any(q2 < 0.0) or np.any(q2 > 1.0):
+        raise RuntimeError("transit sampler returned Kipping coordinates outside [0, 1]")
+
+    a_rstar = _accelerated_a_rstar_from_cgs(safe_rho_star, safe_period)
+    sqrt_eccentricity = np.sqrt(eccentricity)
+    denominator = np.maximum(1.0 + sqrt_eccentricity * sqe_sinw, np.finfo(float).eps)
+    conjunction_distance = a_rstar * (1.0 - eccentricity) / denominator
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cosine_inclination = np.where(
+            conjunction_distance > 0.0,
+            normalized["impact_parameter"] / conjunction_distance,
+            np.nan,
+        )
+    finite_projection = np.isfinite(cosine_inclination)
+    if not np.all(np.isfinite(a_rstar)) or not np.any(finite_projection):
+        raise RuntimeError("transit sampler returned no summarizable inclination geometry")
+    clipped_projection = finite_projection & (
+        (cosine_inclination < 0.0) | (cosine_inclination > 1.0)
+    )
+    inclination_deg = np.degrees(
+        np.arccos(np.clip(cosine_inclination, 0.0, 1.0))
+    )
+    sqrt_q1 = np.sqrt(q1)
+    u1 = 2.0 * sqrt_q1 * q2
+    u2 = sqrt_q1 * (1.0 - 2.0 * q2)
+    jitter_ppm = np.exp(normalized["log_jitter"]) * 1.0e6
+    summary_samples = {
+        "rp_rstar": normalized["rp_rstar"],
+        "a_rstar": a_rstar,
+        "period": period,
+        "t0": t0,
+        "inclination_deg": inclination_deg,
+        "q1": q1,
+        "q2": q2,
+        "u1": u1,
+        "u2": u2,
+        "jitter_ppm": jitter_ppm,
+    }
+    result: Dict[str, Any] = {"backend": backend}
+    result.update({name: _quantile_summary(values) for name, values in summary_samples.items()})
+    # Preserve the legacy grazing-geometry transparency contract.
+    inclination_summary = dict(result["inclination_deg"])
+    inclination_summary["conjunction_distance_clip_fraction"] = float(
+        np.mean(clipped_projection)
+    )
+    result["inclination_deg"] = inclination_summary
+    result["sampler_metadata"] = sampler_metadata
+    return result
+
+
+def _accelerated_cpu_log_probability(
+    theta: np.ndarray, data: _AcceleratedTransitFitData
+) -> float:
+    """Evaluate the standalone emcee posterior without mutable shared state."""
+    try:
+        values = _accelerated_unpack_theta(theta, data)
+    except ValueError:
+        return -np.inf
+    if not all(math.isfinite(value) for value in values.values()):
+        return -np.inf
+    rp_rstar = values["rp_rstar"]
+    log_rho_star = values["log_rho_star"]
+    impact_parameter = values["impact_parameter"]
+    baseline = values["baseline"]
+    log_jitter = values["log_jitter"]
+    q1 = values["q1"]
+    q2 = values["q2"]
+    period = values["period"]
+    t0 = values["t0"]
+    sqe_cosw = values["sqe_cosw"]
+    sqe_sinw = values["sqe_sinw"]
+    eccentricity = sqe_cosw * sqe_cosw + sqe_sinw * sqe_sinw
+    if not (
+        0.001 < rp_rstar < 0.3
+        and 0.0 <= impact_parameter < 1.0 + rp_rstar
+        and 0.99 < baseline < 1.01
+        and JITTER_LOG_LOWER < log_jitter < JITTER_LOG_UPPER
+        and -50.0 < log_rho_star < 50.0
+        and 0.0 < q1 < 1.0
+        and 0.0 < q2 < 1.0
+        and period > 0.0
+        and eccentricity < 1.0
+    ):
+        return -np.inf
+    rho_star = math.exp(log_rho_star)
+    if not math.isfinite(rho_star) or rho_star <= 0.0:
+        return -np.inf
+    try:
+        a_rstar = float(_accelerated_a_rstar_from_cgs(np.asarray([rho_star]), np.asarray([period]))[0])
+    except (FloatingPointError, ValueError, OverflowError):
+        return -np.inf
+    if not math.isfinite(a_rstar) or a_rstar <= 0.0:
+        return -np.inf
+    omega_deg = math.degrees(math.atan2(sqe_sinw, sqe_cosw)) if eccentricity > 0.0 else 90.0
+    model = batman_transit_flux(
+        data.time_days - t0,
+        period,
+        rp_rstar,
+        a_rstar,
+        impact_parameter,
+        q1,
+        q2,
+        baseline,
+        eccentricity=eccentricity,
+        omega_deg=omega_deg,
+        exposure_seconds=data.exposure_seconds,
+    )
+    if model is None:
+        return -np.inf
+    jitter = math.exp(log_jitter)
+    variance = np.square(data.flux_err) + jitter * jitter
+    if not np.all(np.isfinite(variance)) or np.any(variance <= 0.0):
+        return -np.inf
+    residual = data.flux - model
+    log_likelihood = -0.5 * float(
+        np.sum(np.square(residual) / variance + np.log(2.0 * math.pi * variance))
+    )
+    log_density_sigma = data.rho_star_sigma_g_cm3 / data.rho_star_g_cm3
+    log_prior = -0.5 * ((log_rho_star - math.log(data.rho_star_g_cm3)) / log_density_sigma) ** 2
+    log_prior += _half_cauchy_log_jitter_log_density(log_jitter)
+    if data.period_sigma_days is not None:
+        log_prior += -0.5 * ((period - data.period_days) / data.period_sigma_days) ** 2
+    if data.t0_sigma_days is not None:
+        log_prior += -0.5 * ((t0 - data.t0_days) / data.t0_sigma_days) ** 2
+    return float(log_likelihood + log_prior) if math.isfinite(log_likelihood + log_prior) else -np.inf
+
+
+def _accelerated_initial_theta(data: _AcceleratedTransitFitData) -> np.ndarray:
+    """Build a finite CPU starting point from normalized flux statistics."""
+    observed_depth = max(float(np.median(data.flux) - np.min(data.flux)), 1.0e-8)
+    rp_rstar = min(0.2, max(0.005, math.sqrt(observed_depth)))
+    scatter = max(float(np.std(data.flux - np.median(data.flux))), float(np.median(data.flux_err)), 1.0e-6)
+    values = [
+        rp_rstar,
+        math.log(data.rho_star_g_cm3),
+        0.3,
+        float(np.clip(np.median(data.flux), 0.995, 1.005)),
+        float(np.clip(math.log(scatter), JITTER_LOG_LOWER + 0.1, JITTER_LOG_UPPER - 0.1)),
+        0.5,
+        0.5,
+    ]
+    if data.eccentric:
+        values.extend([0.0, 0.0])
+    if data.period_sigma_days is not None:
+        values.append(data.period_days)
+    if data.t0_sigma_days is not None:
+        values.append(data.t0_days)
+    return np.asarray(values, dtype=float)
+
+
+def _fit_emcee_cpu(
+    data: _AcceleratedTransitFitData,
+    *,
+    n_walkers: int,
+    burn_in: int,
+    production: int,
+    seed: int,
+    progress: bool,
+    fallback_reason: Optional[str],
+) -> Dict[str, Any]:
+    """Run the batman/emcee fallback and emit the normalized output contract."""
+    _require_batman()
+    try:
+        import emcee
+    except ImportError as exc:
+        raise RuntimeError("emcee is required for CPU transit fitting") from exc
+
+    initial = _accelerated_initial_theta(data)
+    ndim = initial.size
+    effective_walkers = max(n_walkers, 2 * ndim)
+    rng = np.random.default_rng(seed)
+    scales = np.full(ndim, 0.01, dtype=float)
+    scales[:7] = np.asarray([0.003, 0.03, 0.03, 0.0002, 0.15, 0.03, 0.03])
+    cursor = 7
+    if data.eccentric:
+        scales[cursor:cursor + 2] = 0.01
+        cursor += 2
+    if data.period_sigma_days is not None:
+        scales[cursor] = min(data.period_sigma_days * 0.05, data.period_days * 0.001)
+        cursor += 1
+    if data.t0_sigma_days is not None:
+        scales[cursor] = min(data.t0_sigma_days * 0.05, data.period_days * 0.001)
+
+    p0 = np.empty((effective_walkers, ndim), dtype=float)
+    for walker_index in range(effective_walkers):
+        for _attempt in range(1000):
+            proposal = initial + rng.normal(size=ndim) * scales
+            proposal[0] = np.clip(proposal[0], 0.0011, 0.299)
+            proposal[2] = np.clip(proposal[2], 0.0, 1.0)
+            proposal[3] = np.clip(proposal[3], 0.9901, 1.0099)
+            proposal[4] = np.clip(proposal[4], JITTER_LOG_LOWER + 0.01, JITTER_LOG_UPPER - 0.01)
+            proposal[5:7] = np.clip(proposal[5:7], 1.0e-5, 1.0 - 1.0e-5)
+            if data.eccentric:
+                eccentric_radius = float(math.hypot(proposal[7], proposal[8]))
+                if eccentric_radius >= 0.99:
+                    proposal[7:9] *= 0.99 / eccentric_radius
+            if math.isfinite(_accelerated_cpu_log_probability(proposal, data)):
+                p0[walker_index] = proposal
+                break
+        else:
+            raise RuntimeError("could not initialize a physically valid CPU transit-fit walker")
+
+    sampler = emcee.EnsembleSampler(
+        effective_walkers,
+        ndim,
+        lambda theta: _accelerated_cpu_log_probability(theta, data),
+        moves=emcee.moves.StretchMove(a=1.5),
+    )
+    sampler.random_state = np.random.RandomState(seed).get_state()
+    state = sampler.run_mcmc(p0, burn_in, progress=progress)
+    sampler.reset()
+    sampler.run_mcmc(state, production, progress=progress)
+    chain = np.asarray(sampler.get_chain(flat=True), dtype=float)
+    names = _accelerated_parameter_names(data)
+    samples = {name: chain[:, index] for index, name in enumerate(names)}
+    result = _summarize_accelerated_samples(
+        samples,
+        data,
+        backend="emcee-cpu",
+        sampler_metadata={
+            "sampler": "emcee.EnsembleSampler",
+            "requested_walkers": int(n_walkers),
+            "walkers": int(effective_walkers),
+            "burn_in": int(burn_in),
+            "production": int(production),
+            "flat_samples": int(chain.shape[0]),
+            "random_seed": int(seed),
+            "acceptance_fraction_mean": float(np.mean(sampler.acceptance_fraction)),
+            "fallback_reason": fallback_reason,
+        },
+    )
+    return result
+
+
+def _fit_numpyro_gpu(
+    data: _AcceleratedTransitFitData,
+    *,
+    stack: Dict[str, Any],
+    num_warmup: int,
+    num_samples: int,
+    target_accept_prob: float,
+    seed: int,
+    progress: bool,
+) -> Dict[str, Any]:
+    """Run a pure JAX/NumPyro NUTS model on the selected CUDA device."""
+    jax = stack["jax"]
+    jnp = stack["jnp"]
+    numpyro = stack["numpyro"]
+    dist = stack["dist"]
+    MCMC = stack["MCMC"]
+    NUTS = stack["NUTS"]
+    TransitOrbit = stack["TransitOrbit"]
+    limb_dark_light_curve = stack["limb_dark_light_curve"]
+    gpu_device = stack["device"]
+
+    time_days = jax.device_put(jnp.asarray(data.time_days, dtype=jnp.float64), gpu_device)
+    flux = jax.device_put(jnp.asarray(data.flux, dtype=jnp.float64), gpu_device)
+    flux_err = jax.device_put(jnp.asarray(data.flux_err, dtype=jnp.float64), gpu_device)
+    exposure_days = jnp.asarray(data.exposure_seconds / SECONDS_PER_DAY, dtype=jnp.float64)
+    sub_sample_offsets = (
+        jnp.arange(SUPERSAMPLE_FACTOR, dtype=jnp.float64) - 0.5 * (SUPERSAMPLE_FACTOR - 1)
+    ) * (exposure_days / SUPERSAMPLE_FACTOR)
+    log_rho_center = math.log(data.rho_star_g_cm3)
+    log_rho_sigma = data.rho_star_sigma_g_cm3 / data.rho_star_g_cm3
+    machine_epsilon = jnp.finfo(jnp.float64).eps
+
+    def transit_model() -> None:
+        """Pure potential-energy model traced once by NumPyro's JIT compiler."""
+        rp_rstar = numpyro.sample("rp_rstar", dist.Uniform(0.001, 0.3))
+        log_rho_star = numpyro.sample("log_rho_star", dist.Normal(log_rho_center, log_rho_sigma))
+        impact_parameter = numpyro.sample("impact_parameter", dist.Uniform(0.0, 1.2))
+        baseline = numpyro.sample("baseline", dist.Uniform(0.99, 1.01))
+        log_jitter = numpyro.sample("log_jitter", dist.Uniform(JITTER_LOG_LOWER, JITTER_LOG_UPPER))
+        q1 = numpyro.sample("q1", dist.Uniform(0.0, 1.0))
+        q2 = numpyro.sample("q2", dist.Uniform(0.0, 1.0))
+        if data.eccentric:
+            sqe_cosw = numpyro.sample("sqe_cosw", dist.Uniform(-1.0, 1.0))
+            sqe_sinw = numpyro.sample("sqe_sinw", dist.Uniform(-1.0, 1.0))
+        else:
+            sqe_cosw = jnp.asarray(0.0, dtype=jnp.float64)
+            sqe_sinw = jnp.asarray(0.0, dtype=jnp.float64)
+
+        if data.period_sigma_days is None:
+            period = jnp.asarray(data.period_days, dtype=jnp.float64)
+            numpyro.deterministic("period", period)
+        else:
+            period = numpyro.sample("period", dist.Normal(data.period_days, data.period_sigma_days))
+        if data.t0_sigma_days is None:
+            t0 = jnp.asarray(data.t0_days, dtype=jnp.float64)
+            numpyro.deterministic("t0", t0)
+        else:
+            t0 = numpyro.sample("t0", dist.Normal(data.t0_days, data.t0_sigma_days))
+
+        # Eastman coordinates have a uniform disk prior after the explicit
+        # radius guard below. Use safe values for algebra, then assign -inf to
+        # proposals outside the physical disk without host-side branching.
+        eccentricity = jnp.square(sqe_cosw) + jnp.square(sqe_sinw)
+        safe_eccentricity = jnp.minimum(eccentricity, 1.0 - machine_epsilon)
+        sqrt_eccentricity = jnp.sqrt(safe_eccentricity)
+        conjunction_factor = jnp.maximum(1.0 + sqrt_eccentricity * sqe_sinw, machine_epsilon)
+        safe_period = jnp.maximum(period, machine_epsilon)
+        safe_log_rho_star = jnp.clip(log_rho_star, -50.0, 50.0)
+        rho_star = jnp.exp(safe_log_rho_star)
+        a_rstar = jnp.cbrt(
+            GRAVITATIONAL_CONSTANT_CGS
+            * jnp.square(safe_period * SECONDS_PER_DAY)
+            * rho_star
+            / (3.0 * math.pi)
+        )
+        conjunction_distance = a_rstar * (1.0 - safe_eccentricity) / conjunction_factor
+        cosine_inclination = impact_parameter / jnp.maximum(conjunction_distance, machine_epsilon)
+        sine_inclination = jnp.sqrt(jnp.maximum(1.0 - jnp.square(cosine_inclination), machine_epsilon))
+        sky_speed = (
+            2.0
+            * math.pi
+            * a_rstar
+            / safe_period
+            * conjunction_factor
+            / jnp.sqrt(jnp.maximum(1.0 - jnp.square(safe_eccentricity), machine_epsilon))
+            * sine_inclination
+        )
+        valid_geometry = (
+            (period > 0.0)
+            & (log_rho_star > -50.0)
+            & (log_rho_star < 50.0)
+            & (eccentricity < 1.0)
+            & (impact_parameter < 1.0 + rp_rstar)
+            & (cosine_inclination >= 0.0)
+            & (cosine_inclination <= 1.0)
+            & jnp.isfinite(a_rstar)
+            & jnp.isfinite(sky_speed)
+            & (sky_speed > 0.0)
+        )
+        numpyro.factor("physical_geometry", jnp.where(valid_geometry, 0.0, -jnp.inf))
+        jitter = jnp.exp(log_jitter)
+        half_cauchy_ratio = jitter / JITTER_HALF_CAUCHY_SCALE
+        numpyro.factor(
+            "log_jitter_prior",
+            jnp.log(2.0 / (math.pi * JITTER_HALF_CAUCHY_SCALE))
+            - jnp.log1p(jnp.square(half_cauchy_ratio))
+            + log_jitter,
+        )
+
+        u1 = 2.0 * jnp.sqrt(q1) * q2
+        u2 = jnp.sqrt(q1) * (1.0 - 2.0 * q2)
+        orbit = TransitOrbit(
+            period=safe_period,
+            speed=jnp.maximum(sky_speed, machine_epsilon),
+            time_transit=t0,
+            impact_param=impact_parameter,
+            radius_ratio=rp_rstar,
+        )
+        # Keep exposure integration O(N) in device memory rather than creating
+        # an N-by-supersample temporary for every NUTS potential evaluation.
+        # The fixed, side-effect-free stencil is unrolled deterministically by
+        # JAX during compilation.
+        light_curve = limb_dark_light_curve(orbit, u1, u2)
+        delta_flux = sum(
+            light_curve(time_days + sub_sample_offsets[index])
+            for index in range(SUPERSAMPLE_FACTOR)
+        ) / SUPERSAMPLE_FACTOR
+        model_flux = baseline * (1.0 + delta_flux)
+        total_sigma = jnp.sqrt(jnp.square(flux_err) + jnp.square(jitter))
+        numpyro.sample("observed_flux", dist.Normal(model_flux, total_sigma).to_event(1), obs=flux)
+
+    kernel = NUTS(transit_model, target_accept_prob=float(target_accept_prob))
+    sampler = MCMC(
+        kernel,
+        num_warmup=num_warmup,
+        num_samples=num_samples,
+        progress_bar=progress,
+        jit_model_args=True,
+    )
+    random_key = jax.device_put(jax.random.PRNGKey(seed), gpu_device)
+    sampler.run(random_key, extra_fields=("diverging",))
+    raw_samples = sampler.get_samples(group_by_chain=False)
+    samples = {name: np.asarray(values, dtype=float).reshape(-1) for name, values in raw_samples.items()}
+    if "period" not in samples:
+        samples["period"] = np.full(samples["rp_rstar"].size, data.period_days, dtype=float)
+    if "t0" not in samples:
+        samples["t0"] = np.full(samples["rp_rstar"].size, data.t0_days, dtype=float)
+    samples["rho_star_g_cm3"] = np.exp(samples["log_rho_star"])
+    extra_fields = sampler.get_extra_fields(group_by_chain=False)
+    divergences = int(np.sum(np.asarray(extra_fields.get("diverging", ()), dtype=bool)))
+    return _summarize_accelerated_samples(
+        samples,
+        data,
+        backend="jax-gpu",
+        sampler_metadata={
+            "sampler": "numpyro.NUTS",
+            "num_warmup": int(num_warmup),
+            "num_samples": int(num_samples),
+            "target_accept_prob": float(target_accept_prob),
+            "random_seed": int(seed),
+            "gpu_device": str(gpu_device),
+            "divergences": divergences,
+            "jax_enable_x64": True,
+        },
+    )
 
 
 def batman_transit_flux(
@@ -1945,22 +2735,157 @@ def _mcmc_convergence_diagnostics(
 
 def run_mcmc_transit_fit(
     workspace: CandidateWorkspace,
-    n_samples: int = 2500,
+    n_samples: int = CPU_EMCEE_PRODUCTION,
     eccentric: bool = False,
     n_walkers: Optional[int] = None,
     burn_in: Optional[int] = None,
     seed: int = 5,
     signal: Optional[str] = None,
     use_ldtk_prior: bool = False,
-    sampler: str = "emcee",
+    sampler: str = "auto",
+    device: str = "auto",
     detrending_method: Optional[str] = None,
     dlogz_tolerance: float = 0.5,
     n_jobs: int = 1,
     progress: bool = False,
     resume: Optional[str] = None,
     checkpoint_interval: int = 250,
+    gpu_num_warmup: int = GPU_NUTS_WARMUP,
+    gpu_num_samples: int = GPU_NUTS_SAMPLES,
+    gpu_target_accept_prob: float = GPU_NUTS_TARGET_ACCEPT_PROB,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> Path:
-    """Run an emcee or dynesty transit fit and write the historical output paths.
+    """Fit candidate photometry with automatic CUDA NUTS or CPU fallback.
+
+    ``sampler='auto'`` and ``device='auto'`` select the JAX/NumPyro GPU path
+    when its 64-bit CUDA stack is available. Missing optional dependencies,
+    absent CUDA hardware, ``--device cpu``, emcee-only checkpoint resume, and
+    multiprocessing requests retain the historical batman/emcee path. The
+    dynesty mode remains an explicitly selected CPU nested sampler.
+    """
+    if sampler not in ("auto", "emcee", "numpyro", "dynesty"):
+        raise ValueError("sampler must be one of: auto, emcee, numpyro, dynesty")
+    if device not in ("auto", "cpu", "gpu"):
+        raise ValueError("device must be one of: auto, cpu, gpu")
+    if not isinstance(n_samples, int) or isinstance(n_samples, bool) or n_samples <= 0:
+        raise ValueError("n_samples must be a positive integer")
+    if (
+        not isinstance(gpu_num_warmup, int)
+        or isinstance(gpu_num_warmup, bool)
+        or gpu_num_warmup <= 0
+        or not isinstance(gpu_num_samples, int)
+        or isinstance(gpu_num_samples, bool)
+        or gpu_num_samples <= 0
+        or not isinstance(gpu_target_accept_prob, (float, int))
+        or not math.isfinite(float(gpu_target_accept_prob))
+        or not 0.0 < float(gpu_target_accept_prob) < 1.0
+    ):
+        raise ValueError("GPU NUTS controls must be positive with target acceptance in (0, 1)")
+
+    signal = validate_signal_suffix(signal)
+    if sampler == "dynesty":
+        return _run_dynesty_transit_fit(
+            workspace,
+            n_samples=n_samples,
+            eccentric=eccentric,
+            seed=seed,
+            signal=signal,
+            use_ldtk_prior=use_ldtk_prior,
+            detrending_method=detrending_method,
+            dlogz_tolerance=dlogz_tolerance,
+        )
+    if sampler == "emcee" or device == "cpu":
+        return _fit_emcee_candidate_transit_fit(
+            workspace,
+            n_samples=n_samples,
+            eccentric=eccentric,
+            n_walkers=n_walkers,
+            burn_in=burn_in,
+            seed=seed,
+            signal=signal,
+            use_ldtk_prior=use_ldtk_prior,
+            detrending_method=detrending_method,
+            n_jobs=n_jobs,
+            progress=progress,
+            resume=resume,
+            checkpoint_interval=checkpoint_interval,
+            progress_callback=progress_callback,
+            backend_fallback_reason=(
+                "CPU requested explicitly" if device == "cpu" else "emcee sampler selected explicitly"
+            ),
+        )
+    if resume is not None or n_jobs > 1:
+        return _fit_emcee_candidate_transit_fit(
+            workspace,
+            n_samples=n_samples,
+            eccentric=eccentric,
+            n_walkers=n_walkers,
+            burn_in=burn_in,
+            seed=seed,
+            signal=signal,
+            use_ldtk_prior=use_ldtk_prior,
+            detrending_method=detrending_method,
+            n_jobs=n_jobs,
+            progress=progress,
+            resume=resume,
+            checkpoint_interval=checkpoint_interval,
+            progress_callback=progress_callback,
+            backend_fallback_reason=(
+                "GPU NUTS does not support emcee checkpoints or multiprocessing worker pools"
+            ),
+        )
+    try:
+        stack = _load_jax_gpu_stack()
+    except _GpuBackendUnavailable as exc:
+        return _fit_emcee_candidate_transit_fit(
+            workspace,
+            n_samples=n_samples,
+            eccentric=eccentric,
+            n_walkers=n_walkers,
+            burn_in=burn_in,
+            seed=seed,
+            signal=signal,
+            use_ldtk_prior=use_ldtk_prior,
+            detrending_method=detrending_method,
+            n_jobs=n_jobs,
+            progress=progress,
+            resume=resume,
+            checkpoint_interval=checkpoint_interval,
+            backend_fallback_reason=str(exc),
+        )
+    return _run_numpyro_candidate_transit_fit(
+        workspace,
+        eccentric=eccentric,
+        seed=seed,
+        signal=signal,
+        use_ldtk_prior=use_ldtk_prior,
+        detrending_method=detrending_method,
+        num_warmup=gpu_num_warmup,
+        num_samples=gpu_num_samples,
+        target_accept_prob=float(gpu_target_accept_prob),
+        progress=progress,
+        stack=stack,
+    )
+
+
+def _fit_emcee_candidate_transit_fit(
+    workspace: CandidateWorkspace,
+    n_samples: int = CPU_EMCEE_PRODUCTION,
+    eccentric: bool = False,
+    n_walkers: Optional[int] = None,
+    burn_in: Optional[int] = None,
+    seed: int = 5,
+    signal: Optional[str] = None,
+    use_ldtk_prior: bool = False,
+    detrending_method: Optional[str] = None,
+    n_jobs: int = 1,
+    progress: bool = False,
+    resume: Optional[str] = None,
+    checkpoint_interval: int = 250,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    backend_fallback_reason: Optional[str] = None,
+) -> Path:
+    """Run the candidate-local batman/emcee transit fit.
 
     This is the top-level entry point for transit fitting.  It loads the
     candidate light curve, stellar parameters, and ephemeris; constructs the
@@ -1992,13 +2917,8 @@ def run_mcmc_transit_fit(
         Signal suffix for multi-signal candidates.
     use_ldtk_prior : bool, optional
         Whether to apply the LDTk limb-darkening prior (default False).
-    sampler : {'emcee', 'dynesty'}, optional
-        Sampler backend (default ``'emcee'``).
     detrending_method : str, optional
         Detrending method for light curve retrieval.
-    dlogz_tolerance : float, optional
-        dynesty initial convergence tolerance in :math:`\\Delta\\ln Z`
-        (default 0.5).
     n_jobs : int, optional
         Number of parallel worker processes for ensemble likelihood evaluation
         (``pool`` via ``multiprocessing``; default 1, i.e. serial).
@@ -2009,6 +2929,8 @@ def run_mcmc_transit_fit(
         (only valid for emcee; default None).
     checkpoint_interval : int, optional
         Number of steps between intermediate chain saves (default 250).
+    backend_fallback_reason : str, optional
+        Reason automatic device selection retained the CPU backend.
 
     Returns
     -------
@@ -2020,24 +2942,9 @@ def run_mcmc_transit_fit(
     RuntimeError
         If the required ``batman-package`` dependency is unavailable, or
         photometry, ephemeris, or stellar parameters are synthetic or missing.
-    ValueError
-        If ``sampler`` is unrecognised.
     """
     signal = validate_signal_suffix(signal)
     suffix = f".{signal.lstrip('.')}" if signal else ""
-    if sampler == "dynesty":
-        return _run_dynesty_transit_fit(
-            workspace,
-            n_samples=n_samples,
-            eccentric=eccentric,
-            seed=seed,
-            signal=signal,
-            use_ldtk_prior=use_ldtk_prior,
-            detrending_method=detrending_method,
-            dlogz_tolerance=dlogz_tolerance,
-        )
-    if sampler != "emcee":
-        raise ValueError("sampler must be one of: emcee, dynesty")
     _require_batman()
     import emcee
 
@@ -2104,16 +3011,11 @@ def run_mcmc_transit_fit(
 
     ndim = int(map_point.size)
     if n_walkers is None:
-        # Cap walkers at 48 regardless of dimensionality (emcee community
-        # standard; prevents sector-baseline parameters from inflating
-        # the ensemble — a 44-sector candidate would otherwise get 104 walkers).
-        n_walkers = min(max(2 * ndim, n_samples // 50), 48)
+        # Keep the requested robust default while respecting emcee's
+        # red-blue move requirement for high-dimensional multi-sector fits.
+        n_walkers = max(CPU_EMCEE_WALKERS, 2 * ndim)
     if burn_in is None:
-        burn_in = max(50, n_samples // 5)
-    # ASTROPHYSICAL_HEURISTIC: burn-in fraction defaults to max(50, n_samples/5)
-    # to discard the initial exploration phase where walkers are migrating
-    # from their MAP-ball initialisation to the typical set.  The floor of
-    # 50 steps guards against very short chains.
+        burn_in = CPU_EMCEE_BURN_IN
     rng = np.random.default_rng(seed=seed)
 
     if resume is None:
@@ -2250,6 +3152,12 @@ def run_mcmc_transit_fit(
         if not _resume_done:
             for _state in sampler.sample(p0, iterations=total_steps, progress=progress):
                 iteration: int = getattr(sampler, "iteration", 0)
+                # Telemetry hook: report (iteration, total) to an external HUD.
+                if progress_callback is not None:
+                    try:
+                        progress_callback(int(iteration), int(total_steps))
+                    except Exception:  # noqa: BLE001
+                        pass
                 # Periodic checkpoint save (best-effort).
                 if checkpoint_interval > 0 and iteration % checkpoint_interval == 0 and iteration > 0:
                     try:
@@ -2320,11 +3228,35 @@ def run_mcmc_transit_fit(
         tau_dict = {"_error": "{0}: {1}".format(type(exc).__name__, exc)}
         convergence = _mcmc_convergence_diagnostics(raw_chain, None, names)
 
+    accelerated_posterior = _candidate_accelerated_posterior_summary(
+        chain,
+        ephemeris,
+        eccentric,
+        n_sectors,
+        phase_days,
+        native_flux,
+        native_error,
+        rho_prior_solar,
+        rho_prior_log10_sigma,
+        backend="emcee-cpu",
+        sampler_metadata={
+            "sampler": "emcee.EnsembleSampler",
+            "walkers": int(n_walkers),
+            "burn_in": int(burn_in),
+            "production": int(n_samples),
+            "flat_samples": int(chain.shape[0]),
+            "random_seed": int(seed),
+            "fallback_reason": backend_fallback_reason,
+        },
+    )
+
     payload = {
         "schema_version": "1.0",
         "work_package": "MCMC_TRANSIT_FIT",
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "source": source,
+        "backend": "emcee-cpu",
+        "sampler": "emcee",
         # SCIENTIFIC_BOUNDARY: the posterior is labeled exploratory because
         # the fit does not include a calibrated correlated-noise model,
         # independent-chain convergence validation, or dilution/contamination
@@ -2360,7 +3292,9 @@ def run_mcmc_transit_fit(
         # a positional convention alone.
         "parameter_names": names,
         "posterior": posteriors,
+        "accelerated_posterior": accelerated_posterior,
         "mcmc": {
+            "backend": "emcee-cpu",
             "walkers": int(n_walkers),
             "burn_in": int(burn_in),
             "production": int(n_samples),
@@ -2374,6 +3308,7 @@ def run_mcmc_transit_fit(
             "acceptance_fraction_mean": float(np.mean(sampler.acceptance_fraction)),
             "autocorrelation_times": tau_dict,
             "convergence": convergence,
+            "fallback_reason": backend_fallback_reason,
         },
         "likelihood": {
             "cadence": "native",
@@ -2396,6 +3331,427 @@ def run_mcmc_transit_fit(
     output_path.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     np.save(str(outputs_dir / f"mcmc_transit_fit_chain{suffix}.npy"), chain)
     return output_path
+
+
+def _candidate_accelerated_posterior_summary(
+    chain: np.ndarray,
+    ephemeris: Dict[str, Any],
+    eccentric: bool,
+    n_sectors: int,
+    phase_days: np.ndarray,
+    native_flux: np.ndarray,
+    native_error: np.ndarray,
+    rho_prior_solar: float,
+    rho_prior_log10_sigma: float,
+    *,
+    backend: str,
+    sampler_metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Expose the common accelerator schema alongside the legacy artifact."""
+    samples = np.asarray(chain, dtype=float)
+    if samples.ndim != 2 or samples.shape[0] == 0:
+        raise RuntimeError("candidate transit sampler returned an empty posterior chain")
+    jitter_index = 3 + n_sectors
+    q1_index = jitter_index + 1
+    q2_index = jitter_index + 2
+    values: Dict[str, np.ndarray] = {
+        "rp_rstar": samples[:, 0],
+        # The legacy chain stores log10 stellar density, while the standalone
+        # schema derives a/Rstar from this explicit cgs density array.
+        "log_rho_star": samples[:, 1],
+        "rho_star_g_cm3": np.power(10.0, samples[:, 1]) * SOLAR_MEAN_DENSITY_G_CM3,
+        "impact_parameter": samples[:, 2],
+        "log_jitter": samples[:, jitter_index],
+        "q1": samples[:, q1_index],
+        "q2": samples[:, q2_index],
+        "period": np.full(samples.shape[0], float(ephemeris["period_days"])),
+        "t0": np.full(samples.shape[0], float(ephemeris["epoch_btjd"])),
+    }
+    if eccentric:
+        values["sqe_cosw"] = samples[:, q2_index + 1]
+        values["sqe_sinw"] = samples[:, q2_index + 2]
+    density_cgs = rho_prior_solar * SOLAR_MEAN_DENSITY_G_CM3
+    density_sigma_cgs = density_cgs * rho_prior_log10_sigma * math.log(10.0)
+    data = _AcceleratedTransitFitData(
+        time_days=np.asarray(phase_days, dtype=float),
+        flux=np.asarray(native_flux, dtype=float),
+        flux_err=np.asarray(native_error, dtype=float),
+        period_days=float(ephemeris["period_days"]),
+        t0_days=float(ephemeris["epoch_btjd"]),
+        rho_star_g_cm3=float(density_cgs),
+        rho_star_sigma_g_cm3=float(density_sigma_cgs),
+        period_sigma_days=None,
+        t0_sigma_days=None,
+        exposure_seconds=EXPTIME_SECONDS,
+        eccentric=eccentric,
+    )
+    return _summarize_accelerated_samples(
+        values,
+        data,
+        backend=backend,
+        sampler_metadata=sampler_metadata,
+    )
+
+
+def _run_numpyro_candidate_transit_fit(
+    workspace: CandidateWorkspace,
+    *,
+    eccentric: bool,
+    seed: int,
+    signal: Optional[str],
+    use_ldtk_prior: bool,
+    detrending_method: Optional[str],
+    num_warmup: int,
+    num_samples: int,
+    target_accept_prob: float,
+    progress: bool,
+    stack: Dict[str, Any],
+) -> Path:
+    """Run the candidate-native multi-sector GPU NUTS implementation."""
+    signal = validate_signal_suffix(signal)
+    suffix = f".{signal.lstrip('.')}" if signal else ""
+    outputs_dir = workspace.path / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    ephemeris = load_transit_ephemeris(workspace, signal=signal)
+    if ephemeris["source"] == "synthetic-demo" or any(
+        value == "synthetic-demo" for value in ephemeris.get("field_sources", {}).values()
+    ):
+        raise RuntimeError("transit fitting requires a complete candidate-derived transit ephemeris")
+    stellar = load_stellar_parameters(workspace)
+    if stellar["source"] != "candidate-data":
+        raise RuntimeError("transit fitting requires complete candidate-derived stellar parameters")
+    density_prior = _stellar_density_prior(stellar)
+    rho_prior_solar = density_prior["rho_solar"]
+    rho_prior_log10_sigma = density_prior["log10_sigma"]
+    ldtk_prior = _load_ldtk_prior(workspace) if use_ldtk_prior else None
+    table = load_light_curve_table(
+        workspace,
+        max_points=None,
+        require_raw_provenance=True,
+        detrending_method=detrending_method,
+    )
+    if table is None:
+        raise RuntimeError("transit fitting requires observed candidate photometry")
+    try:
+        (
+            phase_days,
+            native_flux,
+            native_error,
+            sector_index,
+            sector_labels,
+            exposure_seconds_by_sector,
+        ) = _native_transit_window_data(table, ephemeris)
+    except ValueError as exc:
+        raise RuntimeError("candidate photometry cannot support a transit fit") from exc
+
+    jax = stack["jax"]
+    jnp = stack["jnp"]
+    numpyro = stack["numpyro"]
+    dist = stack["dist"]
+    MCMC = stack["MCMC"]
+    NUTS = stack["NUTS"]
+    TransitOrbit = stack["TransitOrbit"]
+    limb_dark_light_curve = stack["limb_dark_light_curve"]
+    gpu_device = stack["device"]
+    n_sectors = len(sector_labels)
+    phase = jax.device_put(jnp.asarray(phase_days, dtype=jnp.float64), gpu_device)
+    flux = jax.device_put(jnp.asarray(native_flux, dtype=jnp.float64), gpu_device)
+    flux_err = jax.device_put(jnp.asarray(native_error, dtype=jnp.float64), gpu_device)
+    sector_indices = jax.device_put(jnp.asarray(sector_index, dtype=jnp.int32), gpu_device)
+    sector_exposures = jax.device_put(
+        jnp.asarray(exposure_seconds_by_sector, dtype=jnp.float64), gpu_device
+    )
+    cadence_days = sector_exposures[sector_indices] / SECONDS_PER_DAY
+    sub_sample_offsets = (
+        jnp.arange(SUPERSAMPLE_FACTOR, dtype=jnp.float64) - 0.5 * (SUPERSAMPLE_FACTOR - 1)
+    ) * (cadence_days[:, None] / SUPERSAMPLE_FACTOR)
+    period_days = float(ephemeris["period_days"])
+    machine_epsilon = jnp.finfo(jnp.float64).eps
+
+    def transit_model() -> None:
+        """Pure multi-sector potential energy model compiled by NumPyro."""
+        rp_rs = numpyro.sample("rp_rs", dist.Uniform(0.001, 0.3))
+        log_rho_star = numpyro.sample("log_rho_star", dist.Uniform(-2.0, 1.5))
+        impact_parameter = numpyro.sample("impact_parameter", dist.Uniform(0.0, 1.2))
+        baselines = numpyro.sample(
+            "baselines", dist.Uniform(0.99, 1.01).expand([n_sectors]).to_event(1)
+        )
+        log_jitter = numpyro.sample("log_jitter", dist.Uniform(JITTER_LOG_LOWER, JITTER_LOG_UPPER))
+        q1 = numpyro.sample("q1", dist.Uniform(0.01, 0.99))
+        q2 = numpyro.sample("q2", dist.Uniform(0.01, 0.99))
+        if eccentric:
+            sqe_cosw = numpyro.sample("sqe_cosw", dist.Uniform(-1.0, 1.0))
+            sqe_sinw = numpyro.sample("sqe_sinw", dist.Uniform(-1.0, 1.0))
+        else:
+            sqe_cosw = jnp.asarray(0.0, dtype=jnp.float64)
+            sqe_sinw = jnp.asarray(0.0, dtype=jnp.float64)
+
+        eccentricity = jnp.square(sqe_cosw) + jnp.square(sqe_sinw)
+        safe_eccentricity = jnp.minimum(eccentricity, 1.0 - machine_epsilon)
+        sqrt_eccentricity = jnp.sqrt(safe_eccentricity)
+        conjunction_factor = jnp.maximum(1.0 + sqrt_eccentricity * sqe_sinw, machine_epsilon)
+        rho_solar = jnp.power(10.0, log_rho_star)
+        a_rstar = jnp.cbrt(
+            GRAVITATIONAL_CONSTANT_CGS
+            * jnp.square(period_days * SECONDS_PER_DAY)
+            * rho_solar
+            * SOLAR_MEAN_DENSITY_G_CM3
+            / (3.0 * math.pi)
+        )
+        conjunction_distance = a_rstar * (1.0 - safe_eccentricity) / conjunction_factor
+        cosine_inclination = impact_parameter / jnp.maximum(conjunction_distance, machine_epsilon)
+        sine_inclination = jnp.sqrt(jnp.maximum(1.0 - jnp.square(cosine_inclination), machine_epsilon))
+        sky_speed = (
+            2.0
+            * math.pi
+            * a_rstar
+            / period_days
+            * conjunction_factor
+            / jnp.sqrt(jnp.maximum(1.0 - jnp.square(safe_eccentricity), machine_epsilon))
+            * sine_inclination
+        )
+        valid_geometry = (
+            (eccentricity < 1.0)
+            & (impact_parameter < 1.0 + rp_rs)
+            & (cosine_inclination >= 0.0)
+            & (cosine_inclination <= 1.0)
+            & jnp.isfinite(a_rstar)
+            & jnp.isfinite(sky_speed)
+            & (sky_speed > 0.0)
+        )
+        numpyro.factor("physical_geometry", jnp.where(valid_geometry, 0.0, -jnp.inf))
+        numpyro.factor(
+            "stellar_density_prior",
+            -0.5 * jnp.square((log_rho_star - math.log10(rho_prior_solar)) / rho_prior_log10_sigma),
+        )
+        jitter = jnp.exp(log_jitter)
+        half_cauchy_ratio = jitter / JITTER_HALF_CAUCHY_SCALE
+        numpyro.factor(
+            "log_jitter_prior",
+            jnp.log(2.0 / (math.pi * JITTER_HALF_CAUCHY_SCALE))
+            - jnp.log1p(jnp.square(half_cauchy_ratio))
+            + log_jitter,
+        )
+        u1 = 2.0 * jnp.sqrt(q1) * q2
+        u2 = jnp.sqrt(q1) * (1.0 - 2.0 * q2)
+        if ldtk_prior is not None:
+            numpyro.factor(
+                "ldtk_quadratic_prior",
+                -0.5 * jnp.square((u1 - ldtk_prior["u1"]) / ldtk_prior["u1_err"])
+                -0.5 * jnp.square((u2 - ldtk_prior["u2"]) / ldtk_prior["u2_err"]),
+            )
+        orbit = TransitOrbit(
+            period=jnp.asarray(period_days, dtype=jnp.float64),
+            speed=jnp.maximum(sky_speed, machine_epsilon),
+            time_transit=jnp.asarray(0.0, dtype=jnp.float64),
+            impact_param=impact_parameter,
+            radius_ratio=rp_rs,
+        )
+        light_curve = limb_dark_light_curve(orbit, u1, u2)
+        delta_flux = sum(
+            light_curve(phase + sub_sample_offsets[:, index])
+            for index in range(SUPERSAMPLE_FACTOR)
+        ) / SUPERSAMPLE_FACTOR
+        model_flux = baselines[sector_indices] * (1.0 + delta_flux)
+        total_sigma = jnp.sqrt(jnp.square(flux_err) + jnp.square(jitter))
+        numpyro.sample("observed_flux", dist.Normal(model_flux, total_sigma).to_event(1), obs=flux)
+
+    sampler = MCMC(
+        NUTS(transit_model, target_accept_prob=target_accept_prob),
+        num_warmup=num_warmup,
+        num_samples=num_samples,
+        progress_bar=progress,
+        jit_model_args=True,
+    )
+    sampler.run(jax.device_put(jax.random.PRNGKey(seed), gpu_device), extra_fields=("diverging",))
+    raw_samples = sampler.get_samples(group_by_chain=False)
+    samples = {name: np.asarray(value, dtype=float) for name, value in raw_samples.items()}
+    baselines = samples["baselines"]
+    chain_columns = [
+        samples["rp_rs"],
+        samples["log_rho_star"],
+        samples["impact_parameter"],
+    ]
+    chain_columns.extend(baselines[:, index] for index in range(n_sectors))
+    chain_columns.extend([samples["log_jitter"], samples["q1"], samples["q2"]])
+    if eccentric:
+        chain_columns.extend([samples["sqe_cosw"], samples["sqe_sinw"]])
+    chain = np.column_stack(chain_columns)
+    if not np.all(np.isfinite(chain)):
+        raise RuntimeError("NumPyro returned a non-finite candidate transit posterior")
+    _require_batman()
+    names = _parameter_names(eccentric, n_sectors, sector_labels)
+    posteriors = _posterior_summaries(
+        chain, ephemeris, eccentric, n_sectors=n_sectors, sector_labels=sector_labels
+    )
+    extra_fields = sampler.get_extra_fields(group_by_chain=False)
+    divergences = int(np.sum(np.asarray(extra_fields.get("diverging", ()), dtype=bool)))
+    sampler_metadata = {
+        "sampler": "numpyro.NUTS",
+        "num_warmup": int(num_warmup),
+        "num_samples": int(num_samples),
+        "target_accept_prob": float(target_accept_prob),
+        "random_seed": int(seed),
+        "gpu_device": str(gpu_device),
+        "divergences": divergences,
+        "jax_enable_x64": True,
+    }
+    accelerated_posterior = _candidate_accelerated_posterior_summary(
+        chain,
+        ephemeris,
+        eccentric,
+        n_sectors,
+        phase_days,
+        native_flux,
+        native_error,
+        rho_prior_solar,
+        rho_prior_log10_sigma,
+        backend="jax-gpu",
+        sampler_metadata=sampler_metadata,
+    )
+    jitter_prior = _jitter_prior_assumption()
+    payload = {
+        "schema_version": "1.0",
+        "work_package": "MCMC_TRANSIT_FIT",
+        "generated_utc": datetime.now(timezone.utc).isoformat(),
+        "source": "candidate-data",
+        "backend": "jax-gpu",
+        "sampler": "numpyro",
+        "scientific_status": "exploratory-native-cadence-inference",
+        "validation_eligible": False,
+        "validation_reason": (
+            "This likelihood has per-sector flux normalizations but no calibrated correlated-noise "
+            "model or independent-chain analysis."
+        ),
+        "model": (
+            "jaxoplanet TransitOrbit quadratic limb darkening, stellar-density locked, eccentric orbit"
+            if eccentric
+            else "jaxoplanet TransitOrbit quadratic limb darkening, stellar-density locked, circular orbit"
+        ),
+        "ephemeris": {
+            "period_days": ephemeris["period_days"],
+            "epoch_btjd": ephemeris["epoch_btjd"],
+            "source": ephemeris["source"],
+        },
+        "density_prior_solar": float(rho_prior_solar),
+        "density_prior": {
+            **density_prior,
+            "propagation": "first-order independent symmetric mass and radius uncertainties",
+        },
+        "assumptions": {"jitter_prior": jitter_prior},
+        "limb_darkening_prior": (
+            {"source": "ldtk", "path": ldtk_prior["path"]} if ldtk_prior is not None else None
+        ),
+        "parameter_names": names,
+        "posterior": posteriors,
+        "accelerated_posterior": accelerated_posterior,
+        "mcmc": {
+            "backend": "jax-gpu",
+            "chains": 1,
+            "warmup": int(num_warmup),
+            "production": int(num_samples),
+            "actual_production": int(chain.shape[0]),
+            "flat_samples": int(chain.shape[0]),
+            "random_seed": int(seed),
+            "random_generator": "jax.random.PRNGKey",
+            "target_accept_prob": float(target_accept_prob),
+            "divergences": divergences,
+            "convergence": {
+                "status": "not-demonstrated",
+                "scientific_posterior_eligible": False,
+                "reason": "single-chain NUTS diagnostics are not independent-chain validation",
+            },
+        },
+        "likelihood": {
+            "cadence": "native",
+            "n_points": int(phase_days.size),
+            "sector_labels": sector_labels,
+            "exposure_seconds_by_sector": {
+                str(label): float(exposure_seconds_by_sector[index])
+                for index, label in enumerate(sector_labels)
+            },
+            "flux_err_sources": list(table.get("flux_err_sources", [])),
+            "preprocessing": table.get("detrending", {"kind": "pipeline-normalization"}),
+        },
+        "signal": signal,
+        "caveat": (
+            "Exploratory native-cadence GPU fit with independent Gaussian residuals; "
+            "not an adopted posterior or validation claim."
+        ),
+    }
+    output_path = outputs_dir / f"mcmc_transit_fit{suffix}.json"
+    output_path.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    np.save(str(outputs_dir / f"mcmc_transit_fit_chain{suffix}.npy"), chain)
+    return output_path
+
+
+def compute_bayesian_model_comparison(
+    ln_z_circular: float,
+    ln_z_circular_err: float,
+    ln_z_eccentric: float,
+    ln_z_eccentric_err: float,
+) -> Dict[str, Any]:
+    """Compute Bayesian model comparison between eccentric and circular transit fits.
+
+    Evaluates the Bayes Factor B_10 = exp(Delta ln Z) where Delta ln Z = ln Z_eccentric - ln Z_circular,
+    and classifies the evidence on the Kass & Raftery (1995) scale:
+    - |Delta ln Z| < 1.0: inconclusive (barely worth mentioning)
+    - 1.0 <= |Delta ln Z| < 2.5: substantial_evidence (3:1 to 12:1 odds)
+    - 2.5 <= |Delta ln Z| < 5.0: strong_evidence (12:1 to 150:1 odds)
+    - |Delta ln Z| >= 5.0: decisive_evidence (> 150:1 odds)
+    """
+    for val, name in (
+        (ln_z_circular, "ln_z_circular"),
+        (ln_z_circular_err, "ln_z_circular_err"),
+        (ln_z_eccentric, "ln_z_eccentric"),
+        (ln_z_eccentric_err, "ln_z_eccentric_err"),
+    ):
+        if not math.isfinite(float(val)):
+            raise ValueError(f"{name} must be a finite number")
+
+    delta_ln_z = float(ln_z_eccentric - ln_z_circular)
+    delta_ln_z_err = float(math.sqrt(float(ln_z_circular_err) ** 2 + float(ln_z_eccentric_err) ** 2))
+
+    # Guard against overflow when evaluating Bayes factor exp(Delta ln Z)
+    clipped_delta = float(np.clip(delta_ln_z, -700.0, 700.0))
+    bayes_factor = float(math.exp(clipped_delta))
+
+    abs_delta = abs(delta_ln_z)
+    if abs_delta < 1.0:
+        kass_raftery_scale = "inconclusive"
+        evidence_phrase = "inconclusive"
+    elif abs_delta < 2.5:
+        kass_raftery_scale = "substantial_evidence"
+        evidence_phrase = "substantially favored"
+    elif abs_delta < 5.0:
+        kass_raftery_scale = "strong_evidence"
+        evidence_phrase = "strongly favored"
+    else:
+        kass_raftery_scale = "decisive_evidence"
+        evidence_phrase = "decisively favored"
+
+    if delta_ln_z > 0.0:
+        preferred_model = "eccentric"
+        interpretation = f"Eccentric orbital geometry is {evidence_phrase} over the circular model."
+    elif delta_ln_z < 0.0:
+        preferred_model = "circular"
+        interpretation = f"Circular orbital geometry is {evidence_phrase} over the eccentric model."
+    else:
+        preferred_model = "inconclusive"
+        interpretation = "Neither orbital model is favored (Delta ln Z = 0.0)."
+
+    return {
+        "ln_z_circular": float(ln_z_circular),
+        "ln_z_circular_err": float(ln_z_circular_err),
+        "ln_z_eccentric": float(ln_z_eccentric),
+        "ln_z_eccentric_err": float(ln_z_eccentric_err),
+        "delta_ln_z": delta_ln_z,
+        "delta_ln_z_err": delta_ln_z_err,
+        "bayes_factor": bayes_factor,
+        "preferred_model": preferred_model,
+        "kass_raftery_scale": kass_raftery_scale,
+        "interpretation": interpretation,
+    }
 
 
 def _run_dynesty_transit_fit(
@@ -2581,6 +3937,81 @@ def _run_dynesty_transit_fit(
     if not math.isfinite(sampling_efficiency):
         sampling_efficiency = None
 
+    bayesian_model_comparison = None
+    try:
+        if eccentric:
+            log_z_ecc = float(log_evidence[-1])
+            log_z_ecc_err = float(log_evidence_error[-1])
+            prior_transform_circ = _make_dynesty_prior_transform(
+                rho_prior_solar,
+                rho_prior_log10_sigma,
+                False,
+                ldtk_prior,
+                n_sectors=n_sectors,
+            )
+            ndim_circ = _parameter_count(False, n_sectors)
+            live_circ = max(2 * ndim_circ + 1, min(300, max(50, n_samples // 10)))
+            sampler_circ = dynesty.DynamicNestedSampler(
+                lambda theta: _log_likelihood(
+                    theta,
+                    phase_days,
+                    native_flux,
+                    native_error,
+                    ephemeris,
+                    False,
+                    sector_index=sector_index,
+                    exposure_seconds_by_sector=exposure_seconds_by_sector,
+                    n_sectors=n_sectors,
+                ),
+                prior_transform_circ,
+                ndim_circ,
+                rstate=np.random.default_rng(seed + 1),
+            )
+            sampler_circ.run_nested(nlive_init=live_circ, dlogz_init=dlogz_tolerance, print_progress=False)
+            res_circ = sampler_circ.results
+            log_z_circ = float(np.asarray(res_circ.logz, dtype=float)[-1])
+            log_z_circ_err = float(np.asarray(res_circ.logzerr, dtype=float)[-1])
+            bayesian_model_comparison = compute_bayesian_model_comparison(
+                log_z_circ, log_z_circ_err, log_z_ecc, log_z_ecc_err
+            )
+        else:
+            log_z_circ = float(log_evidence[-1])
+            log_z_circ_err = float(log_evidence_error[-1])
+            prior_transform_ecc = _make_dynesty_prior_transform(
+                rho_prior_solar,
+                rho_prior_log10_sigma,
+                True,
+                ldtk_prior,
+                n_sectors=n_sectors,
+            )
+            ndim_ecc = _parameter_count(True, n_sectors)
+            live_ecc = max(2 * ndim_ecc + 1, min(300, max(50, n_samples // 10)))
+            sampler_ecc = dynesty.DynamicNestedSampler(
+                lambda theta: _log_likelihood(
+                    theta,
+                    phase_days,
+                    native_flux,
+                    native_error,
+                    ephemeris,
+                    True,
+                    sector_index=sector_index,
+                    exposure_seconds_by_sector=exposure_seconds_by_sector,
+                    n_sectors=n_sectors,
+                ),
+                prior_transform_ecc,
+                ndim_ecc,
+                rstate=np.random.default_rng(seed + 1),
+            )
+            sampler_ecc.run_nested(nlive_init=live_ecc, dlogz_init=dlogz_tolerance, print_progress=False)
+            res_ecc = sampler_ecc.results
+            log_z_ecc = float(np.asarray(res_ecc.logz, dtype=float)[-1])
+            log_z_ecc_err = float(np.asarray(res_ecc.logzerr, dtype=float)[-1])
+            bayesian_model_comparison = compute_bayesian_model_comparison(
+                log_z_circ, log_z_circ_err, log_z_ecc, log_z_ecc_err
+            )
+    except Exception:
+        pass
+
     payload = {
         "schema_version": "1.0",
         "work_package": "NESTED_TRANSIT_FIT",
@@ -2625,6 +4056,7 @@ def _run_dynesty_transit_fit(
             "log_z_err": float(log_evidence_error[-1]),
             "meaning": "Nested-sampling model evidence; not a validation probability.",
         },
+        "bayesian_model_comparison": bayesian_model_comparison,
         "diagnostics": {
             "initial_live_points": int(initial_live_points),
             "sampler_niter": int(getattr(results, "niter", 0)),

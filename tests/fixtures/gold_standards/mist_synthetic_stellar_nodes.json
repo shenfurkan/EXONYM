@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "fixture_status": "synthetic-sed-contract-regression",
+  "reference": "Synthetic target-neutral stellar-node and Planck SED contract cases",
+  "provenance": {
+    "source_kind": "synthetic SED contract records with analytic Planck references",
+    "independence": "Planck reference magnitudes are independently checked from exact SI constants and fixture-defined passband values.",
+    "limitations": "MIST-named magnitude fields exercise a target-neutral data contract only. They are not verified MIST v1.2 isochrone rows and do not validate production MIST interpolation."
+  },
+  "contextual_references": "MIST v1.2, Dotter 2016, and Choi et al. 2016 motivate the field naming only.",
+  "note": "The synthetic MIST-contract magnitudes are not asserted to equal a Planck blackbody. Planck references apply only to the fallback bands below.",
+  "supported_planck_bands": ["J", "H", "Ks", "W1", "W2", "W3", "W4"],
+  "extinction_ratios": {
+    "J": 0.282,
+    "H": 0.19,
+    "Ks": 0.114,
+    "W1": 0.067,
+    "W2": 0.054,
+    "W3": 0.024,
+    "W4": 0.015
+  },
+  "planck_bandpasses": {
+    "J": {"pivot_wavelength_micron": 1.235, "vega_zero_point_jy": 1594.0},
+    "H": {"pivot_wavelength_micron": 1.662, "vega_zero_point_jy": 1024.0},
+    "Ks": {"pivot_wavelength_micron": 2.159, "vega_zero_point_jy": 666.7},
+    "W1": {"pivot_wavelength_micron": 3.3526, "vega_zero_point_jy": 309.540},
+    "W2": {"pivot_wavelength_micron": 4.6028, "vega_zero_point_jy": 171.787},
+    "W3": {"pivot_wavelength_micron": 11.5608, "vega_zero_point_jy": 31.674},
+    "W4": {"pivot_wavelength_micron": 22.0883, "vega_zero_point_jy": 8.363}
+  },
+  "nodes": [
+    {
+      "node_name": "solar-like-node",
+      "teff_k": 5772.0,
+      "logg_cgs": 4.438,
+      "feh": 0.0,
+      "log_radius_over_distance": -20.0,
+      "av_mag": 0.0,
+      "mist_absolute_magnitudes": {
+        "gaia_g": 4.67,
+        "gaia_bp": 4.94,
+        "gaia_rp": 4.23,
+        "twomass_j": 3.64,
+        "twomass_h": 3.33,
+        "twomass_ks": 3.28,
+        "wise_w1": 3.25,
+        "wise_w2": 3.28
+      },
+      "planck_reference_magnitudes": {
+        "J": 3.9191516690933943,
+        "H": 3.7234979774763897,
+        "Ks": 3.597982128243247,
+        "W1": 3.4626957684649633,
+        "W2": 3.390291014423993,
+        "W3": 3.3663241481676076,
+        "W4": 3.2690304083408854
+      }
+    },
+    {
+      "node_name": "cool-giant-node",
+      "teff_k": 4500.0,
+      "logg_cgs": 2.5,
+      "feh": -0.5,
+      "log_radius_over_distance": -18.5,
+      "av_mag": 0.12,
+      "mist_absolute_magnitudes": {
+        "gaia_g": 1.72,
+        "gaia_bp": 2.63,
+        "gaia_rp": 0.72,
+        "twomass_j": -0.14,
+        "twomass_h": -0.54,
+        "twomass_ks": -0.66,
+        "wise_w1": -0.72,
+        "wise_w2": -0.69
+      },
+      "planck_reference_magnitudes": {
+        "J": 1.3514083194956259,
+        "H": 1.0293435265467195,
+        "Ks": 0.826038560044668,
+        "W1": 0.6058064251240465,
+        "W2": 0.4949754790485267,
+        "W3": 0.4138419911872815,
+        "W4": 0.2997949956940355
+      }
+    }
+  ]
+}

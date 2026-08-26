@@ -2877,6 +2877,7 @@ def test_dilution_reads_validated_archival_neighbors(tmp_path):
     assert rows == [
         {
             "g_mag": 14.0,
+            "bp_rp_color": None,
             "separation_arcsec": 8.0,
             "flux_ratio": None,
             "is_target": False,
@@ -2884,6 +2885,7 @@ def test_dilution_reads_validated_archival_neighbors(tmp_path):
     ]
     assert metadata["availability"] == "available"
     assert metadata["target_selection"] == "reported-target-source-id"
+    assert target_bp_rp_color is None
 
 
 def test_dilution_rejects_unvalidated_archival_neighbors(tmp_path):
@@ -2914,6 +2916,7 @@ def test_dilution_rejects_unvalidated_archival_neighbors(tmp_path):
     assert rows == []
     assert target_g_mag is None
     assert metadata["availability"] == "unavailable"
+    assert target_bp_rp_color is None
 
 
 def test_dilution_aperture_depth_decreases_with_size():

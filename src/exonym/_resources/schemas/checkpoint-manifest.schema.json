@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/checkpoint-manifest-1.0.json",
+  "title": "Candidate Workspace Checkpoint Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_id",
+    "checkpoint_id",
+    "label",
+    "created_utc",
+    "lifecycle_state",
+    "workflow_phase",
+    "archive",
+    "files"
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "checkpoint_id": {"type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z_[a-z0-9][a-z0-9_-]*$"}
+  },
+  "properties": {
+    "schema_version": {"const": 1},
+    "candidate_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+    "checkpoint_id": {"$ref": "#/$defs/checkpoint_id"},
+    "label": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,47}$"},
+    "created_utc": {"type": "string", "format": "date-time"},
+    "lifecycle_state": {
+      "type": "string",
+      "enum": ["active", "paused", "stopped", "published", "archived"]
+    },
+    "workflow_phase": {
+      "type": "string",
+      "enum": [
+        "intake",
+        "feasibility",
+        "acquisition",
+        "vetting",
+        "followup",
+        "analysis",
+        "review"
+      ]
+    },
+    "archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filename", "bytes", "sha256"],
+      "properties": {
+        "filename": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z_[a-z0-9][a-z0-9_-]*\\.tar\\.gz$"
+        },
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256", "bytes"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "sha256": {"$ref": "#/$defs/sha256"},
+          "bytes": {"type": "integer", "minimum": 0}
+        }
+      }
+    }
+  }
+}

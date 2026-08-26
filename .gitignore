@@ -58,7 +58,6 @@ docs/
 !/plan.md
 !/SECURITY.md
 !/CONTRIBUTING.md
-!/paper/paper.md
 !/templates/**/*.md
 !/src/exonym/_resources/templates/**/*.md
 .txt
@@ -70,6 +69,10 @@ methods/
 literature/
 resources/
 .agents/
+textbooks/
+**/textbooks/
+paper/
+
 
 # -----------------------------------------------------------------------------
 # 6. INGESTION STAGING, TEMP & LOG FILES

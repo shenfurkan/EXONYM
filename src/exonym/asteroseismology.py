@@ -137,6 +137,145 @@ def compute_power_spectrum(
     return frequency_uhz, power, whitened, envelope
 
 
+def fit_harvey_granulation_background(
+    frequency_uhz: np.ndarray,
+    power_psd: np.ndarray,
+    numax_guess: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Fit a multi-component Harvey convective background model with Gaussian oscillation envelope.
+
+    Mathematical Formulation:
+        The total stellar power spectrum P(nu) is modeled as:
+            P_model(nu) = P_bg(nu) + P_osc(nu)
+        where the convective granulation background is:
+            P_bg(nu) = W + A_1 / (1 + (2*pi*1e-6 * tau_1 * nu)^2) + A_2 / (1 + (2*pi*1e-6 * tau_2 * nu)^4)
+        with c_1 = 2 (mesogranulation/activity) and c_2 = 4 (granulation), tau in seconds, nu in uHz.
+        The p-mode oscillation envelope is:
+            P_osc(nu) = H_osc * exp( - (nu - nu_max)^2 / (2 * sigma_env^2) )
+
+    Args:
+        frequency_uhz (np.ndarray): Frequency array in microhertz.
+        power_psd (np.ndarray): Power spectral density array.
+        numax_guess (float, optional): Initial guess for nu_max in microhertz.
+
+    Returns:
+        Dict[str, Any]: Fitted model parameters, background PSD, whitened PSD, and fit metrics.
+    """
+    from scipy.optimize import least_squares
+
+    freq = np.asarray(frequency_uhz, dtype=float)
+    power = np.asarray(power_psd, dtype=float)
+    finite = np.isfinite(freq) & np.isfinite(power) & (freq > 0.0) & (power > 0.0)
+    freq = freq[finite]
+    power = power[finite]
+
+    if freq.size < 20:
+        raise ValueError("insufficient finite power spectrum data for background fitting")
+
+    # Initial parameter estimates
+    high_freq_cutoff = float(np.percentile(freq, 85))
+    high_freq_mask = freq >= high_freq_cutoff
+    w_init = float(np.median(power[high_freq_mask])) if np.any(high_freq_mask) else float(np.min(power))
+    w_init = max(1e-12, w_init)
+
+    low_freq_cutoff = min(100.0, float(np.percentile(freq, 20)))
+    low_freq_mask = freq <= low_freq_cutoff
+    a1_init = float(np.max(power[low_freq_mask]) - w_init) if np.any(low_freq_mask) else float(np.max(power))
+    a1_init = max(1e-6, a1_init)
+    tau1_init = 20000.0  # seconds (~5.5 hours)
+
+    mid_freq_cutoff = min(500.0, float(np.percentile(freq, 60)))
+    mid_freq_mask = (freq > 50.0) & (freq <= mid_freq_cutoff)
+    a2_init = float(np.median(power[mid_freq_mask]) - w_init) if np.any(mid_freq_mask) else float(a1_init * 0.1)
+    a2_init = max(1e-6, a2_init)
+    tau2_init = 600.0  # seconds (10 minutes)
+
+    if numax_guess is not None and math.isfinite(float(numax_guess)):
+        numax_init = float(np.clip(numax_guess, float(np.min(freq)), float(np.max(freq))))
+    else:
+        numax_init = float(np.median(freq))
+    h_osc_init = float(np.max(power) * 0.5)
+    sigma_env_init = max(5.0, 0.25 * numax_init)
+
+    # Initial parameter vector: [W, A1, tau1, A2, tau2, H_osc, nu_max, sigma_env]
+    p0 = np.array([w_init, a1_init, tau1_init, a2_init, tau2_init, h_osc_init, numax_init, sigma_env_init], dtype=float)
+    lower_bounds = np.array([0.0, 0.0, 10.0, 0.0, 1.0, 0.0, float(np.min(freq)), 1.0], dtype=float)
+    upper_bounds = np.array([
+        float(np.max(power) * 10.0),
+        float(np.max(power) * 100.0),
+        1e7,
+        float(np.max(power) * 100.0),
+        1e6,
+        float(np.max(power) * 50.0),
+        float(np.max(freq)),
+        float(np.max(freq) - np.min(freq)),
+    ], dtype=float)
+
+    def _model(params, nu):
+        w, a1, t1, a2, t2, h_osc, nu_max, sig_env = params
+        scale1 = 2.0 * math.pi * 1e-6 * t1 * nu
+        scale2 = 2.0 * math.pi * 1e-6 * t2 * nu
+        p_bg = w + a1 / (1.0 + scale1**2) + a2 / (1.0 + scale2**4)
+        p_osc = h_osc * np.exp(-0.5 * ((nu - nu_max) / max(sig_env, 1e-6))**2)
+        return p_bg, p_osc
+
+    log_power = np.log(power)
+
+    def _residuals(params):
+        p_bg, p_osc = _model(params, freq)
+        p_total = np.maximum(p_bg + p_osc, 1e-30)
+        return np.log(p_total) - log_power
+
+    try:
+        opt = least_squares(
+            _residuals,
+            p0,
+            bounds=(lower_bounds, upper_bounds),
+            loss="soft_l1",
+            f_scale=0.5,
+            max_nfev=2000,
+        )
+        p_opt = opt.x
+        status = "converged" if opt.success else "optimization_suboptimal"
+    except Exception:
+        p_opt = p0
+        status = "optimization_fallback"
+
+    w_fit, a1_fit, t1_fit, a2_fit, t2_fit, h_osc_fit, numax_fit, sig_env_fit = p_opt
+    bg_power, osc_power = _model(p_opt, freq)
+    total_power = bg_power + osc_power
+    whitened = power / np.maximum(bg_power, 1e-30)
+
+    # Statistical goodness-of-fit
+    residuals = power - total_power
+    chi2 = float(np.sum((residuals / np.maximum(total_power, 1e-30))**2))
+    k = 8
+    n = int(freq.size)
+    dof = max(1, n - k)
+    chi2_red = float(chi2 / dof)
+    aic = float(2.0 * k + n * math.log(max(1e-12, float(np.sum(residuals**2) / n))))
+    bic = float(k * math.log(n) + n * math.log(max(1e-12, float(np.sum(residuals**2) / n))))
+
+    return {
+        "status": status,
+        "white_noise_floor_w": float(w_fit),
+        "amplitude_a1": float(a1_fit),
+        "timescale_tau1_seconds": float(t1_fit),
+        "amplitude_a2": float(a2_fit),
+        "timescale_tau2_seconds": float(t2_fit),
+        "envelope_amplitude_h_osc": float(h_osc_fit),
+        "numax_uhz": float(numax_fit),
+        "envelope_sigma_uhz": float(sig_env_fit),
+        "chi2": chi2,
+        "reduced_chi2": chi2_red,
+        "aic": aic,
+        "bic": bic,
+        "frequency_uhz": [float(f) for f in freq],
+        "background_power": [float(b) for b in bg_power],
+        "whitened_power": [float(w) for w in whitened],
+    }
+
+
 def spacing_correlation(
     frequency_uhz: np.ndarray,
     whitened: np.ndarray,
@@ -262,6 +401,12 @@ def estimate_oscillation_envelope(
     dnu_candidate, dnu_correlation, _ = spacing_correlation(
         frequency, whitened, numax_candidate
     )
+    try:
+        granulation_background = fit_harvey_granulation_background(
+            frequency, power, numax_guess=numax_candidate
+        )
+    except Exception:
+        granulation_background = None
     return {
         "n_points": int(len(time)),
         "baseline_days": float(np.max(time) - np.min(time)),
@@ -278,6 +423,7 @@ def estimate_oscillation_envelope(
         "envelope_peak_ratio": float(envelope[peak_index]),
         "dnu_candidate_uhz": dnu_candidate,
         "dnu_correlation": dnu_correlation,
+        "granulation_background_model": granulation_background,
     }
 
 
@@ -332,8 +478,48 @@ def seismic_mass_radius(
         own candidate-owned calibration evidence. This helper does not select
         a correction grid or infer a factor from stellar parameters.
         ``dnu_correction_factor`` multiplies the raw Lomb-Scargle Delta-nu
-        estimate before the ratio is computed (default 1.0 = no correction).
+         estimate before the ratio is computed (default 1.0 = no correction).
     """
+    try:
+        numax_value = float(numax_uhz)
+        teff_value = float(teff_k)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("numax_uhz and teff_k must be finite physical values") from exc
+    if (
+        not math.isfinite(numax_value)
+        or numax_value < 0.0
+        or not math.isfinite(teff_value)
+        or teff_value <= 0.0
+    ):
+        raise ValueError("numax_uhz must be finite and non-negative; teff_k must be finite and positive")
+
+    dnu_value: Optional[float] = None
+    if dnu_uhz is not None:
+        try:
+            dnu_value = float(dnu_uhz)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("dnu_uhz must be a finite positive number or None") from exc
+        if not math.isfinite(dnu_value) or dnu_value <= 0.0:
+            raise ValueError("dnu_uhz must be a finite positive number or None")
+
+    mass_prior = 1.0
+    if mass_prior_solar is not None:
+        try:
+            mass_prior = float(mass_prior_solar)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("mass_prior_solar must be finite and positive when supplied") from exc
+        if not math.isfinite(mass_prior) or mass_prior <= 0.0:
+            raise ValueError("mass_prior_solar must be finite and positive when supplied")
+
+    radius_prior = 1.0
+    if radius_prior_solar is not None:
+        try:
+            radius_prior = float(radius_prior_solar)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("radius_prior_solar must be finite and positive when supplied") from exc
+        if not math.isfinite(radius_prior) or radius_prior <= 0.0:
+            raise ValueError("radius_prior_solar must be finite and positive when supplied")
+
     if isinstance(dnu_correction_factor, bool):
         raise ValueError("dnu_correction_factor must be a positive finite number")
     try:
@@ -343,31 +529,33 @@ def seismic_mass_radius(
     if not math.isfinite(correction_factor) or correction_factor <= 0.0:
         raise ValueError("dnu_correction_factor must be a positive finite number")
 
-    numax_ratio = float(numax_uhz) / NUMAX_SUN_UHZ
-    teff_ratio = float(teff_k) / TEFF_SUN_K
+    numax_ratio = numax_value / NUMAX_SUN_UHZ
+    teff_ratio = teff_value / TEFF_SUN_K
     method = "scaling-relations"
     dnu_corrected: Optional[float] = None
-    if dnu_uhz is not None and dnu_uhz > 0:
-        dnu_corrected = float(dnu_uhz) * correction_factor
+    if dnu_value is not None:
+        dnu_corrected = dnu_value * correction_factor
         if not math.isfinite(dnu_corrected) or dnu_corrected <= 0.0:
             raise ValueError("dnu_correction_factor produces an invalid corrected Delta-nu")
         dnu_ratio = dnu_corrected / DNU_SUN_UHZ
-        if numax_uhz > 0:
+        if numax_value > 0.0:
             radius = numax_ratio * math.sqrt(teff_ratio) / (dnu_ratio**2)
             mass = (radius**3) * (dnu_ratio**2)
             method = "full-numax-dnu-scaling"
         else:
-            radius = float(radius_prior_solar) if radius_prior_solar else 1.0
+            radius = radius_prior
             mass = (radius**3) * (dnu_ratio**2)
             method = "dnu-density-scaling-with-radius-prior"
-    elif numax_uhz > 0:
-        mass = float(mass_prior_solar) if mass_prior_solar else 1.0
+    elif numax_value > 0.0:
+        mass = mass_prior
         radius = math.sqrt(mass / (numax_ratio * math.sqrt(teff_ratio)))
         method = "numax-scaling-with-mass-prior"
     else:
-        mass = float(mass_prior_solar) if mass_prior_solar else 1.0
-        radius = float(radius_prior_solar) if radius_prior_solar else 1.0
+        mass = mass_prior
+        radius = radius_prior
         method = "stellar-priors-only"
+    if not math.isfinite(mass) or mass <= 0.0 or not math.isfinite(radius) or radius <= 0.0:
+        raise ValueError("asteroseismic scaling inputs produce non-finite stellar parameters")
     return {
         "mass_solar": round(float(mass), 4),
         "radius_solar": round(float(radius), 4),

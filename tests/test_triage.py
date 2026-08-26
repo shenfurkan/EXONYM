@@ -310,8 +310,11 @@ def _write_remaining_real_data_prerequisites(
             "ttv_analysis_results.json",
             "phase_curve_results.json",
         ):
+            payload = {"source": "candidate-data"}
+            if filename == "ttv_analysis_results.json":
+                payload["candidate_id"] = candidate_path.name
             (outputs / filename).write_text(
-                json.dumps({"source": "candidate-data"}), encoding="utf-8"
+                json.dumps(payload), encoding="utf-8"
             )
 
 

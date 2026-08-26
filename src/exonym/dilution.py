@@ -216,14 +216,14 @@ def _finite_float(value: Any) -> Optional[float]:
 
 def _load_archival_gaia_neighbor_rows(
     workspace: CandidateWorkspace,
-) -> Tuple[List[Dict[str, Any]], Optional[float], Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], Optional[float], Dict[str, Any], Optional[float]]:
     """Map validated archival Gaia photometry into dilution input rows."""
     target, sources, metadata = load_validated_archival_gaia_sources(workspace)
     if target is None:
-        return [], None, metadata
+        return [], None, metadata, None
     target_g_mag = _finite_float(target.get("phot_g_mean_mag"))
     if target_g_mag is None:
-        return [], None, metadata
+        return [], None, metadata, None
     # Optional BP-RP color enables the Stassun et al. (2019) Gaia G -> TESS T
     # transformation; absent colors retain the conservative G-band ratios.
     target_bp = _finite_float(target.get("phot_bp_mean_mag"))

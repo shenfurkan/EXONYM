@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "fixture_status": "independent-numerical-regression",
+  "reference": "Mandel and Agol 2002; Kreidberg 2015 BATMAN",
+  "provenance": {
+    "source_kind": "test-side polar disk integration",
+    "independence": "Expected fluxes are checked with an independent radial-angular quadrature implementation rather than EXONYM's BATMAN wrapper.",
+    "limitations": "The values are deterministic numerical regression references, not a copied published occultation table."
+  },
+  "model": "quadratic-limb-darkened-circular-transit",
+  "units": {
+    "period": "days",
+    "phase": "days",
+    "exposure": "seconds",
+    "radius_ratio": "dimensionless",
+    "flux": "relative_flux"
+  },
+  "quadrature": {
+    "method": "radial-angular Gauss-Legendre integration with exact circle-intersection angular limits",
+    "radial_nodes": 192,
+    "angular_nodes": 32,
+    "reference_exposure_subsamples": 257,
+    "relative_tolerance": 1e-6
+  },
+  "cases": [
+    {
+      "name": "central-transit",
+      "period_days": 3.0,
+      "rp_rs": 0.1,
+      "a_rs": 8.0,
+      "impact_parameter": 0.0,
+      "q1": 0.42,
+      "q2": 0.31,
+      "baseline": 1.0,
+      "exposure_seconds": 1.0,
+      "phase_days": [-0.15, -0.03, 0.0, 0.03, 0.15],
+      "expected_flux": [1.0, 0.9886146502915814, 0.9878913027234032, 0.9886146502915814, 1.0]
+    },
+    {
+      "name": "off-axis-transit",
+      "period_days": 4.0,
+      "rp_rs": 0.08,
+      "a_rs": 10.0,
+      "impact_parameter": 0.55,
+      "q1": 0.36,
+      "q2": 0.5,
+      "baseline": 0.997,
+      "exposure_seconds": 1.0,
+      "phase_days": [-0.12, -0.02, 0.0, 0.02, 0.12],
+      "expected_flux": [0.997, 0.9901186333724507, 0.9898240293674416, 0.9901186333724505, 0.997]
+    }
+  ]
+}

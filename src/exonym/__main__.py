@@ -327,6 +327,43 @@ def _build_parser() -> argparse.ArgumentParser:
     track_parser = commands.add_parser("track", help="Render the telemetry dashboard.")
     track_parser.add_argument("candidate_id")
 
+    checkpoint_parser = commands.add_parser(
+        "checkpoint",
+        help="Snapshot, inspect, or restore candidate analysis state.",
+    )
+    checkpoint_commands = checkpoint_parser.add_subparsers(dest="checkpoint_action", required=True)
+    checkpoint_save_parser = checkpoint_commands.add_parser(
+        "save", help="Create a hash-bound snapshot of config/decisions/outputs state."
+    )
+    checkpoint_save_parser.add_argument("candidate_id")
+    checkpoint_save_parser.add_argument(
+        "--name", required=True, help="Short lowercase label for the restore point."
+    )
+    checkpoint_list_parser = checkpoint_commands.add_parser(
+        "list", help="List available restore points with digests."
+    )
+    checkpoint_list_parser.add_argument("candidate_id")
+    checkpoint_restore_parser = checkpoint_commands.add_parser(
+        "restore", help="Atomically roll mutable workspace state back to a snapshot."
+    )
+    checkpoint_restore_parser.add_argument("candidate_id")
+    checkpoint_restore_parser.add_argument("--id", required=True, help="Checkpoint id from 'checkpoint list'.")
+    checkpoint_restore_parser.add_argument(
+        "--yes", action="store_true", help="Assume yes; required when stdin is not interactive."
+    )
+    checkpoint_delete_parser = checkpoint_commands.add_parser(
+        "delete", help="Remove one snapshot archive and its manifest."
+    )
+    checkpoint_delete_parser.add_argument("candidate_id")
+    checkpoint_delete_parser.add_argument("--id", required=True, help="Checkpoint id from 'checkpoint list'.")
+
+    wizard_parser = commands.add_parser(
+        "wizard", help="Interactive guided setup across the pipeline stages."
+    )
+    wizard_parser.add_argument(
+        "candidate_id", nargs="?", default=None, help="Existing candidate; omit to provision first."
+    )
+
     advance_parser = commands.add_parser("advance", help="Promote the workflow phase.")
     advance_parser.add_argument("candidate_id")
 
@@ -522,7 +559,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--n-samples",
         type=int,
         default=2500,
-        help="Emcee production steps per walker; dynesty uses this to scale initial live points. Convergence diagnostics govern adequacy.",
+        help="Emcee production steps per walker; dynesty uses this to scale initial live points. GPU NUTS uses its own robust default. Convergence diagnostics govern adequacy.",
     )
     fit_parser.add_argument(
         "--detrending-method",
@@ -532,9 +569,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     fit_parser.add_argument(
         "--sampler",
-        choices=("emcee", "dynesty"),
-        default="emcee",
-        help="Posterior sampler; dynesty uses its optional inference dependency.",
+        choices=("auto", "emcee", "numpyro", "dynesty"),
+        default="auto",
+        help="Posterior sampler; auto selects CUDA NumPyro when available, otherwise emcee.",
+    )
+    fit_parser.add_argument(
+        "--device",
+        choices=("auto", "cpu", "gpu"),
+        default="auto",
+        help="Compute device for auto/NumPyro fitting; unavailable GPUs fall back to CPU emcee.",
     )
     fit_parser.add_argument(
         "--eccentric", action="store_true", help="Sample eccentric orbit parameters."
@@ -706,6 +749,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         scientific claim.
     """
     import sys as _sys
+
+    if hasattr(_sys.stdout, "reconfigure"):
+        try:
+            _sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            _sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -1216,20 +1266,40 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 0
 
         if args.command == "fit":
+            import sys as _fit_sys
+
             from .transit_fit import run_mcmc_transit_fit
 
-            output = run_mcmc_transit_fit(
-                candidate,
+            fit_kwargs = dict(
                 n_samples=args.n_samples,
                 eccentric=args.eccentric,
                 signal=args.signal,
                 use_ldtk_prior=args.ldtk_prior,
                 sampler=args.sampler,
+                device=args.device,
                 detrending_method=args.detrending_method,
                 n_jobs=args.n_jobs,
-                progress=args.progress,
                 resume=args.resume,
             )
+            if args.progress and _fit_sys.stdout.isatty():
+                # Sticky HUD replaces emcee's scrolling per-step progress on
+                # interactive terminals; sampler iterations drive the bar via
+                # the callback hook. Non-TTY runs keep the plain flag.
+                from .telemetry import LiveTelemetry
+
+                with LiveTelemetry(
+                    candidate.candidate_id,
+                    repository_root=repository_root,
+                    step_name="MCMC transit fit",
+                ) as hud:
+                    output = run_mcmc_transit_fit(
+                        candidate,
+                        progress=False,
+                        progress_callback=hud.report_progress,
+                        **fit_kwargs,
+                    )
+            else:
+                output = run_mcmc_transit_fit(candidate, progress=args.progress, **fit_kwargs)
             print(output.relative_to(repository_root).as_posix())
             return 0
 
@@ -1271,6 +1341,75 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             output = run_archival_vetting(candidate, radius_arcsec=args.radius_arcsec)
             print(output.relative_to(repository_root).as_posix())
             return 0
+
+        if args.command == "checkpoint":
+            from . import checkpoints
+
+            candidate_ws = load_candidate(repository_root, args.candidate_id)
+            action = args.checkpoint_action
+            if action == "save":
+                manifest_path = checkpoints.save_checkpoint(candidate_ws, args.name)
+                print(manifest_path.relative_to(repository_root).as_posix())
+                return 0
+            if action == "list":
+                records = checkpoints.list_checkpoints(candidate_ws)
+                if not records:
+                    print("no checkpoints recorded for {0}".format(args.candidate_id))
+                    return 0
+                try:
+                    from rich.table import Table
+
+                    table = Table(title="Candidate checkpoints")
+                    for column in (
+                        "Checkpoint ID",
+                        "Label",
+                        "Lifecycle",
+                        "Created (UTC)",
+                        "Archive Size",
+                        "SHA-256",
+                    ):
+                        table.add_column(column)
+                    for record in records:
+                        digest = record["archive"]["sha256"]
+                        table.add_row(
+                            record["checkpoint_id"],
+                            record["label"],
+                            record["lifecycle_state"],
+                            record["created_utc"],
+                            checkpoints.format_archive_size(record["archive"]["bytes"]),
+                            digest[:12] + "...",
+                        )
+                    from rich.console import Console
+
+                    Console().print(table)
+                except ImportError:
+                    for record in records:
+                        print(
+                            "{0}  {1}  {2}  {3}  {4}  {5}".format(
+                                record["checkpoint_id"],
+                                record["label"],
+                                record["lifecycle_state"],
+                                record["created_utc"],
+                                record["archive"]["bytes"],
+                                record["archive"]["sha256"],
+                            )
+                        )
+                return 0
+            if action == "restore":
+                summary = checkpoints.restore_checkpoint(
+                    candidate_ws, args.id, assume_yes=args.yes
+                )
+                _print_json(summary)
+                return 0
+            if action == "delete":
+                checkpoints.delete_checkpoint(candidate_ws, args.id)
+                print("deleted checkpoint {0}".format(args.id))
+                return 0
+
+        if args.command == "wizard":
+            from .wizard import run_wizard
+
+            return run_wizard(repository_root, args.candidate_id)
     except (FileExistsError, FileNotFoundError, ValueError, GateError, RuntimeError) as exc:
         parser.exit(2, "error: {0}\n".format(exc))
 

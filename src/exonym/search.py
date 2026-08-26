@@ -97,6 +97,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import hashlib
 import importlib.metadata
@@ -1414,15 +1415,36 @@ def calculate_ttv_super_period(
     -------
     float
         TTV super-period in days, or ``float('inf')`` for exact resonance.
+
+    Raises
+    ------
+    ValueError
+        If either period is non-finite or invalid, or ``j_resonance`` is not
+        an integer greater than one.
     """
-    if period_inner_days <= 0 or period_outer_days <= period_inner_days:
+    try:
+        inner_period = float(period_inner_days)
+        outer_period = float(period_outer_days)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("periods must satisfy 0 < P_inner < P_outer") from exc
+    if (
+        not math.isfinite(inner_period)
+        or not math.isfinite(outer_period)
+        or inner_period <= 0.0
+        or outer_period <= inner_period
+    ):
         raise ValueError("periods must satisfy 0 < P_inner < P_outer")
-    if j_resonance <= 1:
+    if isinstance(j_resonance, bool) or not isinstance(j_resonance, (int, np.integer)):
+        raise ValueError("j_resonance must be an integer >= 2")
+    resonance = int(j_resonance)
+    if resonance <= 1:
         raise ValueError("j_resonance must be an integer >= 2")
     # Beat frequency: |j/P_outer − (j−1)/P_inner|.
-    freq_inner = j_resonance / period_outer_days
-    freq_outer = (j_resonance - 1) / period_inner_days
+    freq_inner = resonance / outer_period
+    freq_outer = (resonance - 1) / inner_period
     delta_freq = abs(freq_inner - freq_outer)
+    if not math.isfinite(delta_freq):
+        raise ValueError("periods produce a non-finite resonant beat frequency")
     # NUMERICAL_GUARD: exact resonance yields Δf = 0 → infinite super-period.
     if delta_freq == 0:
         return float("inf")

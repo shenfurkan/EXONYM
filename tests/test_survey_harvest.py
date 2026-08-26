@@ -392,7 +392,7 @@ def test_auto_vet_records_blocked_steps_without_state_or_claim_changes(tmp_path,
     assert next(step for step in manifest["automation"]["steps"] if step["name"] == "search")["status"] == "blocked"
     assert candidate.metadata["workflow"]["phase"] == "intake"
     assert candidate.metadata["scientific_disposition"] == "unknown"
-    assert fit_samples == [3000]
+    assert fit_samples == [2500]
     assert manifest["runtime"] == {
         "kind": "direct",
         "version": __version__,

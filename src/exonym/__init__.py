@@ -16,7 +16,7 @@ It does not import optional scientific engines, so inspecting the package
 version or workspace helpers remains possible in a minimal installation.
 """
 
-__version__ = "1.4.1"
+__version__ = "1.5.0"
 
 from .workspace import (
     CandidateWorkspace,

@@ -39,6 +39,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
+from scipy.optimize import least_squares
+
 from .constants import JULIAN_YEAR_DAYS, SECONDS_PER_DAY
 from .inputs import load_light_curve_table, load_stellar_parameters, load_transit_ephemeris
 from .lightcurve import kipping_to_quadratic_limb_darkening
@@ -914,6 +916,281 @@ def compare_ephemeris_models(
     }
 
 
+def _solve_kepler_ltt(mean_anom: np.ndarray, ecc: float) -> np.ndarray:
+    """Solve Kepler's equation E - e*sin(E) = M for Rømer LTT calculation."""
+    ecc = float(np.clip(ecc, 0.0, 0.95))
+    m = np.mod(mean_anom, 2.0 * np.pi)
+    e_anom = m.copy()
+    for _ in range(8):
+        f = e_anom - ecc * np.sin(e_anom) - m
+        f_prime = 1.0 - ecc * np.cos(e_anom)
+        e_anom -= f / np.maximum(f_prime, 1e-12)
+    return e_anom
+
+
+def fit_secular_timing_models(
+    epochs: np.ndarray,
+    transit_times: np.ndarray,
+    transit_errors: np.ndarray,
+) -> Dict[str, Any]:
+    """Fit and compare four competing secular orbital timing ephemeris models.
+
+    Models:
+    1. Linear Ephemeris (k=2):
+       T_lin(N) = T0 + P0 * N
+    2. Tidal Orbital Decay / Quadratic Ephemeris (k=3):
+       T_decay(N) = T0 + P0 * N + 0.5 * P0 * P_dot * N^2 = T0 + P0 * N + q * N^2
+       where characteristic decay timescale tau_decay = P0 / |P_dot| = P0^2 / (2 * |q|).
+    3. Analytical Apsidal Precession (k=5):
+       T_tra(N) = T0 + P_s * N - (e * P_a / pi) * cos(omega_0 + omega_dot * N)
+       where P_a = P_s / (1 - omega_dot / (2 * pi)).
+    4. Rømer Light-Travel Time (LTT) Delay (k=6):
+       T_LTT(N) = T0 + P0 * N + A_LTT * [(1 - e_b^2)/(1 + e_b * cos(nu_b(N))) * sin(nu_b(N) + omega_b)]
+       where nu_b(N) is the companion true anomaly.
+
+    Evaluates chi2, reduced chi2, AIC, BIC, Delta_AIC, Delta_BIC, and flags
+    observational baseline degeneracy between P_dot and omega_dot.
+    """
+    valid = (
+        np.isfinite(epochs)
+        & np.isfinite(transit_times)
+        & np.isfinite(transit_errors)
+        & (transit_errors > 0)
+    )
+    epochs_clean = np.asarray(epochs[valid], dtype=float)
+    times_clean = np.asarray(transit_times[valid], dtype=float)
+    errors_clean = np.asarray(transit_errors[valid], dtype=float)
+    n_transits = int(epochs_clean.size)
+
+    base_result: Dict[str, Any] = {
+        "status": "not-fit-insufficient-transits",
+        "n_transits": n_transits,
+        "models": {},
+        "preferred_model_bic": None,
+        "preferred_model_aic": None,
+        "interpretation": "At least 2 valid transit timings are required for secular timing model comparison.",
+    }
+
+    if n_transits < 2:
+        return base_result
+
+    # 1. Model 0: Linear Ephemeris (k=2)
+    weights = 1.0 / errors_clean**2
+    design_lin = np.column_stack((np.ones(n_transits), epochs_clean))
+    normal_lin = design_lin.T @ (weights[:, None] * design_lin)
+    try:
+        cov_lin = np.linalg.inv(normal_lin)
+        coeff_lin = cov_lin @ (design_lin.T @ (weights * times_clean))
+        t0_lin = float(coeff_lin[0])
+        p0_lin = float(coeff_lin[1])
+        model_lin = design_lin @ coeff_lin
+        chi2_lin = float(np.sum(((times_clean - model_lin) / errors_clean) ** 2))
+        dof_lin = max(1, n_transits - 2)
+        red_chi2_lin = float(chi2_lin / dof_lin)
+        aic_lin = float(chi2_lin + 2.0 * 2)
+        bic_lin = float(chi2_lin + 2.0 * math.log(n_transits))
+        models_dict: Dict[str, Any] = {
+            "linear": {
+                "name": "constant_linear_ephemeris",
+                "k_parameters": 2,
+                "status": "fit",
+                "parameters": {
+                    "t0_btjd": t0_lin,
+                    "t0_uncertainty_days": float(math.sqrt(cov_lin[0, 0])),
+                    "period_days": p0_lin,
+                    "period_uncertainty_days": float(math.sqrt(cov_lin[1, 1])),
+                },
+                "chi_square": chi2_lin,
+                "reduced_chi_square": red_chi2_lin,
+                "aic": aic_lin,
+                "bic": bic_lin,
+                "delta_aic": 0.0,
+                "delta_bic": 0.0,
+            }
+        }
+    except (np.linalg.LinAlgError, ValueError):
+        return base_result
+
+    # 2. Model 1: Quadratic / Tidal Orbital Decay (k=3)
+    if n_transits >= 3:
+        design_quad = np.column_stack((np.ones(n_transits), epochs_clean, epochs_clean**2))
+        normal_quad = design_quad.T @ (weights[:, None] * design_quad)
+        try:
+            cov_quad = np.linalg.inv(normal_quad)
+            coeff_quad = cov_quad @ (design_quad.T @ (weights * times_clean))
+            t0_quad = float(coeff_quad[0])
+            p0_quad = float(coeff_quad[1])
+            q_quad = float(coeff_quad[2])
+            model_quad = design_quad @ coeff_quad
+            chi2_quad = float(np.sum(((times_clean - model_quad) / errors_clean) ** 2))
+            dof_quad = max(1, n_transits - 3)
+            red_chi2_quad = float(chi2_quad / dof_quad)
+            aic_quad = float(chi2_quad + 2.0 * 3)
+            bic_quad = float(chi2_quad + 3.0 * math.log(n_transits))
+            p_dot = 2.0 * q_quad / p0_quad if p0_quad > 0 else 0.0
+            tau_decay_days = (p0_quad**2 / (2.0 * abs(q_quad))) if abs(q_quad) > 1e-15 else None
+            tau_decay_years = (tau_decay_days / JULIAN_YEAR_DAYS) if tau_decay_days is not None else None
+            models_dict["quadratic_decay"] = {
+                "name": "tidal_orbital_decay",
+                "k_parameters": 3,
+                "status": "fit",
+                "parameters": {
+                    "t0_btjd": t0_quad,
+                    "period_days": p0_quad,
+                    "quadratic_coefficient_q": q_quad,
+                    "period_derivative_p_dot": p_dot,
+                    "decay_timescale_days": tau_decay_days,
+                    "decay_timescale_years": tau_decay_years,
+                },
+                "chi_square": chi2_quad,
+                "reduced_chi_square": red_chi2_quad,
+                "aic": aic_quad,
+                "bic": bic_quad,
+                "delta_aic": float(aic_quad - aic_lin),
+                "delta_bic": float(bic_quad - bic_lin),
+            }
+        except (np.linalg.LinAlgError, ValueError):
+            pass
+
+    # 3. Model 2: Analytical Apsidal Precession (k=5)
+    n_span = float(np.max(epochs_clean) - np.min(epochs_clean))
+    if n_transits >= 5:
+        def _res_apsidal(p: np.ndarray) -> np.ndarray:
+            t0_v, ps_v, e_v, w0_v, wdot_v = p
+            pa_denom = 1.0 - wdot_v / (2.0 * math.pi)
+            if pa_denom <= 1e-5:
+                return np.full_like(times_clean, 1e6)
+            pa_v = ps_v / pa_denom
+            m_v = t0_v + ps_v * epochs_clean - (e_v * pa_v / math.pi) * np.cos(w0_v + wdot_v * epochs_clean)
+            return (times_clean - m_v) / errors_clean
+
+        x0_aps = [t0_lin, p0_lin, 0.01, 0.0, 0.0]
+        bounds_aps = (
+            [t0_lin - 10.0 * p0_lin, 0.1 * p0_lin, 0.0, -math.pi, -0.5],
+            [t0_lin + 10.0 * p0_lin, 10.0 * p0_lin, 0.95, math.pi, 0.5],
+        )
+        try:
+            opt_aps = least_squares(_res_apsidal, x0_aps, bounds=bounds_aps, max_nfev=2000)
+            if opt_aps.success:
+                t0_aps, ps_aps, e_aps, w0_aps, wdot_aps = [float(v) for v in opt_aps.x]
+                pa_denom = 1.0 - wdot_aps / (2.0 * math.pi)
+                pa_aps = ps_aps / max(pa_denom, 1e-5)
+                chi2_aps = float(np.sum(opt_aps.fun**2))
+                dof_aps = max(1, n_transits - 5)
+                red_chi2_aps = float(chi2_aps / dof_aps)
+                aic_aps = float(chi2_aps + 2.0 * 5)
+                bic_aps = float(chi2_aps + 5.0 * math.log(n_transits))
+                delta_phi = float(n_span * abs(wdot_aps))
+                degenerate = bool(delta_phi < math.pi / 2.0)
+                warning = (
+                    "Observational baseline span (N_span={0:.0f}) covers only {1:.3f} rad ({2:.2f} cycles) of apsidal precession; insufficient to break mathematical degeneracy with quadratic orbital decay (P_dot).".format(
+                        n_span, delta_phi, delta_phi / (2.0 * math.pi)
+                    )
+                    if degenerate
+                    else None
+                )
+                precession_period_epochs = (2.0 * math.pi / abs(wdot_aps)) if abs(wdot_aps) > 1e-9 else None
+                models_dict["apsidal_precession"] = {
+                    "name": "apsidal_precession",
+                    "k_parameters": 5,
+                    "status": "fit",
+                    "parameters": {
+                        "t0_btjd": t0_aps,
+                        "sidereal_period_days": ps_aps,
+                        "anomalistic_period_days": pa_aps,
+                        "eccentricity": e_aps,
+                        "omega_0_rad": w0_aps,
+                        "omega_dot_rad_per_epoch": wdot_aps,
+                        "precession_period_epochs": precession_period_epochs,
+                    },
+                    "chi_square": chi2_aps,
+                    "reduced_chi_square": red_chi2_aps,
+                    "aic": aic_aps,
+                    "bic": bic_aps,
+                    "delta_aic": float(aic_aps - aic_lin),
+                    "delta_bic": float(bic_aps - bic_lin),
+                    "degenerate_with_orbital_decay": degenerate,
+                    "baseline_coverage_warning": warning,
+                }
+        except Exception:
+            pass
+
+    # 4. Model 3: Rømer Light-Travel Time Delay (k=6)
+    if n_transits >= 6:
+        def _res_ltt(p: np.ndarray) -> np.ndarray:
+            t0_v, p0_v, a_ltt_v, pb_v, eb_v, wb_v = p
+            if pb_v <= 0 or p0_v <= 0:
+                return np.full_like(times_clean, 1e6)
+            m_b = 2.0 * math.pi * (p0_v / pb_v) * epochs_clean
+            e_anom = _solve_kepler_ltt(m_b, eb_v)
+            cos_e = np.cos(e_anom)
+            sin_e = np.sin(e_anom)
+            denom = 1.0 - eb_v * cos_e
+            denom = np.where(np.abs(denom) < 1e-9, 1e-9, denom)
+            cos_nu = (cos_e - eb_v) / denom
+            sin_nu = (math.sqrt(max(0.0, 1.0 - eb_v**2)) * sin_e) / denom
+            nu_b = np.arctan2(sin_nu, cos_nu)
+            f_denom = 1.0 + eb_v * np.cos(nu_b)
+            f_denom = np.where(np.abs(f_denom) < 1e-9, 1e-9, f_denom)
+            factor = ((1.0 - eb_v**2) / f_denom) * np.sin(nu_b + wb_v)
+            m_v = t0_v + p0_v * epochs_clean + a_ltt_v * factor
+            return (times_clean - m_v) / errors_clean
+
+        pb_init = max(5.0 * p0_lin, (n_span + 1.0) * p0_lin)
+        x0_ltt = [t0_lin, p0_lin, 0.001, pb_init, 0.01, 0.0]
+        bounds_ltt = (
+            [t0_lin - 10.0 * p0_lin, 0.1 * p0_lin, 0.0, 1.5 * p0_lin, 0.0, -math.pi],
+            [t0_lin + 10.0 * p0_lin, 10.0 * p0_lin, 1.0, 1000.0 * p0_lin, 0.95, math.pi],
+        )
+        try:
+            opt_ltt = least_squares(_res_ltt, x0_ltt, bounds=bounds_ltt, max_nfev=2000)
+            if opt_ltt.success:
+                t0_ltt, p0_ltt, a_ltt, pb_ltt, eb_ltt, wb_ltt = [float(v) for v in opt_ltt.x]
+                chi2_ltt = float(np.sum(opt_ltt.fun**2))
+                dof_ltt = max(1, n_transits - 6)
+                red_chi2_ltt = float(chi2_ltt / dof_ltt)
+                aic_ltt = float(chi2_ltt + 2.0 * 6)
+                bic_ltt = float(chi2_ltt + 6.0 * math.log(n_transits))
+                models_dict["roemer_ltt"] = {
+                    "name": "roemer_light_travel_time",
+                    "k_parameters": 6,
+                    "status": "fit",
+                    "parameters": {
+                        "t0_btjd": t0_ltt,
+                        "period_days": p0_ltt,
+                        "amplitude_ltt_days": a_ltt,
+                        "amplitude_ltt_minutes": a_ltt * 1440.0,
+                        "companion_period_days": pb_ltt,
+                        "eccentricity": eb_ltt,
+                        "omega_rad": wb_ltt,
+                    },
+                    "chi_square": chi2_ltt,
+                    "reduced_chi_square": red_chi2_ltt,
+                    "aic": aic_ltt,
+                    "bic": bic_ltt,
+                    "delta_aic": float(aic_ltt - aic_lin),
+                    "delta_bic": float(bic_ltt - bic_lin),
+                }
+        except Exception:
+            pass
+
+    preferred_bic = min(models_dict.keys(), key=lambda m: models_dict[m]["bic"])
+    preferred_aic = min(models_dict.keys(), key=lambda m: models_dict[m]["aic"])
+
+    return {
+        "status": "compared",
+        "n_transits": n_transits,
+        "models": models_dict,
+        "preferred_model_bic": preferred_bic,
+        "preferred_model_aic": preferred_aic,
+        "interpretation": (
+            "Objective information-criterion comparison across linear, tidal decay, apsidal precession, "
+            "and light-travel time models. Model selection is descriptive and does not constitute a "
+            "definitive physical detection without external confirmation."
+        ),
+    }
+
+
 def fit_orbital_decay(
     epochs: np.ndarray,
     observed_btjd: np.ndarray,
@@ -1209,6 +1486,9 @@ def transit_timing_analysis(
     oc_errors_minutes = t_errors_arr * 1440.0
     rms_oc = float(np.sqrt(np.mean(oc_minutes**2))) if oc_minutes.size else None
     mean_uncertainty = float(np.mean(oc_errors_minutes)) if oc_errors_minutes.size else None
+    ephemeris_models_comparison = fit_secular_timing_models(
+        epochs_arr, t_observed_arr, t_errors_arr
+    )
     result = {
         "epochs": [int(epoch) for epoch in epochs_arr],
         "t_observed_btjd": [float(value) for value in t_observed_arr],
@@ -1237,6 +1517,7 @@ def transit_timing_analysis(
         "ephemeris_model_requested": ephemeris_model,
         "ephemeris_model_used": ephemeris_model_used,
         "ephemeris_model_comparison": ephemeris_comparison,
+        "ephemeris_models_comparison": ephemeris_models_comparison,
     }
     if include_orbital_decay:
         result["orbital_decay_fit"] = fit_orbital_decay(
@@ -1504,9 +1785,13 @@ def _recompute_and_validate_timing_summary(
     ):
         if not _timing_values_agree(analysis.get(field), expected):
             raise ValueError("timing {0} does not match its recomputed value".format(field))
+    recomputed_models_comparison = fit_secular_timing_models(
+        epochs, observed, timing_errors_days
+    )
     for field, expected in (
         ("quadratic_ephemeris", recomputed_quadratic),
         ("ephemeris_model_comparison", recomputed_comparison),
+        ("ephemeris_models_comparison", recomputed_models_comparison),
     ):
         if field in analysis and not _timing_values_agree(analysis.get(field), expected):
             raise ValueError("timing {0} does not match its recomputed value".format(field))
@@ -1558,6 +1843,7 @@ def _recompute_and_validate_timing_summary(
         "ephemeris_model_requested": requested_model,
         "ephemeris_model_used": used_model,
         "ephemeris_model_comparison": recomputed_comparison,
+        "ephemeris_models_comparison": recomputed_models_comparison,
     }
     if recomputed_orbital_decay is not None:
         result["orbital_decay_fit"] = recomputed_orbital_decay

@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "fixture_status": "analytic-equation-regression",
+  "reference": "Danby 1988; Eastman et al. 2013; Fulton et al. 2018",
+  "provenance": {
+    "source_kind": "analytic Kepler equation and Keplerian velocity cases",
+    "independence": "Fixture values are independently checked by a monotonic bisection solution of Kepler's equation in the test module.",
+    "limitations": "The values are not copied from a RadVel data product or a target observation."
+  },
+  "kepler_equation": "E - e*sin(E) = M",
+  "solver_tolerance_rad": 1e-12,
+  "solver_max_iterations": 64,
+  "solver_cases": [
+    {
+      "name": "high-eccentricity-periastron-grid",
+      "eccentricity": 0.95,
+      "mean_anomaly_rad": [0.0, 1e-8, 0.001, 0.1, 1.0, 3.141592653589793, 5.0, 6.0, 6.283185297179586],
+      "expected_eccentric_anomaly_rad": [0.0, 1.999999999999749e-7, 0.019974762949968226, 0.7419176681057613, 1.8992233429975551, 3.141592653589793, 4.181000769932799, 5.13267718540731, 6.283185107179575]
+    }
+  ],
+  "rv_cases": [
+    {
+      "name": "circular-orbit",
+      "semi_amplitude_m_per_s": 12.5,
+      "mean_anomaly_reference_rad": 0.3,
+      "eccentricity": 0.0,
+      "argument_periastron_rad": 0.7,
+      "reference_time_bjd_tdb": 0.0,
+      "period_days": 4.0,
+      "time_bjd_tdb": [0.0, 0.5, 1.0, 2.0, 3.0],
+      "expected_velocity_m_per_s": [6.753778823351747, -2.6619801894912016, -10.518387310098706, -6.753778823351747, 10.518387310098705]
+    },
+    {
+      "name": "eccentric-orbit",
+      "semi_amplitude_m_per_s": 23.0,
+      "mean_anomaly_reference_rad": 0.1,
+      "eccentricity": 0.95,
+      "argument_periastron_rad": 0.4,
+      "reference_time_bjd_tdb": 0.0,
+      "period_days": 7.0,
+      "time_bjd_tdb": [0.0, 0.125, 0.5, 1.0, 2.0, 3.5, 6.0],
+      "expected_velocity_m_per_s": [-1.2250314732905667, -2.597171550608213, -2.8357877085232466, -2.5379990092510876, -1.9143430114017788, -0.9849255844045952, 2.0965632333955702]
+    }
+  ],
+  "semi_amplitude_case": {
+    "m_planet_earth": 1.0,
+    "m_star_solar": 1.0,
+    "period_days": 365.25,
+    "inclination_deg": 90.0,
+    "eccentricity": 0.6,
+    "expected_k_m_per_s": 0.111875
+  }
+}

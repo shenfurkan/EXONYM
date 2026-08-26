@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "fixture_status": "independent-analytic-regression",
+  "reference": "Faigler and Mazeh 2011 circular BEER basis; Liang and Zeger 1986 cluster-sandwich covariance",
+  "provenance": {
+    "source_kind": "test-side analytic construction and hand-evaluated covariance microcase",
+    "independence": "Expected basis signs, box membership, coefficient values, cluster labels, and covariance are defined without EXONYM phasecurve or phase-folding helpers.",
+    "limitations": "Covers circular linear harmonics, a fixed rectangular secondary control, and cluster covariance arithmetic; it is not an eccentric brightness-map or false-alarm benchmark."
+  },
+  "units": {
+    "time": "days",
+    "flux": "relative_flux",
+    "amplitude": "ppm"
+  },
+  "circular_case": {
+    "ephemeris": {
+      "period_days": 1.0,
+      "epoch_btjd": 100.0,
+      "duration_days": 0.03125
+    },
+    "primary_mask_half_durations": 0.65,
+    "block_days": 0.25,
+    "secondary_box": {
+      "phase_fraction": 0.5,
+      "duration_days": 0.1875,
+      "strict_half_width_phase": 0.09375
+    },
+    "basis_anchors": [
+      {
+        "phase_fraction": 0.0,
+        "expected_physical_columns": {
+          "reflection_semiamplitude": -1.0,
+          "beaming_semiamplitude": 0.0,
+          "ellipsoidal_semiamplitude": -1.0,
+          "second_harmonic_sine_control": 0.0,
+          "secondary_eclipse_depth": 0.0
+        }
+      },
+      {
+        "phase_fraction": 0.125,
+        "expected_physical_columns": {
+          "reflection_semiamplitude": -0.7071067811865476,
+          "beaming_semiamplitude": 0.7071067811865476,
+          "ellipsoidal_semiamplitude": 0.0,
+          "second_harmonic_sine_control": 1.0,
+          "secondary_eclipse_depth": 0.0
+        }
+      },
+      {
+        "phase_fraction": 0.25,
+        "expected_physical_columns": {
+          "reflection_semiamplitude": 0.0,
+          "beaming_semiamplitude": 1.0,
+          "ellipsoidal_semiamplitude": 1.0,
+          "second_harmonic_sine_control": 0.0,
+          "secondary_eclipse_depth": 0.0
+        }
+      },
+      {
+        "phase_fraction": 0.5,
+        "expected_physical_columns": {
+          "reflection_semiamplitude": 1.0,
+          "beaming_semiamplitude": 0.0,
+          "ellipsoidal_semiamplitude": -1.0,
+          "second_harmonic_sine_control": 0.0,
+          "secondary_eclipse_depth": -1.0
+        }
+      }
+    ],
+    "box_boundary_anchors": [
+      {"phase_fraction": 0.40625, "expected_secondary_column": 0.0},
+      {"phase_fraction": 0.4375, "expected_secondary_column": -1.0},
+      {"phase_fraction": 0.5, "expected_secondary_column": -1.0},
+      {"phase_fraction": 0.5625, "expected_secondary_column": -1.0},
+      {"phase_fraction": 0.59375, "expected_secondary_column": 0.0}
+    ],
+    "sampling": {
+      "phase_numerator_start": 1,
+      "phase_numerator_stop_inclusive": 31,
+      "phase_denominator": 32,
+      "orbit_offsets_days": [0.0, 1.0],
+      "flux_err_relative_flux": 0.0001,
+      "sectors": [
+        {
+          "label": 11,
+          "start_btjd": 100.0,
+          "offset_relative_flux": 1.00012,
+          "slope_relative_flux_per_day": 0.000003
+        },
+        {
+          "label": 29,
+          "start_btjd": 110.0,
+          "offset_relative_flux": 0.99983,
+          "slope_relative_flux_per_day": -0.000005
+        }
+      ]
+    },
+    "injected_component_ppm": {
+      "reflection_semiamplitude": 37.0,
+      "beaming_semiamplitude": -23.0,
+      "ellipsoidal_semiamplitude": 19.0,
+      "second_harmonic_sine_control": -11.0,
+      "secondary_eclipse_depth": 53.0
+    },
+    "expected": {
+      "retained_points": 124,
+      "sector_count": 2,
+      "cluster_count": 16,
+      "cluster_run_lengths_per_sector": [8, 8, 8, 7, 8, 8, 8, 7],
+      "second_sector_cluster_offset": 8,
+      "box_interior_phase_numerators": [14, 15, 16, 17, 18],
+      "secondary_box_template_method": "fixed-secondary-box",
+      "secondary_box_duration_hours": 4.5,
+      "component_values_ppm": {
+        "reflection_semiamplitude": 37.0,
+        "beaming_semiamplitude": -23.0,
+        "ellipsoidal_semiamplitude": 19.0,
+        "second_harmonic_sine_control": -11.0,
+        "secondary_eclipse_depth": 53.0
+      }
+    }
+  },
+  "cluster_sandwich_case": {
+    "design": [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]],
+    "residual": [1.0, 2.0, 3.0, 4.0],
+    "sigma": [1.0, 1.0, 1.0, 1.0],
+    "cluster": [101, 101, 205, 205],
+    "expected_n_clusters": 2,
+    "expected_finite_sample_correction": 3.0,
+    "expected_covariance": [[6.75, 0.0], [0.0, 36.75]]
+  }
+}

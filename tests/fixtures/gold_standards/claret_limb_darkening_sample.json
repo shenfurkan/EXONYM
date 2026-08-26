@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "fixture_status": "synthetic-physical-boundary-regression",
+  "reference": "Kipping 2013 quadratic limb-darkening coordinate transform",
+  "provenance": {
+    "source_kind": "analytic Kipping-coordinate boundary cases",
+    "independence": "Expected q1, q2, u1, and u2 values are derived from the published analytic transform, not from EXONYM functions.",
+    "limitations": "These are not verified rows from a Claret PHOENIX or ATLAS9 table; the historical filename is retained for compatibility with the planned literature-backed fixture."
+  },
+  "law": "I(mu)/I(1) = 1 - u1*(1-mu) - u2*(1-mu)^2",
+  "coordinate_system": "Kipping-2013-q1-q2",
+  "cases": [
+    {
+      "name": "uniform-disk-limit",
+      "q1": 0.0,
+      "q2": 0.0,
+      "u1": 0.0,
+      "u2": 0.0
+    },
+    {
+      "name": "linear-darkening-boundary",
+      "q1": 0.36,
+      "q2": 0.5,
+      "u1": 0.6,
+      "u2": 0.0
+    },
+    {
+      "name": "representative-physical-coefficients",
+      "q1": 0.4225,
+      "q2": 0.3076923076923077,
+      "u1": 0.4,
+      "u2": 0.25
+    },
+    {
+      "name": "limb-zero-boundary",
+      "q1": 1.0,
+      "q2": 1.0,
+      "u1": 2.0,
+      "u2": -1.0
+    }
+  ]
+}

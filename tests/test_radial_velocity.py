@@ -123,7 +123,7 @@ def test_rv_keplerian_fit_recovers_synthetic_amplitude_and_records_provenance(tm
     assert report["input_artifacts"][0]["path"] == "data/external/radial_velocity_observations.json"
     assert report["input_artifacts"][0]["sha256"]
     assert report["diagnostics"]["kepler_equation_solver"] == {
-        "method": "Newton-Raphson with residual convergence check",
+        "method": "Danby starter + Halley third-order iteration with residual convergence check",
         "tolerance_rad": 1e-12,
         "max_iterations": 64,
     }

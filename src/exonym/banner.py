@@ -35,9 +35,9 @@ from typing import List, Tuple
 # In a 19-row vertical canvas with center_y = 9, radius_y = 7.5 guarantees the
 # full sphere (including atmosphere glow) fits perfectly without pole clipping.
 
-GLOBE_RADIUS_Y_MAX: float = 7.5
-GLOBE_RADIUS_X_MAX: float = 17.0
-_GLOBE_ASPECT: float = GLOBE_RADIUS_X_MAX / GLOBE_RADIUS_Y_MAX
+GLOBE_RADIUS_Y_MAX: float = 6.8
+GLOBE_RADIUS_X_MAX: float = 14.6
+_GLOBE_ASPECT: float = GLOBE_RADIUS_X_MAX / GLOBE_RADIUS_Y_MAX  # ~2.15:1 for standard terminal font aspect ratio
 
 # Fixed vertical geometry (rows) -- designed to fit on standard 24+ row terminals
 SPACE_ROWS: int = 19
@@ -92,30 +92,21 @@ _GREY        = _fg(240)
 # ---------------------------------------------------------------------------
 # Transit planet — fully opaque pitch-black silhouette disc
 # ---------------------------------------------------------------------------
-_TRANSIT_RADIUS_X: float = 3.5
-_TRANSIT_RADIUS_Y: float = 1.75
+_TRANSIT_RADIUS_X: float = 3.25
+_TRANSIT_RADIUS_Y: float = 1.5
 _TRANSIT_CHAR: str = " "
 _TRANSIT_BG: str = _ESC + "[40m"
 _TRANSIT_COLOR: str = _fg(0)
 
 
 def _globe_geometry(term_width: int) -> Tuple[int, int, int, float, float]:
-    """Return (space_width, center_x, center_y, radius_x, radius_y) for terminal width.
-
-    The canvas spans the available terminal width (up to 120 columns) so the
-    starfield expands cleanly across wide PowerShell windows. The globe itself
-    is scaled to fit the 19-row vertical canvas with zero clipping at the poles.
-    """
-    space_width = max(50, min(term_width - 2, 120))
-    center_x = space_width // 2
+    """Return fixed-dimension globe geometry for Cline-style centered poster."""
+    space_width = 56
+    center_x = 28
     center_y = SPACE_ROWS // 2
 
-    # Vertical geometry constraint guarantees full spherical shape with no clipping
-    radius_y = GLOBE_RADIUS_Y_MAX
-    # Horizontal radius maintains 2.2:1 aspect ratio, bounded by canvas width
-    max_rx_canvas = max(10.0, (space_width // 2) - 4.0)
-    radius_x = min(GLOBE_RADIUS_X_MAX, max_rx_canvas)
-    radius_y = radius_x / _GLOBE_ASPECT
+    radius_y = 7.0
+    radius_x = 15.0
 
     return space_width, center_x, center_y, radius_x, radius_y
 
@@ -292,47 +283,102 @@ def _render_planet_globe(
 
 
 def _tagline_line() -> str:
-    """Compose the version + tagline bridge rendered beneath the logo."""
-    text = _TAGLINE
-    try:
-        import importlib.metadata
-
-        text = "v" + importlib.metadata.version("exonym") + "  ·  " + _TAGLINE
-    except Exception:  # noqa: BLE001 - version metadata is optional decoration
-        pass
-    return _DIM + _GREY_MID + text + _RESET
+    """Compose the tagline rendered beneath the logo."""
+    return _DIM + _GREY_MID + _TAGLINE + _RESET
 
 
 def _compose_full_screen(angle: float, transit_phase: float, term_width: int) -> str:
-    """Compose the full dynamically centered banner frame."""
+    """Compose the Cline-style centered vertical poster frame."""
     space_width, center_x, center_y, radius_x, radius_y = _globe_geometry(term_width)
+    globe_lines = _render_planet_globe(
+        angle, transit_phase,
+        space_width, center_x, center_y, radius_x, radius_y,
+    )
 
     lines: List[str] = []
-
-    # 1. Centered Logo with version tagline bridge
     lines.append("")
     for logo_line in _LOGO_LINES:
         formatted = _WHITE + _BOLD + logo_line + _RESET
         lines.append(_center_line(formatted, term_width) + _ESC + "[K")
     lines.append(_center_line(_tagline_line(), term_width) + _ESC + "[K")
-
-    # 2. Centered High-Definition Rotating Exoplanet Globe + Transit in Space
     lines.append(_ESC + "[K")
-    for g_line in _render_planet_globe(
-        angle, transit_phase,
-        space_width, center_x, center_y, radius_x, radius_y,
-    ):
+    for g_line in globe_lines:
         lines.append(_center_line(g_line, term_width) + _ESC + "[K")
+    return "\n".join(lines)
 
+
+# ---------------------------------------------------------------------------
+# Pre-baked animation frames engine
+# ---------------------------------------------------------------------------
+# The renderer above is executed exactly ONCE, at module import, to bake a
+# deterministic frame matrix. ``run_banner`` then streams these immutable
+# string tuples with zero per-frame raytracing math, which removes startup
+# CPU spikes and guarantees byte-identical frames across terminal emulators.
+#
+# Frame choreography (fixed contract, verified by tests):
+#   * exactly _FRAME_COUNT frames of SPACE_ROWS x _GLOBE_GEOMETRY width 56;
+#   * globe longitude advances a full 2*pi over the cycle so the loop is
+#     seamless (no rotation jump at the wrap point);
+#   * the pitch-black transiting planet sweeps left-to-right across frames
+#     _TRANSIT_FIRST_FRAME.._TRANSIT_LAST_FRAME inclusive and is absent in
+#     every other frame.
+
+_FRAME_COUNT: int = 32
+_TRANSIT_FIRST_FRAME: int = 12
+_TRANSIT_LAST_FRAME: int = 28
+
+
+def _build_prebaked_frames() -> Tuple[Tuple[str, ...], ...]:
+    """Render the fixed frame matrix once for the lifetime of the process."""
+    space_width, center_x, center_y, radius_x, radius_y = _globe_geometry(56)
+    frames: List[Tuple[str, ...]] = []
+    for index in range(_FRAME_COUNT):
+        angle = 2.0 * math.pi * index / _FRAME_COUNT
+        if _TRANSIT_FIRST_FRAME <= index <= _TRANSIT_LAST_FRAME:
+            transit_phase = (index - _TRANSIT_FIRST_FRAME) / float(
+                _TRANSIT_LAST_FRAME - _TRANSIT_FIRST_FRAME
+            )
+        else:
+            transit_phase = -1.0
+        frames.append(
+            tuple(
+                _render_planet_globe(
+                    angle,
+                    transit_phase,
+                    space_width,
+                    center_x,
+                    center_y,
+                    radius_x,
+                    radius_y,
+                )
+            )
+        )
+    return tuple(frames)
+
+
+_PREBAKED_GLOBE_FRAMES: Tuple[Tuple[str, ...], ...] = _build_prebaked_frames()
+
+
+def _compose_poster(frame: Tuple[str, ...], term_width: int) -> str:
+    """Center one pre-baked globe frame beneath the static logo poster."""
+    lines: List[str] = [""]
+    for logo_line in _LOGO_LINES:
+        lines.append(_center_line(_WHITE + _BOLD + logo_line + _RESET, term_width) + _ESC + "[K")
+    lines.append(_center_line(_tagline_line(), term_width) + _ESC + "[K")
+    lines.append(_ESC + "[K")
+    for row in frame:
+        lines.append(_center_line(row, term_width) + _ESC + "[K")
     return "\n".join(lines)
 
 
 def run_banner(skip: bool = False) -> None:
-    """Run the high-definition 3D rotating exoplanet globe animation banner.
+    """Stream the pre-baked exoplanet transit animation.
 
-    Frames are centered horizontally and vertically. The animation adjusts
-    dynamically to the terminal width so the planet remains a fully formed
-    sphere without distortion or clipping.
+    The loop performs no raytracing: it reads frames from the immutable
+    ``_PREBAKED_GLOBE_FRAMES`` matrix, centers every row on the live terminal
+    width, and sleeps ~25 FPS between frames. Any keypress, SIGINT, or a
+    terminal that shrinks below the minimum geometry exits cleanly and always
+    restores the cursor.
 
     Parameters
     ----------
@@ -349,9 +395,9 @@ def run_banner(skip: bool = False) -> None:
     term_rows = 0
     try:
         ts = os.get_terminal_size()
-        term_width = max(60, ts.columns)
+        term_width = max(40, ts.columns)
         term_rows = ts.lines
-        if ts.lines < _FRAME_MIN_ROWS:
+        if ts.lines < 22 or ts.columns < 40:
             return
     except OSError:
         pass
@@ -374,45 +420,33 @@ def run_banner(skip: bool = False) -> None:
         stdout.write(_ESC + "[H")      # cursor home
         stdout.flush()
 
-        angle = 0.0
-        transit_phase = -1.0       # < 0 -> no planet; starts invisible
         frame_idx = 0
-        # Allow at least 12 frames (~0.5s) before checking keys
         while not _interrupted[0]:
+            # Grace period before keypresses count, so launch keystrokes do
+            # not instantly dismiss the animation.
             if frame_idx > 12 and _check_user_key():
                 break
 
             try:
                 ts = os.get_terminal_size()
-                term_width = max(60, ts.columns)
+                term_width = max(40, ts.columns)
                 term_rows = ts.lines
-                if ts.lines < _FRAME_MIN_ROWS:
+                if ts.lines < 22 or ts.columns < 40:
                     break
             except OSError:
                 pass
 
             v_pad = max(0, (term_rows - 1 - _FRAME_LINES) // 2)
-            frame_str = _compose_full_screen(angle, transit_phase, term_width)
-            stdout.write(_ESC + "[H" + "\n" * v_pad + frame_str + "\n")
+            frame = _PREBAKED_GLOBE_FRAMES[frame_idx % _FRAME_COUNT]
+            poster = _compose_poster(frame, term_width)
+            stdout.write(_ESC + "[H" + "\n" * v_pad + poster + "\n")
             stdout.flush()
 
-            angle += 0.04
             frame_idx += 1
-
-            # Transit planet animation: cycle through phases repeatedly
-            # Let the globe rotate solo for ~2s before first transit, then transit every ~3.5s
-            _transit_frame = frame_idx - 50   # start first transit after ~2s
-            _period_frames = 88                # ~3.5 s per transit cycle
-            if _transit_frame >= 0:
-                cycle_pos = (_transit_frame % _period_frames) / _period_frames
-                transit_phase = cycle_pos
-            else:
-                transit_phase = -1.0
-
             time.sleep(0.04)
 
-            # After 4 full rotations (~10s), wait for keypress
-            if frame_idx >= 250:
+            # Safety cap (~10 s) so headless-but-TTY sessions cannot spin forever.
+            if frame_idx >= _FRAME_COUNT * 8:
                 _wait_for_user_key(timeout=30.0)
                 break
 

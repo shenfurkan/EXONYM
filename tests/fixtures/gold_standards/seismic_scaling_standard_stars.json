@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "fixture_status": "analytic-scaling-regression",
+  "reference": "Huber et al. 2011; Chaplin et al. 2014; White et al. 2011",
+  "provenance": {
+    "source_kind": "analytic asteroseismic scaling cases",
+    "independence": "Expected mass and radius values follow the stated scaling ratios directly.",
+    "limitations": "The giant cases are synthetic scaling examples, not calibrated observed standard stars."
+  },
+  "solar_reference": {
+    "numax_uhz": 3090.0,
+    "dnu_uhz": 135.1,
+    "teff_k": 5772.0
+  },
+  "cases": [
+    {
+      "name": "solar-identity",
+      "numax_uhz": 3090.0,
+      "dnu_uhz": 135.1,
+      "teff_k": 5772.0,
+      "expected_mass_solar": 1.0,
+      "expected_radius_solar": 1.0
+    },
+    {
+      "name": "red-giant-scaling",
+      "numax_uhz": 309.0,
+      "dnu_uhz": 13.51,
+      "teff_k": 5772.0,
+      "expected_mass_solar": 10.0,
+      "expected_radius_solar": 10.0
+    },
+    {
+      "name": "cool-giant-scaling",
+      "numax_uhz": 100.0,
+      "dnu_uhz": 10.0,
+      "teff_k": 4800.0,
+      "expected_mass_solar": 0.8563,
+      "expected_radius_solar": 5.3865
+    }
+  ]
+}

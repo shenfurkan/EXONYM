@@ -203,13 +203,15 @@ def test_transit_fit_signal_suffix(tmp_path):
         "exonym.transit_fit.load_transit_ephemeris", return_value=ephemeris
     ), patch("exonym.transit_fit.load_stellar_parameters", return_value=stellar):
         # 1. Default un-suffixed run (low sample count for quick test)
-        out_default = run_mcmc_transit_fit(workspace, n_samples=10)
+        out_default = run_mcmc_transit_fit(workspace, n_samples=10, n_walkers=16, burn_in=20)
         assert out_default.name == "mcmc_transit_fit.json"
         assert out_default.is_file()
         assert (workspace.path / "outputs" / "mcmc_transit_fit_chain.npy").is_file()
 
         # 2. Suffixed run (.01)
-        out_signal = run_mcmc_transit_fit(workspace, n_samples=10, signal=".01")
+        out_signal = run_mcmc_transit_fit(
+            workspace, n_samples=10, n_walkers=16, burn_in=20, signal=".01"
+        )
         assert out_signal.name == "mcmc_transit_fit.01.json"
         assert out_signal.is_file()
         assert (workspace.path / "outputs" / "mcmc_transit_fit_chain.01.npy").is_file()

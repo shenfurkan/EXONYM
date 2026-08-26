@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "fixture_status": "analytic-resonance-regression",
+  "reference": "Lithwick, Xie and Wu 2012",
+  "provenance": {
+    "source_kind": "analytic first-order mean-motion resonance cases",
+    "independence": "Expected super-periods follow the stated beat-frequency equation directly.",
+    "limitations": "These are target-neutral period pairs and do not model TTV amplitudes, masses, or resonant dynamics beyond the first-order super-period."
+  },
+  "formula": "P_super = 1 / abs(j/P_outer - (j-1)/P_inner)",
+  "units": {
+    "period": "days",
+    "super_period": "days"
+  },
+  "cases": [
+    {
+      "name": "near-2-to-1",
+      "period_inner_days": 10.0,
+      "period_outer_days": 20.2,
+      "j_resonance": 2,
+      "expected_super_period_days": 1010.0
+    },
+    {
+      "name": "near-3-to-2",
+      "period_inner_days": 10.0,
+      "period_outer_days": 15.15,
+      "j_resonance": 3,
+      "expected_super_period_days": 505.0
+    },
+    {
+      "name": "exact-3-to-2",
+      "period_inner_days": 10.0,
+      "period_outer_days": 15.0,
+      "j_resonance": 3,
+      "expected_super_period_days": "infinity"
+    }
+  ]
+}

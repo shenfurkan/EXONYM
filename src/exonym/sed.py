@@ -135,26 +135,72 @@ def blackbody_model_magnitudes(
     Returns:
         np.ndarray: Model Vega magnitudes in the same order as ``band_data``.
 
+    Raises:
+        ValueError: Inputs are non-finite, physically invalid, unsupported, or
+            cannot produce finite model magnitudes.
+
     Note:
         Pivot-wavelength fluxes approximate passband-integrated photometry and
         should not be interpreted as a response-integrated atmosphere model.
     """
-    radius_distance = math.exp(log_radius_over_distance)
+    try:
+        teff_value = float(teff_k)
+        log_scale = float(log_radius_over_distance)
+        extinction = float(av_mag)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("blackbody inputs must be finite physical values") from exc
+    if (
+        not math.isfinite(teff_value)
+        or teff_value <= 0.0
+        or not math.isfinite(log_scale)
+        or not math.isfinite(extinction)
+        or extinction < 0.0
+    ):
+        raise ValueError("teff_k must be finite and positive; scale finite; av_mag finite and non-negative")
+    try:
+        radius_distance = math.exp(log_scale)
+    except OverflowError as exc:
+        raise ValueError("log_radius_over_distance produces a non-finite scale") from exc
+    if not math.isfinite(radius_distance) or radius_distance <= 0.0:
+        raise ValueError("log_radius_over_distance produces a non-finite scale")
+
     model = []
-    for name, wavelength_micron, zero_jy in band_data:
+    for row in band_data:
+        try:
+            name, wavelength_micron, zero_jy = row
+            wavelength_micron = float(wavelength_micron)
+            zero_jy = float(zero_jy)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("each band_data row must contain a name, wavelength, and zero point") from exc
+        if (
+            not isinstance(name, str)
+            or name not in EXTINCTION_RATIOS
+            or not math.isfinite(wavelength_micron)
+            or wavelength_micron <= 0.0
+            or not math.isfinite(zero_jy)
+            or zero_jy <= 0.0
+        ):
+            raise ValueError("band_data must use supported bands with finite positive wavelengths and zero points")
+
         wavelength = wavelength_micron * 1e-6
         frequency = c / wavelength
-        intensity = (
-            2.0
-            * h
-            * frequency**3
-            / c**2
-            / np.expm1(h * frequency / (k * float(teff_k)))
-        )
+        exponent = h * frequency / (k * teff_value)
+        if not math.isfinite(exponent) or exponent <= 0.0:
+            raise ValueError("band_data and teff_k produce an invalid Planck exponent")
+        try:
+            intensity = 2.0 * h * frequency**3 / c**2 / math.expm1(exponent)
+        except OverflowError as exc:
+            raise ValueError("band_data and teff_k produce an unrepresentable Planck exponent") from exc
         flux_jy = np.pi * intensity * radius_distance**2 / 1e-26
-        magnitude = -2.5 * np.log10(flux_jy / zero_jy) + av_mag * EXTINCTION_RATIOS[name]
+        if not math.isfinite(flux_jy) or flux_jy <= 0.0:
+            raise ValueError("blackbody inputs produce a non-finite flux")
+        magnitude = -2.5 * math.log10(flux_jy / zero_jy) + extinction * EXTINCTION_RATIOS[name]
+        if not math.isfinite(magnitude):
+            raise ValueError("blackbody inputs produce a non-finite magnitude")
         model.append(magnitude)
-    return np.asarray(model)
+    if not model:
+        raise ValueError("band_data must contain at least one supported band")
+    return np.asarray(model, dtype=float)
 
 
 def load_atmosphere_grid_model(
@@ -370,9 +416,10 @@ def _load_mist_main_sequence_grid(grid_path: Path) -> Dict[str, np.ndarray]:
                     name: float(row[name])
                     for name in rows
                 }
-                if all(math.isfinite(value) for value in parsed.values()):
-                    for name, value in parsed.items():
-                        rows[name].append(value)
+                if not all(math.isfinite(value) for value in parsed.values()):
+                    raise RuntimeError("frozen MIST grid contains a non-finite main-sequence row")
+                for name, value in parsed.items():
+                    rows[name].append(value)
     except (OSError, UnicodeError, TypeError, ValueError, csv.Error) as exc:
         raise RuntimeError("frozen MIST grid is unreadable or non-finite: {0}".format(exc)) from exc
     if len(rows["teff_k"]) < 4:
@@ -494,10 +541,12 @@ def _mist_main_sequence_check(
             "interpretation": "Candidate stellar parameters fall outside the frozen MIST main-sequence grid; no nearest-grid fallback was used.",
         }
     try:
-        predicted = {
-            band: float(LinearNDInterpolator(points, grid[column])(target))
-            for band, column in MIST_ABSOLUTE_MAGNITUDE_COLUMNS.items()
-        }
+        predicted = {}
+        for band, column in MIST_ABSOLUTE_MAGNITUDE_COLUMNS.items():
+            interpolated = np.asarray(LinearNDInterpolator(points, grid[column])(target), dtype=float)
+            if interpolated.size != 1:
+                raise RuntimeError("frozen MIST grid interpolation returned an invalid scalar shape")
+            predicted[band] = float(interpolated.reshape(-1)[0])
     except Exception as exc:
         raise RuntimeError("frozen MIST grid cannot interpolate the declared stellar parameters: {0}".format(exc)) from exc
     if not all(math.isfinite(value) for value in predicted.values()):
@@ -525,8 +574,8 @@ def _mist_main_sequence_check(
     for band, (catalog, measurement_name) in band_locations.items():
         magnitude, magnitude_uncertainty = _mist_measurement(payload, catalog, measurement_name)
         extinction_mag = float(extinction[band])
-        if not math.isfinite(extinction_mag):
-            raise RuntimeError("MIST extinction values must be finite")
+        if not math.isfinite(extinction_mag) or extinction_mag < 0.0:
+            raise RuntimeError("MIST extinction values must be finite and non-negative")
         absolute_magnitude = magnitude - distance_modulus - extinction_mag
         uncertainty = math.sqrt(magnitude_uncertainty**2 + distance_modulus_uncertainty**2)
         observed_absolute[band] = absolute_magnitude
@@ -916,3 +965,58 @@ def run_sed_fit(workspace: CandidateWorkspace) -> Path:
     if samples is not None:
         np.save(str(outputs_dir / "sed_fit_chain.npy"), samples)
     return output_path
+
+
+def cross_match_isochrone_evolution(
+    teff_k: float,
+    logg_cgs: float,
+    feh_dex: float,
+    radius_solar: float,
+) -> Dict[str, Any]:
+    """Validate stellar parameters against canonical main-sequence scaling.
+
+    Mathematical Formulation:
+        For main-sequence dwarf stars, effective temperature sets the zero-age
+        main-sequence (ZAMS) radius according to ``R_MS ~ (Teff / Teff_sun)**1.5``
+        and the expected surface gravity ``log g_MS ~ log g_sun - 0.5 * log10(Teff / Teff_sun)``.
+        Deviations ``|log g_obs - log g_MS| >= 0.4 dex`` or radius swellings
+        ``R / R_MS > 1.5`` flag evolved subgiant or red giant stages.
+
+    Args:
+        teff_k (float): Effective temperature in kelvin.
+        logg_cgs (float): Logarithmic surface gravity in cgs units.
+        feh_dex (float): Metallicity in dex.
+        radius_solar (float): Stellar radius in solar units.
+
+    Returns:
+        Dict[str, Any]: Main-sequence consistency metrics, including temperature
+        ratio vs. Sun, expected main-sequence log(g), offset, and evolutionary stage.
+
+    Raises:
+        ValueError: If input values are non-finite or outside physical domains.
+    """
+    values = (teff_k, logg_cgs, feh_dex, radius_solar)
+    if not all(math.isfinite(float(v)) for v in values):
+        raise ValueError("stellar evolutionary parameters must be finite")
+    if teff_k <= 0.0:
+        raise ValueError("teff_k must be positive")
+    if radius_solar <= 0.0:
+        raise ValueError("radius_solar must be positive")
+
+    teff_ratio = teff_k / TEFF_SUN_K
+    expected_radius_ms = max(teff_ratio**1.5, 0.05)
+    expected_logg_ms = LOGG_SUN_CGS - 0.5 * math.log10(teff_ratio)
+    logg_offset = abs(logg_cgs - expected_logg_ms)
+    radius_ratio_to_ms = radius_solar / expected_radius_ms
+
+    is_ms = (logg_offset < 0.4) and (0.6 <= radius_ratio_to_ms <= 1.5)
+
+    return {
+        "method": "analytic-main-sequence-isochrone-consistency",
+        "teff_ratio_vs_solar": round(float(teff_ratio), 4),
+        "expected_main_sequence_radius_solar": round(float(expected_radius_ms), 3),
+        "expected_main_sequence_logg": round(float(expected_logg_ms), 3),
+        "observed_logg_offset": round(float(logg_offset), 3),
+        "radius_ratio_to_main_sequence": round(float(radius_ratio_to_ms), 3),
+        "evolutionary_stage": "main_sequence" if is_ms else "subgiant_or_evolved",
+    }

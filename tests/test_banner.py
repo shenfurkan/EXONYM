@@ -100,3 +100,63 @@ def test_banner_import_is_isolated():
         "Importing exonym.banner pulled in unexpected exonym submodules: "
         + ", ".join(sorted(new_modules))
     )
+
+
+def test_prebaked_frames_contract():
+    """The baked matrix is exactly 32 frames of 19 rows x 56 visible columns."""
+    banner = _import_banner()
+    frames = banner._PREBAKED_GLOBE_FRAMES
+
+    assert len(frames) == 32
+    for frame in frames:
+        assert isinstance(frame, tuple)
+        assert len(frame) == banner.SPACE_ROWS
+        for row in frame:
+            assert len(banner._strip_ansi(row)) == 56
+
+    # Deterministic bake: re-rendering any frame must reproduce it byte-for-byte.
+    geom = banner._globe_geometry(56)
+    rebuilt = banner._render_planet_globe(2.0 * math.pi * 5 / 32, -1.0, *geom)
+    assert tuple(rebuilt) == frames[5]
+
+    # Transit planet sweeps only across frames 12..28 inclusive.
+    transit_marker = banner._TRANSIT_BG
+    assert all(transit_marker not in row for row in frames[0])
+    assert any(transit_marker in row for row in frames[12])
+    assert any(transit_marker in row for row in frames[20])
+    assert any(transit_marker in row for row in frames[28])
+    assert all(
+        transit_marker not in row
+        for index, frame in enumerate(frames)
+        if index not in range(12, 29)
+        for row in frame
+    )
+
+
+def test_run_banner_streams_prebaked_frames_without_rerendering(monkeypatch):
+    """The streaming loop must read the baked matrix, never call the renderer."""
+    banner = _import_banner()
+    calls = {"render": 0}
+    real_render = banner._render_planet_globe
+
+    def counting_render(*args, **kwargs):
+        calls["render"] += 1
+        return real_render(*args, **kwargs)
+
+    monkeypatch.setattr(banner, "_render_planet_globe", counting_render)
+    monkeypatch.setattr(banner.time, "sleep", lambda _seconds: None)
+
+    fake_stdout = io.StringIO()
+    with patch("sys.stdout", fake_stdout):
+        with patch.object(fake_stdout, "isatty", return_value=True):
+            with patch.object(io, "StringIO", return_value=fake_stdout):
+                # get_terminal_size patched at os level used inside module.
+                with patch("os.get_terminal_size", lambda: __import__("os").terminal_size((100, 30))):
+                    # Force an immediate keypress exit after the grace period.
+                    monkeypatch.setattr(banner, "_check_user_key", lambda: True)
+                    banner.run_banner()
+
+    assert calls["render"] == 0, "run_banner must stream pre-baked frames without raytracing"
+    out = fake_stdout.getvalue()
+    assert "\x1b[?25h" in out, "cursor must be restored"
+

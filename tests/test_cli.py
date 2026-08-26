@@ -519,6 +519,7 @@ def test_cli_fit_passes_dynesty_sampler(tmp_path, capsys, mocker):
 
     assert main(root + ["fit", "candidate-alpha", "--sampler", "dynesty"]) == 0
     assert mock_fit.call_args.kwargs["sampler"] == "dynesty"
+    assert mock_fit.call_args.kwargs["device"] == "auto"
     assert "mcmc_transit_fit.json" in capsys.readouterr().out
 
 
@@ -534,11 +535,46 @@ def test_cli_fit_n_jobs_flag(tmp_path):
     assert ns_default.n_jobs == 1
 
 
+def test_cli_fit_device_flag_defaults_to_auto_and_accepts_cpu(tmp_path):
+    parser = _build_parser()
+
+    assert parser.parse_args(["fit", "candidate-x"]).device == "auto"
+    assert parser.parse_args(["fit", "candidate-x", "--device", "cpu"]).device == "cpu"
+
+
 def test_cli_fit_progress_flag(tmp_path):
     """--progress is a boolean store_true."""
     parser = _build_parser()
     ns = parser.parse_args(["fit", "tic-123", "--progress"])
     assert ns.progress is True
+
+
+def test_cli_parser_registers_checkpoint_group():
+    parser = _build_parser()
+
+    save = parser.parse_args(["checkpoint", "save", "candidate-x", "--name", "pre-fit"])
+    assert (save.checkpoint_action, save.candidate_id, save.name) == (
+        "save", "candidate-x", "pre-fit",
+    )
+    listing = parser.parse_args(["checkpoint", "list", "candidate-x"])
+    assert listing.checkpoint_action == "list"
+    restore = parser.parse_args(
+        ["checkpoint", "restore", "candidate-x", "--id", "20260101T000000Z_snap", "--yes"]
+    )
+    assert restore.checkpoint_action == "restore" and restore.yes is True
+    delete = parser.parse_args(
+        ["checkpoint", "delete", "candidate-x", "--id", "20260101T000000Z_snap"]
+    )
+    assert delete.checkpoint_action == "delete"
+
+
+def test_cli_parser_registers_wizard_command():
+    parser = _build_parser()
+
+    with_target = parser.parse_args(["wizard", "candidate-x"])
+    assert with_target.candidate_id == "candidate-x"
+    without_target = parser.parse_args(["wizard"])
+    assert without_target.candidate_id is None
 
 
 def test_cli_fit_resume_flag(tmp_path):

@@ -3,7 +3,7 @@
 Decomposes out-of-transit photometric time-series into physical orbital harmonic
 components based on the BEER (Beaming, Ellipsoidal, and Reflection/emission) model
 (Faigler & Mazeh 2011, Shporer 2017):
-1. Reflection / Thermal Day-Night Emission: A_refl * cos(phi)
+1. Reflection / Thermal Day-Night Emission: -A_refl * cos(phi)
    Circular-orbit basis term; a hotspot offset or eccentric orbit requires a
    dedicated brightness-map model rather than this diagnostic basis.
 2. Doppler Beaming / Boosting: A_beam * sin(phi)
@@ -117,12 +117,18 @@ def _circular_phase_summary(phases: np.ndarray) -> Dict[str, Any]:
     median_phase = (reference + median) % 1.0
     upper_phase = (reference + upper) % 1.0
     return {
-        "median": round(median_phase, 8),
-        "p16": round(lower_phase, 8),
-        "p84": round(upper_phase, 8),
+        "median": _rounded_phase_fraction(median_phase),
+        "p16": _rounded_phase_fraction(lower_phase),
+        "p84": _rounded_phase_fraction(upper_phase),
         "credible_interval_wraps_phase_zero": bool(lower_phase > upper_phase),
         "half_width_phase": round(0.5 * (upper - lower), 8),
     }
+
+
+def _rounded_phase_fraction(phase_fraction: float) -> float:
+    """Round a circular phase without serializing the excluded endpoint 1.0."""
+    rounded = round(float(phase_fraction) % 1.0, 8)
+    return 0.0 if rounded >= 1.0 else rounded
 
 
 def _secondary_eclipse_geometry_samples(
@@ -213,9 +219,13 @@ def _posterior_secondary_eclipse_template(
     phase_days = np.asarray(phase_days, dtype=float)
     phase_samples = np.asarray(phase_samples, dtype=float)
     duration_samples_days = np.asarray(duration_samples_days, dtype=float)
+    if isinstance(total_samples, bool) or not isinstance(total_samples, (int, np.integer)):
+        raise ValueError("secondary-eclipse posterior template sample count must be an integer")
     if (
-        period_days <= 0.0
+        not math.isfinite(period_days)
+        or period_days <= 0.0
         or total_samples <= 0
+        or total_samples < phase_samples.size
         or phase_samples.size == 0
         or phase_samples.shape != duration_samples_days.shape
     ):
@@ -336,16 +346,19 @@ def resolve_secondary_eclipse_control(
 
         if tuple(PARAMETER_NAMES_ECCENTRIC[-2:]) != ("sqe_cosw", "sqe_sinw"):
             raise RuntimeError("legacy eccentric transit-fit chain layout is not recognized")
+        rp_rs_index, impact_parameter_index = 0, 2
         sqe_cosw_index, sqe_sinw_index = -2, -1
     else:
+        required_names = ("rp_rs", "impact_parameter", "sqe_cosw", "sqe_sinw")
         if (
             not isinstance(parameter_names, list)
             or not all(isinstance(name, str) for name in parameter_names)
             or len(parameter_names) != chain.shape[1]
-            or parameter_names.count("sqe_cosw") != 1
-            or parameter_names.count("sqe_sinw") != 1
+            or any(parameter_names.count(name) != 1 for name in required_names)
         ):
             raise RuntimeError("candidate-local eccentric transit-fit parameter_names contract is invalid")
+        rp_rs_index = parameter_names.index("rp_rs")
+        impact_parameter_index = parameter_names.index("impact_parameter")
         sqe_cosw_index = parameter_names.index("sqe_cosw")
         sqe_sinw_index = parameter_names.index("sqe_sinw")
 
@@ -360,16 +373,20 @@ def resolve_secondary_eclipse_control(
         sampled_chain[:, sqe_sinw_index], sampled_chain[:, sqe_cosw_index]
     )
     phase_samples, duration_ratios, occulting = _secondary_eclipse_geometry_samples(
-        eccentricity, omega_radians, sampled_chain[:, 0], sampled_chain[:, 2]
+        eccentricity,
+        omega_radians,
+        sampled_chain[:, rp_rs_index],
+        sampled_chain[:, impact_parameter_index],
     )
     if not np.any(occulting):
         raise RuntimeError("candidate-local eccentric posterior predicts no secondary occultation")
     valid_phase_samples = phase_samples[occulting]
     valid_duration_samples = duration_days * duration_ratios[occulting]
     duration_hours = valid_duration_samples * 24.0
+    phase_summary = _circular_phase_summary(valid_phase_samples)
     return (
         {
-            "secondary_eclipse_phase": float(np.median(valid_phase_samples)),
+            "secondary_eclipse_phase": float(phase_summary["median"]),
             "secondary_eclipse_duration_days": float(np.median(valid_duration_samples)),
             "secondary_eclipse_phase_samples": valid_phase_samples,
             "secondary_eclipse_duration_samples_days": valid_duration_samples,
@@ -377,7 +394,7 @@ def resolve_secondary_eclipse_control(
         },
         {
             "mode": "eccentric-posterior-marginalized-box-control",
-            "phase": _circular_phase_summary(valid_phase_samples),
+            "phase": phase_summary,
             "duration_hours": {
                 "median": round(float(np.median(duration_hours)), 8),
                 "p16": round(float(np.quantile(duration_hours, 0.16)), 8),
@@ -447,9 +464,11 @@ def cluster_sandwich_covariance(
     n_points, n_params = design.shape
     n_groups = len(groups)
     if n_groups < 2 or n_points <= n_params:
-        correction = float(n_points) / max(n_points - n_params, 1)
-    else:
-        correction = n_groups / (n_groups - 1.0) * (n_points - 1.0) / (n_points - n_params)
+        # A cluster-robust covariance needs at least two clusters and positive
+        # residual degrees of freedom. Zero is an explicit undefined-error
+        # sentinel consumed by fit_phase_curve_components.
+        return np.zeros((n_params, n_params), dtype=float), n_groups
+    correction = n_groups / (n_groups - 1.0) * (n_points - 1.0) / (n_points - n_params)
     # NUMERICAL_GUARD: floating-point asymmetry in the triple product can
     # leave tiny negative values on the covariance diagonal; explicit
     # symmetrization keeps sqrt(diag(...)) free of NaN warnings.
@@ -504,12 +523,33 @@ def build_design_matrix(
         ValueError: Secondary-control phase, duration, or template alignment is
             invalid.
     """
+    try:
+        period_days = float(period_days)
+        duration_days = float(duration_days)
+        block_days = float(block_days)
+        secondary_eclipse_phase = float(secondary_eclipse_phase)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("phase-curve periods, durations, blocks, and phases must be finite") from exc
+    if not math.isfinite(period_days) or period_days <= 0.0:
+        raise ValueError("orbital period must be finite and positive")
+    if not math.isfinite(duration_days) or duration_days <= 0.0 or duration_days >= period_days:
+        raise ValueError("primary transit duration must be finite, positive, and shorter than the orbital period")
+    if not math.isfinite(block_days) or block_days <= 0.0:
+        raise ValueError("block_days must be finite and positive")
     if not math.isfinite(secondary_eclipse_phase) or not 0.0 <= secondary_eclipse_phase < 1.0:
         raise ValueError("secondary eclipse phase must be finite and in [0, 1)")
     if secondary_eclipse_duration_days is None:
         secondary_eclipse_duration_days = duration_days
-    if not math.isfinite(secondary_eclipse_duration_days) or secondary_eclipse_duration_days <= 0.0:
-        raise ValueError("secondary eclipse duration must be finite and positive")
+    try:
+        secondary_eclipse_duration_days = float(secondary_eclipse_duration_days)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("secondary eclipse duration must be finite and positive") from exc
+    if (
+        not math.isfinite(secondary_eclipse_duration_days)
+        or secondary_eclipse_duration_days <= 0.0
+        or secondary_eclipse_duration_days >= period_days
+    ):
+        raise ValueError("secondary eclipse duration must be finite, positive, and shorter than the orbital period")
     unique_sectors = sorted(int(value) for value in np.unique(sector_values))
     columns: List[np.ndarray] = []
     names: List[str] = []
@@ -540,8 +580,13 @@ def build_design_matrix(
         ).astype(float)
     else:
         eclipse = np.asarray(secondary_eclipse_template, dtype=float)
-        if eclipse.shape != phase_days.shape or not np.all(np.isfinite(eclipse)) or np.any(eclipse < 0.0):
-            raise ValueError("secondary eclipse template must be finite, non-negative, and cadence-aligned")
+        if (
+            eclipse.shape != phase_days.shape
+            or not np.all(np.isfinite(eclipse))
+            or np.any(eclipse < 0.0)
+            or np.any(eclipse > 1.0)
+        ):
+            raise ValueError("secondary eclipse template must be finite, in [0, 1], and cadence-aligned")
     physical_values = {
         "reflection_semiamplitude": -np.cos(angle),
         "beaming_semiamplitude": np.sin(angle),
@@ -608,13 +653,44 @@ def fit_phase_curve_components(
         Formal component significance is a regression diagnostic, not a
         correlated-noise-calibrated detection significance.
     """
-    period_days = ephemeris["period_days"]
-    epoch_btjd = ephemeris["epoch_btjd"]
-    duration_days = ephemeris["duration_days"]
+    try:
+        period_days = float(ephemeris["period_days"])
+        epoch_btjd = float(ephemeris["epoch_btjd"])
+        duration_days = float(ephemeris["duration_days"])
+        block_days = float(block_days)
+        primary_mask_half_durations = float(primary_mask_half_durations)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("phase-curve ephemeris and mask settings must be finite physical values") from exc
+    if (
+        not math.isfinite(period_days)
+        or period_days <= 0.0
+        or not math.isfinite(epoch_btjd)
+        or not math.isfinite(duration_days)
+        or duration_days <= 0.0
+        or duration_days >= period_days
+    ):
+        raise ValueError("phase-curve ephemeris requires 0 < duration_days < period_days")
+    if not math.isfinite(block_days) or block_days <= 0.0:
+        raise ValueError("block_days must be finite and positive")
+    if not math.isfinite(primary_mask_half_durations) or primary_mask_half_durations <= 0.0:
+        raise ValueError("primary_mask_half_durations must be finite and positive")
+
+    time = np.asarray(time, dtype=float)
+    flux = np.asarray(flux, dtype=float)
+    flux_err = np.asarray(flux_err, dtype=float)
+    sector_values = np.asarray(sector_values)
+    if (
+        time.ndim != 1
+        or flux.ndim != 1
+        or flux_err.ndim != 1
+        or sector_values.ndim != 1
+        or not (time.shape == flux.shape == flux_err.shape == sector_values.shape)
+    ):
+        raise ValueError("phase-curve time, flux, uncertainty, and sector arrays must share one dimension")
     phase_days = phase_hours(time, period_days, epoch_btjd) / 24.0
     keep = (
         np.abs(phase_days) > primary_mask_half_durations * duration_days
-    ) & np.isfinite(flux) & np.isfinite(flux_err) & (flux_err > 0)
+    ) & np.isfinite(time) & np.isfinite(flux) & np.isfinite(flux_err) & (flux_err > 0)
     time = time[keep]
     phase_days = phase_days[keep]
     flux = flux[keep]
@@ -653,11 +729,23 @@ def fit_phase_curve_components(
     )
     sigma = np.asarray(flux_err, dtype=float)
     weighted_design = design / sigma[:, None]
+    if weighted_design.shape[0] <= weighted_design.shape[1]:
+        raise ValueError("phase-curve regression has insufficient residual degrees of freedom")
+    if np.linalg.matrix_rank(weighted_design) != weighted_design.shape[1]:
+        raise ValueError("phase-curve regression design is rank deficient")
     coefficients = np.linalg.lstsq(weighted_design, flux / sigma, rcond=None)[0]
+    if not np.all(np.isfinite(coefficients)):
+        raise ValueError("phase-curve regression returned non-finite coefficients")
     model = design @ coefficients
     residual = flux - model
     covariance, n_clusters = cluster_sandwich_covariance(design, residual, sigma, cluster)
-    errors = np.sqrt(np.diag(covariance))
+    covariance_diagonal = np.diag(covariance)
+    safe_covariance_diagonal = np.where(
+        np.isfinite(covariance_diagonal) & (covariance_diagonal > 0.0),
+        covariance_diagonal,
+        0.0,
+    )
+    errors = np.sqrt(safe_covariance_diagonal)
 
     components: Dict[str, Dict[str, Any]] = {}
     for name in PHYSICAL_COMPONENTS:
@@ -712,7 +800,7 @@ def fit_phase_curve_components(
         "n_sectors": int(len(np.unique(sector_values))),
         "n_covariance_clusters": int(n_clusters),
         "primary_mask_half_width_hours": round(primary_mask_half_durations * duration_days * 24.0, 3),
-        "secondary_box_phase": round(float(secondary_eclipse_phase), 8),
+        "secondary_box_phase": _rounded_phase_fraction(secondary_eclipse_phase),
         "secondary_box_duration_hours": round(float(secondary_eclipse_duration_days or duration_days) * 24.0, 3),
         "secondary_box_template_method": secondary_template_method,
         "components": components,
