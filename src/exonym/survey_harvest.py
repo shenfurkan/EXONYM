@@ -203,7 +203,8 @@ def _https_response(url: str, timeout: float, accept: str) -> Iterator[Any]:
     last_error: Optional[BaseException] = None
     for attempt in range(DEFAULT_HTTP_MAX_ATTEMPTS):
         try:
-            response = urllib.request.urlopen(request, timeout=timeout)  # nosec B310 -- HTTPS is enforced above
+            # HTTPS URL scheme is strictly enforced above.
+            response = urllib.request.urlopen(request, timeout=timeout)  # nosec B310
         except HTTPError as exc:
             # Authentication and malformed-request responses cannot recover by retrying.
             if exc.code not in (429, 500, 502, 503, 504):

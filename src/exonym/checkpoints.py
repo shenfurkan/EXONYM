@@ -294,7 +294,7 @@ def _extract_tar_safe(archive_path: Path, target_dir: Path) -> None:
         # available (Python >= 3.12); the manual validation above covers 3.9-3.11.
         if hasattr(tarfile, "data_filter"):
             extract_kwargs["filter"] = "data"
-        archive.extractall(**extract_kwargs)
+        archive.extractall(**extract_kwargs)  # nosec B202
 
 
 def _append_audit_record(

@@ -436,7 +436,8 @@ def _request_for(spec: ProviderSpec, candidate: CandidateWorkspace) -> CatalogRe
 def _default_transport(request: CatalogRequest) -> TransportResponse:
     request_object = Request(request.source_uri, data=request.body, headers=dict(request.headers), method=request.method)
     try:
-        with urlopen(request_object, timeout=30) as response:  # nosec B310 -- fixed reviewed endpoints
+        # Request URI is restricted to fixed, reviewed catalog provider endpoints.
+        with urlopen(request_object, timeout=30) as response:  # nosec B310
             return TransportResponse(response.getcode(), dict(response.headers.items()), response.read())
     except HTTPError as exc:
         return TransportResponse(exc.code, dict(exc.headers.items()) if exc.headers else {}, exc.read())
