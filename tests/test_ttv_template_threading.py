@@ -44,6 +44,20 @@ def _posterior_artifact(signal=None, impact_parameter=0.47, q1=0.64, q2=0.2):
         "signal": signal,
         "scientific_status": "exploratory-native-cadence-inference",
         "validation_eligible": False,
+        "parameter_names": [
+            "rp_rs",
+            "log_rho_star",
+            "impact_parameter",
+            "baseline",
+            "log_jitter",
+            "q1",
+            "q2",
+        ],
+        "ephemeris": {
+            "period_days": 2.0,
+            "epoch_btjd": 0.5,
+            "source": "candidate-config",
+        },
         "posterior": {
             "impact_parameter": {"median": impact_parameter},
             "q1": {"median": q1},
@@ -227,3 +241,64 @@ def test_ttv_recomputes_summary_fields_and_rejects_tampered_timing_data(tmp_path
     with pytest.raises(RuntimeError, match="oc_minutes\\[0\\] must be finite"):
         run_ttv_analysis(workspace)
     assert not (workspace.path / "outputs" / "ttv_analysis_results.json").exists()
+
+
+def test_ttv_rejects_stale_fitted_ephemeris(tmp_path, monkeypatch):
+    workspace = create_candidate(tmp_path, "ttv-template-stale-ephemeris")
+    stale = _posterior_artifact()
+    stale["ephemeris"]["period_days"] = 2.5
+    _write_transit_fit(workspace, stale)
+    table, ephemeris, stellar = _ttv_inputs()
+    _patch_ttv_inputs(monkeypatch, table, ephemeris, stellar)
+
+    with pytest.raises(RuntimeError, match="stale fitted period_days"):
+        run_ttv_analysis(workspace)
+    assert not (workspace.path / "outputs" / "ttv_analysis_results.json").exists()
+
+
+def test_ttv_rejects_eccentric_posterior_template(tmp_path, monkeypatch):
+    workspace = create_candidate(tmp_path, "ttv-template-eccentric")
+    eccentric = _posterior_artifact()
+    eccentric["parameter_names"] = eccentric["parameter_names"] + ["sqe_cosw", "sqe_sinw"]
+    _write_transit_fit(workspace, eccentric)
+    table, ephemeris, stellar = _ttv_inputs()
+    _patch_ttv_inputs(monkeypatch, table, ephemeris, stellar)
+
+    with pytest.raises(RuntimeError, match="eccentric fit"):
+        run_ttv_analysis(workspace)
+    assert not (workspace.path / "outputs" / "ttv_analysis_results.json").exists()
+
+
+def test_ttv_rejects_missing_parameter_names_contract(tmp_path, monkeypatch):
+    workspace = create_candidate(tmp_path, "ttv-template-missing-names")
+    incomplete = _posterior_artifact()
+    incomplete.pop("parameter_names")
+    _write_transit_fit(workspace, incomplete)
+    table, ephemeris, stellar = _ttv_inputs()
+    _patch_ttv_inputs(monkeypatch, table, ephemeris, stellar)
+
+    with pytest.raises(RuntimeError, match="parameter_names contract"):
+        run_ttv_analysis(workspace)
+    assert not (workspace.path / "outputs" / "ttv_analysis_results.json").exists()
+
+
+def test_ttv_accepts_nested_sampling_template_with_provenance(tmp_path, monkeypatch):
+    workspace = create_candidate(tmp_path, "ttv-template-nested")
+    artifact_path = _write_transit_fit(
+        workspace, {**_posterior_artifact(), "work_package": "NESTED_TRANSIT_FIT"}
+    )
+    table, ephemeris, stellar = _ttv_inputs()
+    _patch_ttv_inputs(monkeypatch, table, ephemeris, stellar)
+    monkeypatch.setattr(
+        "exonym.ttv.transit_timing_analysis", lambda *_args, **_kwargs: _empty_timing_analysis()
+    )
+
+    output_path = run_ttv_analysis(workspace)
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert payload["input_provenance"]["transit_fit_artifact"]["path"] == (
+        "outputs/mcmc_transit_fit.json"
+    )
+    assert payload["timing"]["template"]["artifact"]["sha256"] == hashlib.sha256(
+        artifact_path.read_bytes()
+    ).hexdigest()

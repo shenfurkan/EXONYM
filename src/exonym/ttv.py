@@ -668,7 +668,29 @@ def fit_weighted_linear_ephemeris(
             "chi_square": None,
             "degrees_of_freedom": None,
             "reduced_chi_square": None,
-            "uncertainty_interpretation": "not available because the weighted fit was singular",
+                "uncertainty_interpretation": "not available because the weighted fit was singular",
+        }
+
+    coefficient_variances = np.diag(covariance)
+    if (
+        not np.all(np.isfinite(coefficients))
+        or not np.all(np.isfinite(coefficient_variances))
+        or np.any(coefficient_variances < 0.0)
+    ):
+        return {
+            "status": "not-fit-invalid-covariance",
+            "method": "weighted-linear-least-squares",
+            "n_transits_used": int(epochs.size),
+            "reference_epoch": reference_epoch,
+            "reference_epoch_btjd": None,
+            "reference_epoch_uncertainty_days": None,
+            "period_days": None,
+            "period_uncertainty_days": None,
+            "covariance_reference_epoch_period_days2": None,
+            "chi_square": None,
+            "degrees_of_freedom": None,
+            "reduced_chi_square": None,
+            "uncertainty_interpretation": "not available because the formal covariance was invalid",
         }
 
     fitted_btjd = design @ coefficients
@@ -769,7 +791,34 @@ def fit_weighted_quadratic_ephemeris(
             "chi_square": None,
             "degrees_of_freedom": None,
             "reduced_chi_square": None,
-            "uncertainty_interpretation": "not available because the weighted fit was singular",
+                "uncertainty_interpretation": "not available because the weighted fit was singular",
+        }
+
+    coefficient_variances = np.diag(covariance)
+    if (
+        not np.all(np.isfinite(coefficients))
+        or not np.all(np.isfinite(coefficient_variances))
+        or np.any(coefficient_variances < 0.0)
+    ):
+        return {
+            "status": "not-fit-invalid-covariance",
+            "method": "weighted-quadratic-least-squares",
+            "n_transits_used": int(epochs.size),
+            "reference_epoch": reference_epoch,
+            "reference_epoch_btjd": None,
+            "reference_epoch_uncertainty_days": None,
+            "period_days": None,
+            "period_uncertainty_days": None,
+            "quadratic_coefficient_days_per_epoch2": None,
+            "quadratic_coefficient_uncertainty_days_per_epoch2": None,
+            "period_change_per_epoch_days": None,
+            "period_change_per_epoch_uncertainty_days": None,
+            "covariance_matrix_days2": None,
+            "covariance_parameter_order": None,
+            "chi_square": None,
+            "degrees_of_freedom": None,
+            "reduced_chi_square": None,
+            "uncertainty_interpretation": "not available because the formal covariance was invalid",
         }
 
     fitted_btjd = design @ coefficients

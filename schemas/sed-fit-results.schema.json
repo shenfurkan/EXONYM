@@ -22,7 +22,7 @@
     "photometry": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/photometry-row"}},
     "fit_quality": {"type": "object", "minProperties": 1, "additionalProperties": true},
     "metadata": {"type": "object", "additionalProperties": true},
-    "mist_main_sequence_check": {"$ref": "#/$defs/mist-check"},
+    "mist_main_sequence_check": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/mist-check"}]},
     "caveats": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
   },
   "$defs": {

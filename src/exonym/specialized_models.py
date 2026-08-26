@@ -659,20 +659,33 @@ def _run_terminator_asymmetry_adapter(
     module_name: str,
     distribution: str,
     output_prefix: str,
+    required_interface: Optional[str],
 ) -> AdapterRun:
     """Run one pinned external terminator-asymmetry adapter.
 
-    A supported package version must expose ``model_terminator_asymmetry`` with
-    keyword arguments for the declared time series, geometry, and asymmetric
-    radius ratios. It must return a mapping containing cadence-aligned finite
-    ``model_flux`` values. Unknown package APIs fail closed as unavailable
-    rather than being guessed at runtime.
+    A supported package version must expose ``required_interface`` with keyword
+    arguments for the declared time series, geometry, and asymmetric radius
+    ratios. It must return a mapping containing cadence-aligned finite
+    ``model_flux`` values. Unknown or unverified package APIs fail closed as
+    unavailable rather than being guessed at runtime.
     """
     input_path, payload = _read_input(
         workspace, ASYMMETRIC_TRANSIT_INPUT, "asymmetric-transit-hypothesis.schema.json"
     )
     source_artifacts = _validate_asymmetric_transit_applicability(workspace, payload)
     started_at = datetime.now(timezone.utc).isoformat()
+    if required_interface is None:
+        return _unavailable_run(
+            workspace,
+            engine,
+            input_path,
+            started_at,
+            "model-contract-unverified",
+            (
+                "{0} has no verified terminator-asymmetry model contract in this "
+                "repository; no hypothesis test was written.".format(distribution)
+            ),
+        )
     try:
         runtime, runtime_report = _resolve_runtime(module_name, distribution)
     except LookupError as exc:
@@ -698,7 +711,7 @@ def _run_terminator_asymmetry_adapter(
             {"code": "module-import-failed", "message": str(exc)},
         )
         return AdapterRun("failed", manifest_path, None)
-    model = getattr(module, "model_terminator_asymmetry", None)
+    model = getattr(module, required_interface, None)
     if not callable(model):
         _clear_partial_run_outputs(run_dir)
         return _unavailable_run(
@@ -707,8 +720,8 @@ def _run_terminator_asymmetry_adapter(
             input_path,
             started_at,
             "unsupported-interface",
-            "{0} must expose callable model_terminator_asymmetry; no hypothesis test was written.".format(
-                distribution
+            "{0} must expose callable {1}; no hypothesis test was written.".format(
+                distribution, required_interface
             ),
             runtime,
             run_id,
@@ -825,15 +838,23 @@ def run_catwoman(workspace: CandidateWorkspace) -> AdapterRun:
         "catwoman",
         "catwoman",
         CATWOMAN_OUTPUT_PREFIX,
+        "model_terminator_asymmetry",
     )
 
 
 def run_squishyplanet(workspace: CandidateWorkspace) -> AdapterRun:
-    """Run the candidate-owned SquishyPlanet terminator-asymmetry diagnostic."""
+    """Run the candidate-owned terminator-asymmetry diagnostic, fail-closed.
+
+    SquishyPlanet's declared model scope does not currently include a verified
+    terminator-asymmetry contract in this repository. Until a supported
+    interface is confirmed and pinned, every invocation is recorded as
+    unavailable without importing or calling the package.
+    """
     return _run_terminator_asymmetry_adapter(
         workspace,
         SQUISHYPLANET_ENGINE,
         "squishyplanet",
         "squishyplanet",
         SQUISHYPLANET_OUTPUT_PREFIX,
+        None,
     )

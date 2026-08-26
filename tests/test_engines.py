@@ -11,8 +11,10 @@ from exonym.engines import (
     check_engine,
     get_engine,
     iter_engines,
+    run_engine,
 )
 from exonym.__main__ import main
+from exonym.workspace import create_candidate
 
 
 def test_iter_engines_returns_all_catalog_entries():
@@ -109,3 +111,35 @@ def test_cli_engine_check_failure(capsys):
     assert ret == 1
     captured = capsys.readouterr()
     assert "Unknown engine" in captured.out
+
+
+def test_run_engine_forwards_ttv_keyword_arguments(tmp_path, monkeypatch):
+    workspace = create_candidate(tmp_path, "engine-ttv-kwargs")
+    output = workspace.path / "outputs" / "ttv_analysis_results.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("{}\n", encoding="utf-8")
+    captured = {}
+
+    def fake_ttv(candidate, signal=None, **kwargs):
+        captured["signal"] = signal
+        captured.update(kwargs)
+        return output
+
+    monkeypatch.setattr("exonym.ttv.run_ttv_analysis", fake_ttv)
+
+    manifest = run_engine(
+        workspace,
+        "ttv",
+        signal=".01",
+        ephemeris_model="quadratic",
+        fit_orbital_decay=True,
+    )
+
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    assert captured == {
+        "signal": ".01",
+        "ephemeris_model": "quadratic",
+        "fit_orbital_decay": True,
+    }
+    assert payload["engine"] == "ttv"
+    assert payload["status"] == "succeeded"

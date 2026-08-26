@@ -286,11 +286,15 @@ All commands accept the global form `exonym [--root <repository-root>] <command>
 | `asteroseismology <candidate-id>` | `--numax-min`, `--numax-max` | Writes `outputs/asteroseismic_results.json`. |
 | `localization <candidate-id>` | `--search-radius` | Writes `outputs/prf_localization_results.json` from pixel-depth and Gaussian-template screening. |
 | `sed <candidate-id>` | None | Writes `outputs/sed_fit_results.json` and an MCMC chain array. |
-| `fit <candidate-id>` | `--n-samples`, `--eccentric`, `--signal`, `--detrending-method` | Writes `outputs/mcmc_transit_fit.json` and an MCMC chain array. The default chain length is 5000 samples. |
+| `fit <candidate-id>` | `--n-samples`, `--eccentric`, `--signal`, `--detrending-method` | Writes `outputs/mcmc_transit_fit.json` and an MCMC chain array. The default chain length is 2500 samples; autocorrelation-based early stopping and the recorded convergence diagnostics govern posterior adequacy, not the raw count. |
 | `phasecurve <candidate-id>` | None | Writes `outputs/phase_curve_results.json`. |
 | `ttv <candidate-id>` | `--signal`, `--fit-orbital-decay` | Writes `outputs/ttv_analysis_results.json` and may create a timing diagram. The optional derivative is a formal diagnostic, not evidence for orbital decay. |
 | `activity <candidate-id>` | None | Writes `outputs/stellar_activity_results.json`. |
 | `dilution <candidate-id>` | None | Writes `outputs/dilution_sensitivity_results.json` using supplied or previously archived neighbor information. |
+| `planetsynth <candidate-id>` | None | Opt-in giant-planet cooling interpretation from candidate-owned `data/external/planetsynth_characterization.json`. Writes an engine-run manifest plus `outputs/planetsynth_interpretation.<run>.json` on success; descriptive only. |
+| `pyppluss <candidate-id>` | None | Tests one declared ringed or oblate anomalous-transit hypothesis from `data/external/anomalous_transit_hypothesis.json`. The report compares a single fixed hypothesis and is never a validation result. |
+| `catwoman <candidate-id>` | None | Fixed-hypothesis terminator-asymmetry comparison through the optional Catwoman adapter. Fails closed as unavailable unless the installed package exposes the verified model contract. |
+| `squishyplanet <candidate-id>` | None | Currently fails closed (`model-contract-unverified`) until a verified SquishyPlanet terminator-asymmetry contract exists; no backend call is attempted. |
 
 ## Scientific methods and interpretation
 

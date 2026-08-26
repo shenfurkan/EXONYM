@@ -1811,6 +1811,26 @@ def test_posterior_summaries_report_inclination_geometry_clipping(monkeypatch):
     assert summaries["inclination_deg"]["conjunction_distance_clip_fraction"] == pytest.approx(0.5)
 
 
+def test_posterior_summaries_vectorize_kipping_limb_darkening_exactly(monkeypatch):
+    from exonym.lightcurve import kipping_to_quadratic_limb_darkening
+    from exonym.transit_fit import _initial_fit_parameters, _posterior_summaries
+
+    monkeypatch.setattr(
+        "exonym.transit_fit.batman_transit_flux",
+        lambda time, *_args, **_kwargs: np.ones_like(time),
+    )
+    q1, q2 = 0.64, 0.20
+    chain = np.tile(_initial_fit_parameters(1200.0, 1.0, 1e-4, eccentric=False), (8, 1))
+    chain[:, 5] = q1
+    chain[:, 6] = q2
+
+    summaries = _posterior_summaries(chain, {"period_days": 3.2}, eccentric=False)
+
+    expected_u1, expected_u2 = kipping_to_quadratic_limb_darkening(q1, q2)
+    assert summaries["u1"]["median"] == pytest.approx(expected_u1)
+    assert summaries["u2"]["median"] == pytest.approx(expected_u2)
+
+
 def test_transit_fit_fails_loudly_when_batman_is_unavailable(tmp_path, monkeypatch):
     from exonym.transit_fit import run_mcmc_transit_fit
     from exonym.workspace import create_candidate
@@ -2459,6 +2479,20 @@ def test_ttv_rejects_low_snr_epochs_and_persists_epoch_diagnostics(tmp_path, mon
                 "work_package": "MCMC_TRANSIT_FIT",
                 "source": "candidate-data",
                 "signal": None,
+                "parameter_names": [
+                    "rp_rs",
+                    "log_rho_star",
+                    "impact_parameter",
+                    "baseline",
+                    "log_jitter",
+                    "q1",
+                    "q2",
+                ],
+                "ephemeris": {
+                    "period_days": 1.0,
+                    "epoch_btjd": 1.0,
+                    "source": "candidate-config",
+                },
                 "posterior": {
                     "impact_parameter": {"median": 0.3},
                     "q1": {"median": 0.3},
@@ -2656,6 +2690,25 @@ def test_activity_recovers_rotation_period():
     )
     assert reconciliation["status"] == "harmonic-reconciled"
     assert reconciliation["periods_days"] == pytest.approx([5.0, 5.0])
+
+
+def test_top_window_peaks_exclude_nonpositive_frequencies():
+    from exonym.activity import _top_window_peaks
+
+    frequency = np.array([-0.2, 0.0, 0.1, 0.25, 0.4])
+    power = np.array([50.0, 40.0, 10.0, 30.0, 5.0])
+
+    peaks = _top_window_peaks(frequency, power, frequency_resolution_days_inverse=0.05)
+
+    assert [peak["frequency_days_inverse"] for peak in peaks] == [0.25]
+    assert all(peak["frequency_days_inverse"] > 0.0 for peak in peaks)
+
+    monotonic_power = np.array([90.0, 80.0, 7.0, 8.0, 9.0])
+    fallback_peaks = _top_window_peaks(
+        frequency, monotonic_power, frequency_resolution_days_inverse=0.05
+    )
+
+    assert [peak["frequency_days_inverse"] for peak in fallback_peaks] == [0.4]
 
 
 def test_activity_does_not_mask_with_a_synthetic_ephemeris(tmp_path, monkeypatch):

@@ -67,6 +67,20 @@ def test_ttv_signal_suffix(tmp_path):
                     "work_package": "MCMC_TRANSIT_FIT",
                     "source": "candidate-data",
                     "signal": signal,
+                    "parameter_names": [
+                        "rp_rs",
+                        "log_rho_star",
+                        "impact_parameter",
+                        "baseline",
+                        "log_jitter",
+                        "q1",
+                        "q2",
+                    ],
+                    "ephemeris": {
+                        "period_days": 3.0,
+                        "epoch_btjd": 1.0,
+                        "source": "candidate-config",
+                    },
                     "posterior": {
                         "impact_parameter": {"median": 0.3},
                         "q1": {"median": 0.3},

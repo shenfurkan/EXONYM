@@ -1806,6 +1806,48 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
                 ):
                     report.add(record_path, "schema-violation", "{0} requires a successful matching engine manifest".format(label))
                     continue
+                if instance.get("engine") is not None and instance.get("engine") != engine:
+                    report.add(
+                        record_path,
+                        "schema-violation",
+                        "{0} engine does not match its engine-run directory".format(label),
+                    )
+                raw_result_artifact = instance.get(raw_artifact_field)
+                if (
+                    isinstance(raw_result_artifact, dict)
+                    and isinstance(raw_result_artifact.get("path"), str)
+                    and not raw_result_artifact["path"].startswith(
+                        "runs/{0}/{1}/".format(engine, run_id)
+                    )
+                ):
+                    report.add(
+                        record_path,
+                        "schema-violation",
+                        "{0} raw result must live under its own engine run directory".format(label),
+                    )
+                runtime_report = instance.get("runtime")
+                manifest_runtime = manifest.get("runtime")
+                if not isinstance(manifest_runtime, dict):
+                    manifest_runtime = {}
+                if (
+                    isinstance(runtime_report, dict)
+                    and runtime_report.get("package") is not None
+                    and runtime_report.get("package") != engine
+                ):
+                    report.add(
+                        record_path,
+                        "schema-violation",
+                        "{0} runtime package does not match its engine".format(label),
+                    )
+                if (
+                    isinstance(runtime_report, dict)
+                    and runtime_report.get("version") != manifest_runtime.get("version")
+                ):
+                    report.add(
+                        record_path,
+                        "schema-violation",
+                        "{0} runtime version does not match its engine manifest".format(label),
+                    )
                 output_path = record_path.relative_to(workspace_dir).as_posix()
                 output_hash = _file_sha256(record_path)
                 if not any(

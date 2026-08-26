@@ -12,7 +12,7 @@ import pytest
 from exonym.__main__ import main
 from exonym.isolation import IsolationReport
 from exonym.schemas import validate_schemas
-from exonym.specialized_models import run_planetsynth, run_pyppluss
+from exonym.specialized_models import run_catwoman, run_planetsynth, run_pyppluss, run_squishyplanet
 from exonym.workspace import create_candidate
 
 
@@ -252,3 +252,66 @@ def test_cli_invalid_specialized_input_exits_without_a_run(tmp_path):
 
     assert exc_info.value.code == 2
     assert not (workspace.path / "runs" / "planetsynth").exists()
+
+
+def test_squishyplanet_fails_closed_without_unverified_backend_call(tmp_path, monkeypatch):
+    workspace = create_candidate(tmp_path, "squishyplanet-contract-unverified")
+    input_path = _write_input(
+        workspace, "asymmetric_transit_hypothesis.json", {"placeholder": True}
+    )
+    monkeypatch.setattr(
+        "exonym.specialized_models._read_input",
+        lambda *_args: (input_path, {"candidate_id": workspace.candidate_id}),
+    )
+    monkeypatch.setattr(
+        "exonym.specialized_models._validate_asymmetric_transit_applicability",
+        lambda *_args: [],
+    )
+    monkeypatch.setattr(
+        "exonym.specialized_models._resolve_runtime",
+        lambda *args: pytest.fail("runtime resolution must not run without a verified contract"),
+    )
+    monkeypatch.setattr(
+        "exonym.specialized_models._run_in_directory",
+        lambda *args, **kwargs: pytest.fail(
+            "no backend call may be attempted without a verified contract"
+        ),
+    )
+
+    result = run_squishyplanet(workspace)
+
+    assert result.status == "unavailable"
+    assert result.report_path is None
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["failure"]["code"] == "model-contract-unverified"
+    assert manifest["outputs"] == []
+    assert not list(
+        (workspace.path / "outputs").glob("squishyplanet_terminator_asymmetry_test.*.json")
+    )
+
+
+def test_catwoman_unsupported_interface_records_required_contract(tmp_path, monkeypatch):
+    workspace = create_candidate(tmp_path, "catwoman-unsupported-interface")
+    input_path = _write_input(
+        workspace, "asymmetric_transit_hypothesis.json", {"placeholder": True}
+    )
+    monkeypatch.setattr(
+        "exonym.specialized_models._read_input",
+        lambda *_args: (input_path, {"candidate_id": workspace.candidate_id}),
+    )
+    monkeypatch.setattr(
+        "exonym.specialized_models._validate_asymmetric_transit_applicability",
+        lambda *_args: [],
+    )
+    monkeypatch.setattr(
+        "exonym.specialized_models._resolve_runtime", lambda *args: _runtime("catwoman")
+    )
+    monkeypatch.setitem(sys.modules, "catwoman", types.ModuleType("catwoman"))
+
+    result = run_catwoman(workspace)
+
+    assert result.status == "unavailable"
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["failure"]["code"] == "unsupported-interface"
+    assert "model_terminator_asymmetry" in manifest["failure"]["message"]
+    assert not list((workspace.path / "outputs").glob("catwoman_terminator_asymmetry_test.*.json"))

@@ -193,7 +193,12 @@ def _build_parser() -> argparse.ArgumentParser:
     survey_auto_vet_parser.add_argument("--all", action="store_true", help="Process every registered candidate workspace.")
     survey_auto_vet_parser.add_argument("--sectors", nargs="+", type=int, default=None)
     survey_auto_vet_parser.add_argument("--n-draws", type=int, default=2000)
-    survey_auto_vet_parser.add_argument("--fit-samples", type=int, default=5000)
+    survey_auto_vet_parser.add_argument(
+        "--fit-samples",
+        type=int,
+        default=2500,
+        help="Production steps forwarded to the transit fit; convergence diagnostics govern adequacy.",
+    )
     survey_auto_vet_parser.add_argument("--no-download", action="store_true")
     survey_loop_parser = survey_commands.add_parser(
         "run-loop", help="Run bounded harvest and candidate-local vetting cycles; never reports a validation claim."
@@ -214,7 +219,12 @@ def _build_parser() -> argparse.ArgumentParser:
     survey_loop_parser.add_argument("--timeout", type=float, default=20.0)
     survey_loop_parser.add_argument("--freshness-hours", type=float, default=24.0)
     survey_loop_parser.add_argument("--n-draws", type=int, default=2000)
-    survey_loop_parser.add_argument("--fit-samples", type=int, default=5000)
+    survey_loop_parser.add_argument(
+        "--fit-samples",
+        type=int,
+        default=2500,
+        help="Production steps forwarded to the transit fit; convergence diagnostics govern adequacy.",
+    )
 
     engine_parser = commands.add_parser(
         "engine", help="Inspect and validate analytical and vetting engines."
@@ -511,8 +521,8 @@ def _build_parser() -> argparse.ArgumentParser:
     fit_parser.add_argument(
         "--n-samples",
         type=int,
-        default=5000,
-        help="Emcee production steps per walker; dynesty uses this to scale initial live points.",
+        default=2500,
+        help="Emcee production steps per walker; dynesty uses this to scale initial live points. Convergence diagnostics govern adequacy.",
     )
     fit_parser.add_argument(
         "--detrending-method",

@@ -42,6 +42,11 @@ def _repo(tmp_path):
         "anomalous-transit-hypothesis.schema.json",
         "planetsynth-interpretation.schema.json",
         "pyppluss-hypothesis-test.schema.json",
+        "asymmetric-transit-hypothesis.schema.json",
+        "terminator-asymmetry-test.schema.json",
+        "mist-main-sequence-input.schema.json",
+        "sed-fit-results.schema.json",
+        "ttv-analysis.schema.json",
         "statistical-vetting-evidence.schema.json",
         "decisive-rejection.schema.json",
         "catalog-query-manifest.schema.json",
@@ -563,6 +568,29 @@ def test_cli_phasecurve_command(tmp_path, capsys):
         main(root + ["phasecurve", "candidate-alpha"])
     assert exc_info.value.code == 2
     assert not (repo / "candidate" / "candidate-alpha" / "outputs" / "phase_curve_results.json").exists()
+
+
+def test_cli_parser_accepts_ttv_decay_and_specialized_commands():
+    parser = _build_parser()
+
+    args = parser.parse_args(["ttv", "candidate-x", "--signal", ".01", "--fit-orbital-decay"])
+    assert args.candidate_id == "candidate-x"
+    assert args.signal == ".01"
+    assert args.fit_orbital_decay is True
+
+    assert parser.parse_args(["fit", "candidate-x"]).n_samples == 2500
+    assert (
+        parser.parse_args(["survey", "auto-vet", "candidate-x"]).fit_samples
+        == 2500
+    )
+    assert (
+        parser.parse_args(["survey", "run-loop", "loop-1", "--source", "https://example.invalid"]).fit_samples
+        == 2500
+    )
+
+    for command in ("planetsynth", "pyppluss", "catwoman", "squishyplanet"):
+        parsed = parser.parse_args([command, "candidate-x"])
+        assert parsed.candidate_id == "candidate-x"
 
 
 def test_cli_ttv_requires_observed_candidate_photometry(tmp_path):

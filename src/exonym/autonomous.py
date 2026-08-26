@@ -156,7 +156,7 @@ def auto_vet_candidate(
     candidate: CandidateWorkspace,
     sectors: Optional[Sequence[int]] = None,
     n_draws: int = 500,
-    fit_samples: int = 5000,
+    fit_samples: int = 2500,
     download: bool = True,
 ) -> Path:
     """Run a bounded evidence chain and write an engine-run manifest.

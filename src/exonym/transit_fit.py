@@ -1945,7 +1945,7 @@ def _mcmc_convergence_diagnostics(
 
 def run_mcmc_transit_fit(
     workspace: CandidateWorkspace,
-    n_samples: int = 5000,
+    n_samples: int = 2500,
     eccentric: bool = False,
     n_walkers: Optional[int] = None,
     burn_in: Optional[int] = None,
@@ -1979,7 +1979,7 @@ def run_mcmc_transit_fit(
     workspace : CandidateWorkspace
         The candidate workspace.
     n_samples : int, optional
-        Number of production MCMC steps per walker (default 5000).
+        Number of production MCMC steps per walker (default 2500).
     eccentric : bool, optional
         Whether to fit eccentric orbit components (default False).
     n_walkers : int, optional
@@ -2117,6 +2117,8 @@ def run_mcmc_transit_fit(
     rng = np.random.default_rng(seed=seed)
 
     if resume is None:
+        _resume_done = False
+
         def valid_walker_start(candidate_theta: np.ndarray) -> bool:
             return math.isfinite(
                 _neg_log_posterior(
