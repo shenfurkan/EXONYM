@@ -275,7 +275,6 @@ def _extract_tar_safe(archive_path: Path, target_dir: Path) -> None:
     """Extract a gzip tarball after rejecting traversal, links, and devices."""
     target_resolved = target_dir.resolve()
     with tarfile.open(archive_path, "r:gz") as archive:
-        validated = []
         for member in archive.getmembers():
             if member.islnk() or member.issym():
                 raise RuntimeError("checkpoint archive contains link members")
@@ -288,13 +287,15 @@ def _extract_tar_safe(archive_path: Path, target_dir: Path) -> None:
             destination = (target_dir / name).resolve()
             if not str(destination).startswith(str(target_resolved)):
                 raise RuntimeError("path traversal detected in checkpoint archive: {0}".format(name))
-            validated.append(member)
-        extract_kwargs: Dict[str, Any] = {"path": str(target_dir), "members": validated}
-        # NUMERICAL_GUARD / CVE-2007-4559: prefer the stdlib data filter when
-        # available (Python >= 3.12); the manual validation above covers 3.9-3.11.
-        if hasattr(tarfile, "data_filter"):
-            extract_kwargs["filter"] = "data"
-        archive.extractall(**extract_kwargs)  # nosec B202
+            if member.isdir():
+                destination.mkdir(parents=True, exist_ok=True)
+            elif member.isfile():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                source_handle = archive.extractfile(member)
+                if source_handle is None:
+                    raise RuntimeError("failed to read member data: {0}".format(name))
+                with source_handle, destination.open("wb") as target_handle:
+                    shutil.copyfileobj(source_handle, target_handle)
 
 
 def _append_audit_record(
