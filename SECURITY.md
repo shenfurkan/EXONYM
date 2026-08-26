@@ -34,7 +34,11 @@ or data under `candidate/`.
    this scan automatically.
 8. If archive-extraction code is added, it must reject absolute member paths,
    traversal, symlinks, and reserved names.
-9. Install `.[security]` before local security checks. CI runs Bandit, isolated
+9. Workspace checkpoint restore must verify the archive hash before modifying
+   mutable state, reject traversal/link/device members, exclude raw FITS and
+   append-only provenance, and use atomic replacement. A checkpoint is not a
+   release or a way to bypass lifecycle gates.
+10. Install `.[security]` before local security checks. CI runs Bandit, isolated
    Semgrep, and a full-history Gitleaks scan on every push and pull request.
 
 ## Research Isolation

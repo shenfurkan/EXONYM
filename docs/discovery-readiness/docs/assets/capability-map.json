@@ -4,11 +4,11 @@
     {"name": "candidate records and provenance", "status": "strong"},
     {"name": "TOI-free novelty policy", "status": "partial"},
     {"name": "blind-search calibration", "status": "partial"},
-    {"name": "injection-recovery", "status": "partial"},
-    {"name": "programmatic data validation", "status": "partial"},
+    {"name": "injection-recovery", "status": "candidate-level-only"},
+    {"name": "programmatic data validation", "status": "operational-structure-only"},
     {"name": "calibrated source localization", "status": "partial"},
     {"name": "scene-aware statistical validation", "status": "partial"},
     {"name": "follow-up evidence ingestion", "status": "partial"},
-    {"name": "reproducible release replay", "status": "partial"}
+    {"name": "reproducible release replay", "status": "offline-integrity-replay"}
   ]
 }

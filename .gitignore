@@ -1,6 +1,5 @@
-# -----------------------------------------------------------------------------
-# 1. PYTHON CACHES & BUILD ARTIFACTS
-# -----------------------------------------------------------------------------
+# BUILD ARTIFACTS
+
 __pycache__/
 *.py[cod]
 *$py.class
@@ -30,9 +29,7 @@ htmlcov/
 .hypothesis/
 .ipynb_checkpoints/
 
-# -----------------------------------------------------------------------------
-# 2. HEAVY ASTRONOMY DATA FORMATS (GLOBAL GUARD)
-# -----------------------------------------------------------------------------
+#ASTRONOMY DATA FORMAT
 *.fits
 *.fit
 *.fts
@@ -41,17 +38,12 @@ htmlcov/
 *.parquet
 *.feather
 
-# -----------------------------------------------------------------------------
-# 3. CANDIDATE WORKSPACES & LOCAL PAYLOADS
-# -----------------------------------------------------------------------------
+
+# CANDIDATE WORKSPACES & LOCAL PAYLOADS
 candidate/*
 !candidate/.gitkeep
 
-# -----------------------------------------------------------------------------
-# 4. DOCUMENTATION AND HOST-LOCAL ARTIFACTS
-# -----------------------------------------------------------------------------
-# Keep project-local documentation private; the public README and the bundled
-# runtime templates required by installed wheels are deliberate exceptions.
+# DOCUMENTATION AND HOST
 docs/
 *.md
 !/README.md
@@ -62,9 +54,9 @@ docs/
 !/src/exonym/_resources/templates/**/*.md
 .txt
 
-# -----------------------------------------------------------------------------
-# 5. LOCAL WORKSPACE & AI SKILLS
-# -----------------------------------------------------------------------------
+
+#LOCAL WORKSPACE
+
 methods/
 literature/
 resources/
@@ -73,19 +65,12 @@ textbooks/
 **/textbooks/
 paper/
 
-
-# -----------------------------------------------------------------------------
 # 6. INGESTION STAGING, TEMP & LOG FILES
-# -----------------------------------------------------------------------------
 exonym-ingest-*/
 .ingest-staging/
 *.tmp
 *.log
 *.bak
-
-# -----------------------------------------------------------------------------
-# 7. OS, EDITORS & AI AGENT ARTIFACTS
-# -----------------------------------------------------------------------------
 .DS_Store
 Thumbs.db
 desktop.ini

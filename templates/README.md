@@ -40,3 +40,8 @@ advancement.
 Lifecycle state `stopped` also disables `exonym advance`. Use
 `exonym set-state <candidate-id> --state active --reason "<why work is resuming>"`
 before retrying the current gate.
+
+The tracking template may mention a workspace checkpoint, but checkpoints are
+operational recovery snapshots, not lifecycle or scientific evidence. Fit
+sampler checkpoints and engine/automation manifests must remain separately
+identified in candidate-local records.

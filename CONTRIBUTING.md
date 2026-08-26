@@ -10,10 +10,10 @@ Read `AGENTS.md` before changing source, schemas, templates, tests, workflow gat
 
 ## Development checks
 
-Add deterministic regression coverage for changed behavior. Use focused tests for the affected modules rather than the full suite during normal development. Run source isolation and schema checks after shared changes. Review optional dependencies and licenses before adding an external engine.
+Add deterministic regression coverage for changed behavior. Use focused tests for the affected modules rather than the full suite during normal development. Editorial-only changes do not require pytest, but target-neutral documentation and agent-rule changes must be checked for identifier leaks. Run source isolation and schema checks after shared changes. Review optional dependencies and licenses before adding an external engine.
 
 Do not use an exploratory diagnostic as a validation claim. New scientific artifacts must state their inputs, units, assumptions, uncertainty treatment, applicability limits, and candidate-owned provenance.
 
 ## Pull requests
 
-Describe the behavioral change, affected artifact contracts, and test coverage. Keep unrelated formatting or refactoring out of the same change. Do not include candidate payloads, secrets, or private paths.
+Describe the behavioral change, affected artifact contracts, documentation/skill contracts, and test coverage. Keep unrelated formatting or refactoring out of the same change. Because `AGENTS.md`, `docs/`, and `.agents/` are ignored by broad repository rules, inspect their contents directly and include explicit file-level evidence in the handoff. Do not include candidate payloads, secrets, or private paths.
