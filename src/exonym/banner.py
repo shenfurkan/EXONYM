@@ -443,7 +443,7 @@ def run_banner(skip: bool = False) -> None:
             stdout.flush()
 
             frame_idx += 1
-            time.sleep(0.04)
+            time.sleep(0.08)
 
             # Safety cap (~10 s) so headless-but-TTY sessions cannot spin forever.
             if frame_idx >= _FRAME_COUNT * 8:
