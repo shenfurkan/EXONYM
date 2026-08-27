@@ -119,40 +119,31 @@ The step-by-step walkthrough below demonstrates an independent candidate discove
 ```bash
 exonym init <candidate-id> --tic <tic> --mission tess
 ```
-<details>
-<summary>📸 View terminal output</summary>
 
 <p align="center">
   <img src="./images/tic-150428135_01_init.png" alt="exonym init output" width="750">
 </p>
-</details>
 
 ### 2. Inspect workspace & verify repository isolation
 ```bash
 exonym status <candidate-id>
 exonym verify --source
 ```
-<details>
-<summary>📸 View terminal output</summary>
 
 <p align="center">
   <img src="./images/tic-150428135_02_status.png" alt="exonym status output" width="750">
   <br><br>
   <img src="./images/tic-150428135_03_verify.png" alt="exonym verify output" width="750">
 </p>
-</details>
 
 ### 3. Ingest SPOC light curves & target-pixel files
 ```bash
 exonym ingest <candidate-id> --products both --sectors <sector>
 ```
-<details>
-<summary>📸 View terminal output</summary>
 
 <p align="center">
   <img src="./images/tic-150428135_04_ingest.png" alt="exonym ingest output" width="750">
 </p>
-</details>
 
 ### 4. Search transit signal (BLS & TLS engines)
 ```bash
@@ -162,15 +153,12 @@ exonym search <candidate-id> --engine bls
 # Native-cadence Transit Least Squares (TLS) engine
 exonym search <candidate-id> --engine tls
 ```
-<details>
-<summary>📸 View terminal output</summary>
 
 <p align="center">
   <img src="./images/tic-150428135_05_search_bls.png" alt="exonym search bls output" width="750">
   <br><br>
   <img src="./images/tic-150428135_06_search_tls.png" alt="exonym search tls output" width="750">
 </p>
-</details>
 
 ### 5. Track QVG telemetry & advance workflow phase
 ```bash
@@ -180,15 +168,12 @@ exonym track <candidate-id>
 # Validate gate requirements and advance phase
 exonym advance <candidate-id>
 ```
-<details>
-<summary>📸 View terminal output</summary>
 
 <p align="center">
   <img src="./images/tic-150428135_07_track.png" alt="exonym track output" width="750">
   <br><br>
   <img src="./images/tic-150428135_08_advance.png" alt="exonym advance output" width="750">
 </p>
-</details>
 
 `exonym advance` checks whether the required records and checklist items are present, not whether the science is sound. Check a box only after the candidate evidence supports it, and write caveats in the relevant candidate document.
 
