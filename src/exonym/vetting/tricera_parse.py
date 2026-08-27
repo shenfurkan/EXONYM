@@ -369,7 +369,27 @@ def run_triceratops_simulation(
         from ..statistical_vetting import require_vetting_readiness
 
         require_vetting_readiness(workspace, signal=signal)
-        observed_input = _prepare_observed_transit_input(workspace, signal)
+        try:
+            observed_input = _prepare_observed_transit_input(workspace, signal)
+        except (KeyError, TypeError, ValueError, RuntimeError, OSError) as exc:
+            # The observed-input contract is part of execution, not a
+            # scientific disposition. Keep the candidate unresolved and
+            # replace a stale ``ready`` record with an explicit failure.
+            write_triceratops_vetting_decision(
+                workspace,
+                signal=signal,
+                execution_status="failed",
+                triage_status=_existing_vetting_decision().get("triage_status", "not-run"),
+                result_status="unresolved",
+                fpp=None,
+                nfpp=None,
+                blocking_reasons=[],
+                error={
+                    "code": "triceratops-observed-input-failed",
+                    "message": "{0}: {1}".format(type(exc).__name__, exc),
+                },
+            )
+            raise
 
     period, depth_ppm, duration_hrs, ephemeris_source = 2.50, 1250.0, 2.85, "defaults"
     if observed_input is not None:

@@ -790,10 +790,16 @@ def _calibrated_localization_veto_reason(workspace: CandidateWorkspace) -> Optio
 def require_vetting_readiness(workspace: CandidateWorkspace, signal: Optional[str] = None) -> Path:
     """Allow Monte Carlo past review warnings, but stop for concrete vetos."""
     signal = validate_signal_suffix(signal)
+    existing_triage = _load_object(workspace.path / "decisions" / "automated_triage.json")
+    existing_triage_status = (
+        existing_triage.get("status")
+        if isinstance(existing_triage, dict)
+        else "not-run"
+    )
     rejection = _load_object(workspace.path / "decisions" / "decisive_rejection.json")
     if rejection is not None and rejection.get("candidate_id") == workspace.candidate_id and rejection.get("status") == "decisive-rejection":
         write_triceratops_vetting_decision(
-            workspace, signal=signal, execution_status="blocked", triage_status="not-run",
+            workspace, signal=signal, execution_status="blocked", triage_status=existing_triage_status,
             blocking_reasons=["candidate-local decisive rejection record exists"],
             input_artifacts=[artifact for artifact in [_artifact(workspace, workspace.path / "decisions" / "decisive_rejection.json")] if artifact],
         )
@@ -802,7 +808,7 @@ def require_vetting_readiness(workspace: CandidateWorkspace, signal: Optional[st
         _require_real_data_prerequisites(workspace, signal)
     except RuntimeError as exc:
         write_triceratops_vetting_decision(
-            workspace, signal=signal, execution_status="blocked", triage_status="not-run",
+            workspace, signal=signal, execution_status="blocked", triage_status=existing_triage_status,
             blocking_reasons=[str(exc)], input_artifacts=_decision_input_artifacts(workspace, signal),
         )
         raise
