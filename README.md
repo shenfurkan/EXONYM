@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="./assets/clianimation.gif" alt="EXONYM CLI" width="800">
+  <img src="assets/clianimation.gif" alt="EXONYM CLI" width="800">
   <br><br>
   <p>
     <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg" alt="Python 3.9+"></a>
@@ -59,7 +59,7 @@ This decoupled design supports auditing and tracing each recorded conclusion bac
 | Reproducibility release | Release bundles carry a full candidate evidence snapshot, frozen source, an exact-version dependency closure, a content manifest, and a detached manifest digest. Their offline replay check does not re-run scientific engines or remote services. |
 
 <p align="center">
-  <img src="./images/logo.png" alt="EXONYM Logo" width="220">
+  <img src="images/logo.png" alt="EXONYM Logo" width="220">
 </p>
 
 <h3 align="center">Why the name EXONYM?</h3>
@@ -110,7 +110,7 @@ Networked operations need access to their upstream services (SPOC light curve re
 ## First discovery run
 
 <p align="center">
-  <img src="./images/phase_folded_lc.png" alt="EXONYM Phase-Folded Transit Detection" width="750">
+  <img src="images/phase_folded_lc.png" alt="EXONYM Phase-Folded Transit Detection" width="750">
 </p>
 
 The step-by-step walkthrough below demonstrates an independent candidate discovery run from initialization to phase advancement:
@@ -119,31 +119,40 @@ The step-by-step walkthrough below demonstrates an independent candidate discove
 ```bash
 exonym init <candidate-id> --tic <tic> --mission tess
 ```
+<details>
+<summary>📸 View terminal output</summary>
 
 <p align="center">
-  <img src="./images/tic-150428135_01_init.png" alt="exonym init output" width="750">
+  <img src="images/tic-150428135_01_init.png" alt="exonym init output" width="750">
 </p>
+</details>
 
 ### 2. Inspect workspace & verify repository isolation
 ```bash
 exonym status <candidate-id>
 exonym verify --source
 ```
+<details>
+<summary>📸 View terminal output</summary>
 
 <p align="center">
-  <img src="./images/tic-150428135_02_status.png" alt="exonym status output" width="750">
+  <img src="images/tic-150428135_02_status.png" alt="exonym status output" width="750">
   <br><br>
-  <img src="./images/tic-150428135_03_verify.png" alt="exonym verify output" width="750">
+  <img src="images/tic-150428135_03_verify.png" alt="exonym verify output" width="750">
 </p>
+</details>
 
 ### 3. Ingest SPOC light curves & target-pixel files
 ```bash
 exonym ingest <candidate-id> --products both --sectors <sector>
 ```
+<details>
+<summary>📸 View terminal output</summary>
 
 <p align="center">
-  <img src="./images/tic-150428135_04_ingest.png" alt="exonym ingest output" width="750">
+  <img src="images/tic-150428135_04_ingest.png" alt="exonym ingest output" width="750">
 </p>
+</details>
 
 ### 4. Search transit signal (BLS & TLS engines)
 ```bash
@@ -153,12 +162,15 @@ exonym search <candidate-id> --engine bls
 # Native-cadence Transit Least Squares (TLS) engine
 exonym search <candidate-id> --engine tls
 ```
+<details>
+<summary>📸 View terminal output</summary>
 
 <p align="center">
-  <img src="./images/tic-150428135_05_search_bls.png" alt="exonym search bls output" width="750">
+  <img src="images/tic-150428135_05_search_bls.png" alt="exonym search bls output" width="750">
   <br><br>
-  <img src="./images/tic-150428135_06_search_tls.png" alt="exonym search tls output" width="750">
+  <img src="images/tic-150428135_06_search_tls.png" alt="exonym search tls output" width="750">
 </p>
+</details>
 
 ### 5. Track QVG telemetry & advance workflow phase
 ```bash
@@ -168,12 +180,15 @@ exonym track <candidate-id>
 # Validate gate requirements and advance phase
 exonym advance <candidate-id>
 ```
+<details>
+<summary>📸 View terminal output</summary>
 
 <p align="center">
-  <img src="./images/tic-150428135_07_track.png" alt="exonym track output" width="750">
+  <img src="images/tic-150428135_07_track.png" alt="exonym track output" width="750">
   <br><br>
-  <img src="./images/tic-150428135_08_advance.png" alt="exonym advance output" width="750">
+  <img src="images/tic-150428135_08_advance.png" alt="exonym advance output" width="750">
 </p>
+</details>
 
 `exonym advance` checks whether the required records and checklist items are present, not whether the science is sound. Check a box only after the candidate evidence supports it, and write caveats in the relevant candidate document.
 
