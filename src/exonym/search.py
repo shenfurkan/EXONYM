@@ -112,6 +112,12 @@ from .lightcurve import phase_hours
 from .workspace import CandidateWorkspace, validate_signal_suffix
 
 
+# RESOURCE_GUARD: Long gaps between TESS sectors can make Astropy's natural
+# baseline-duration grid computationally unbounded. The explicit fallback in
+# ``find_transits`` keeps the scan deterministic and candidate-local.
+MAX_BLS_PERIOD_TRIALS = 20000
+
+
 @dataclass
 class BLSSearchResult:
     """Standardized result container for periodic transit searches.
@@ -361,6 +367,18 @@ def _baseline_aware_frequency_factor(
     return min(1.0, max(1e-4, natural_trials / float(requested_minimum_trials)))
 
 
+def _natural_bls_period_trials(
+    time: np.ndarray, period_min: float, period_max: float, duration_days: float
+) -> int:
+    """Return the natural Astropy BLS grid size for resource gating."""
+    baseline_days = float(np.ptp(time))
+    if not np.isfinite(baseline_days) or baseline_days <= 0:
+        raise ValueError("BLS requires observations spanning a positive time baseline")
+    natural_step = duration_days / (baseline_days * baseline_days)
+    frequency_span = 1.0 / period_min - 1.0 / period_max
+    return max(2, int(np.ceil(frequency_span / natural_step)) + 1)
+
+
 def _distinct_transit_events(
     time: np.ndarray, period: float, epoch: float, duration_hours: float
 ) -> int:
@@ -519,22 +537,44 @@ def find_transits(
     if not np.isfinite(duration_days) or duration_days <= 0:
         raise ValueError("duration_hours must be positive and finite")
     errors = _uncertainties_for_bls(values, raw_errors)
-    frequency_factor = _baseline_aware_frequency_factor(
-        time, period_min, period_max, duration_days, n_periods
+    natural_trials = _natural_bls_period_trials(
+        time, period_min, period_max, duration_days
     )
+    bls = BoxLeastSquares(time, values, dy=errors)
     # Build weighted BLS periodogram via Astropy's C-optimised "fast" solver.
     # ``objective="likelihood"`` uses the chi-squared-based statistic for which
     # the formal depth uncertainty is well-defined (see Astropy BLS docs).
     # ``minimum_n_transit=2`` guards against single-event false positives.
-    periodogram = BoxLeastSquares(time, values, dy=errors).autopower(
-        duration_days,
-        objective="likelihood",
-        method="fast",
-        minimum_n_transit=2,
-        minimum_period=period_min,
-        maximum_period=period_max,
-        frequency_factor=frequency_factor,
-    )
+    if natural_trials <= MAX_BLS_PERIOD_TRIALS:
+        frequency_factor = _baseline_aware_frequency_factor(
+            time, period_min, period_max, duration_days, n_periods
+        )
+        periodogram = bls.autopower(
+            duration_days,
+            objective="likelihood",
+            method="fast",
+            minimum_n_transit=2,
+            minimum_period=period_min,
+            maximum_period=period_max,
+            frequency_factor=frequency_factor,
+        )
+    else:
+        # RESOURCE_GUARD: use an explicit frequency grid when the natural
+        # baseline-duration grid would exceed the bounded trial budget. The
+        # selected resolution is recorded by ``n_period_trials`` and remains
+        # a ranking search, never a validation or completeness claim.
+        frequencies = np.linspace(
+            1.0 / period_max,
+            1.0 / period_min,
+            MAX_BLS_PERIOD_TRIALS,
+            dtype=float,
+        )
+        periodogram = bls.power(
+            1.0 / frequencies,
+            duration_days,
+            objective="likelihood",
+            method="fast",
+        )
     # NUMERICAL_GUARD: require positive finite depth and depth_err; negative
     # depths are unphysical and infinite errors indicate degenerate fits.
     valid = (
