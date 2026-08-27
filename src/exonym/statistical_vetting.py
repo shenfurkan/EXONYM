@@ -42,6 +42,8 @@ DIAGNOSTIC_NAMES = (
 # candidate-owned RV series to human review; it never establishes a companion
 # or a scientific claim.
 RV_REVIEW_DELTA_BIC = 10.0
+TRICERATOPS_SCREENING_SIGMA_THRESHOLD = 3.0
+TRICERATOPS_VETTING_DECISION_FILENAME = "triceratops_vetting_decision.json"
 
 
 def _sha256(path: Path) -> str:
@@ -71,6 +73,56 @@ def _artifact(workspace: CandidateWorkspace, path: Path) -> Optional[Dict[str, s
         "path": path.relative_to(workspace.path).as_posix(),
         "sha256": _sha256(path),
     }
+
+
+def write_triceratops_vetting_decision(
+    workspace: CandidateWorkspace,
+    *,
+    signal: Optional[str],
+    execution_status: str,
+    triage_status: str,
+    result_status: str = "unresolved",
+    fpp: Optional[float] = None,
+    nfpp: Optional[float] = None,
+    blocking_reasons: Optional[List[str]] = None,
+    error: Optional[Dict[str, str]] = None,
+    input_artifacts: Optional[List[Dict[str, str]]] = None,
+    triceratops_report: Optional[Dict[str, str]] = None,
+) -> Path:
+    """Persist the candidate-local execution decision without changing claims."""
+    if execution_status not in {"ready", "blocked", "succeeded", "failed", "unavailable"}:
+        raise ValueError("invalid TRICERATOPS execution status")
+    if triage_status not in {"pass", "review-required", "blocked", "not-run"}:
+        raise ValueError("invalid TRICERATOPS triage status")
+    if result_status not in {"unresolved", "review-required", "fpp-pass", "fpp-fail"}:
+        raise ValueError("invalid TRICERATOPS result status")
+    for value, name in ((fpp, "FPP"), (nfpp, "NFPP")):
+        if value is not None and _finite_number(value) is None:
+            raise ValueError("{0} must be finite when recorded".format(name))
+    path = workspace.path / "decisions" / TRICERATOPS_VETTING_DECISION_FILENAME
+    previous = _load_object(path) or {}
+    payload = {
+        "schema_version": 1,
+        "candidate_id": workspace.candidate_id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "signal": signal,
+        "execution_status": execution_status,
+        "triage_status": triage_status,
+        "result_status": result_status,
+        "FPP": fpp,
+        "NFPP": nfpp,
+        "blocking_reasons": list(blocking_reasons or []),
+        "error": error,
+        "input_artifacts": list(input_artifacts) if input_artifacts is not None else previous.get("input_artifacts", []),
+        "triceratops_report": triceratops_report,
+        "claim_eligible": False,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    return path
 
 
 def _record(
@@ -204,7 +256,14 @@ def _screening_record(workspace: CandidateWorkspace, signal: Optional[str]) -> D
         or abs(half_significance) >= threshold
         or abs(alternating_significance) >= threshold
     ):
-        status, reason = "review-required", "Odd-even screening is unresolved or secondary eclipse detected."
+        review_reasons = []
+        if consistent is not True:
+            review_reasons.append("odd-even depths are inconsistent")
+        if abs(half_significance) >= threshold:
+            review_reasons.append("half-phase control is significant")
+        if abs(alternating_significance) >= threshold:
+            review_reasons.append("doubled-period/alternating-event control is significant")
+        status, reason = "review-required", "Screening requires review: " + "; ".join(review_reasons) + "."
     else:
         status, reason = "pass", "Odd-even depths are consistent at the recorded diagnostic threshold."
     return _record(
@@ -633,21 +692,12 @@ def _has_detected_hash_bound_bls_result(
 
 
 def _require_real_data_prerequisites(workspace: CandidateWorkspace, signal: Optional[str]) -> None:
-    """Require the ordered candidate-data outputs that must precede TRICERATOPS."""
+    """Require only the hash-bound photometric inputs consumed by TRICERATOPS."""
     suffix = ".{0}".format(signal.lstrip(".")) if signal else ""
     required = (
         ("search", Path("outputs") / "bls_search_results{0}.json".format(suffix), "source", "candidate-data"),
         ("search manifest", Path("outputs") / "bls_search_manifest{0}.json".format(suffix), "source", "candidate-data"),
         ("screen", Path("outputs") / "fixed_ephemeris_screen{0}.json".format(suffix), "source", "candidate-data"),
-        ("archive", Path("outputs") / "archival_vetting_report.json", "candidate_id", workspace.candidate_id),
-        ("localization", Path("outputs") / "prf_localization_results.json", "source", "candidate-data"),
-        ("activity", Path("outputs") / "stellar_activity_results.json", "source", "candidate-data"),
-        ("asteroseismology", Path("outputs") / "asteroseismic_results.json", "source", "candidate-data"),
-        ("SED", Path("outputs") / "sed_fit_results.json", "source", "candidate-data"),
-        ("dilution", Path("outputs") / "dilution_sensitivity_results.json", "source", "candidate-data"),
-        ("transit fit", Path("outputs") / "mcmc_transit_fit{0}.json".format(suffix), "source", "candidate-data"),
-        ("timing", Path("outputs") / "ttv_analysis_results{0}.json".format(suffix), "source", "candidate-data"),
-        ("phase curve", Path("outputs") / "phase_curve_results.json", "source", "candidate-data"),
     )
     candidate_root = workspace.path.resolve()
     missing: List[str] = []
@@ -662,9 +712,11 @@ def _require_real_data_prerequisites(workspace: CandidateWorkspace, signal: Opti
         if (
             data is None
             or data.get(field) != expected
-            or (name == "timing" and data.get("candidate_id") != workspace.candidate_id)
         ):
             missing.append(name)
+    tic = workspace.metadata.get("identifiers", {}).get("tic")
+    if not isinstance(tic, str) or not tic.isdigit() or int(tic) <= 0:
+        missing.append("numeric TIC identifier")
     if not _has_detected_hash_bound_bls_result(workspace, signal):
         missing.append("detected hash-bound BLS search")
     if missing:
@@ -675,30 +727,115 @@ def _require_real_data_prerequisites(workspace: CandidateWorkspace, signal: Opti
         )
 
 
+def _diagnostic(evidence: Dict[str, Any], name: str) -> Optional[Dict[str, Any]]:
+    diagnostics = evidence.get("diagnostics")
+    if not isinstance(diagnostics, list):
+        return None
+    return next(
+        (record for record in diagnostics if isinstance(record, dict) and record.get("name") == name),
+        None,
+    )
+
+
+def _decision_input_artifacts(workspace: CandidateWorkspace, signal: Optional[str]) -> List[Dict[str, str]]:
+    suffix = ".{0}".format(signal.lstrip(".")) if signal else ""
+    paths = (
+        workspace.path / "outputs" / "bls_search_results{0}.json".format(suffix),
+        workspace.path / "outputs" / "bls_search_manifest{0}.json".format(suffix),
+        workspace.path / "outputs" / "fixed_ephemeris_screen{0}.json".format(suffix),
+        workspace.path / "outputs" / "statistical_vetting_evidence{0}.json".format(suffix),
+        workspace.path / "decisions" / "automated_triage.json",
+    )
+    return [artifact for path in paths if (artifact := _artifact(workspace, path)) is not None]
+
+
+def _screening_veto_reasons(workspace: CandidateWorkspace, evidence: Dict[str, Any]) -> List[str]:
+    screening = _diagnostic(evidence, "screening")
+    artifact = screening.get("artifact") if isinstance(screening, dict) else None
+    path = workspace.path / artifact["path"] if isinstance(artifact, dict) and isinstance(artifact.get("path"), str) else None
+    data = _load_object(path) if path is not None else None
+    screen = data.get("screen") if isinstance(data, dict) else None
+    odd_even = screen.get("odd_even") if isinstance(screen, dict) else None
+    half_phase = screen.get("half_phase_control") if isinstance(screen, dict) else None
+    odd_even_z = _finite_number(odd_even.get("z")) if isinstance(odd_even, dict) else None
+    half_phase_sigma = _finite_number(half_phase.get("depth_significance_sigma")) if isinstance(half_phase, dict) else None
+    reasons: List[str] = []
+    if odd_even_z is None:
+        reasons.append("screening odd-even significance is missing or non-finite")
+    elif abs(odd_even_z) >= TRICERATOPS_SCREENING_SIGMA_THRESHOLD:
+        reasons.append("abs(odd_even_z) >= {0:.1f} sigma".format(TRICERATOPS_SCREENING_SIGMA_THRESHOLD))
+    if half_phase_sigma is None:
+        reasons.append("screening half-phase significance is missing or non-finite")
+    elif abs(half_phase_sigma) >= TRICERATOPS_SCREENING_SIGMA_THRESHOLD:
+        reasons.append("abs(half_phase_significance) >= {0:.1f} sigma".format(TRICERATOPS_SCREENING_SIGMA_THRESHOLD))
+    return reasons
+
+
+def _calibrated_localization_veto_reason(workspace: CandidateWorkspace) -> Optional[str]:
+    """Apply source-assignment veto only to an interpretable calibrated report.
+
+    The shipped localizer currently emits ``uncalibrated`` reports, which are
+    intentionally warnings only. This branch is retained for a future retained
+    calibration product; it does not promote the current PRF heuristic.
+    """
+    data = _load_object(workspace.path / "outputs" / "prf_localization_results.json")
+    summary = data.get("summary") if isinstance(data, dict) else None
+    ratio = _finite_number(summary.get("median_target_to_other_difference_ratio")) if isinstance(summary, dict) else None
+    interpretable = summary.get("source_assignment_interpretable") if isinstance(summary, dict) else None
+    if data and data.get("calibration_status") == "calibrated" and interpretable is True and ratio is not None and ratio <= 1.0:
+        return "calibrated interpretable localization has target_to_max_other_difference_ratio <= 1.0"
+    return None
+
+
 def require_vetting_readiness(workspace: CandidateWorkspace, signal: Optional[str] = None) -> Path:
-    """Stop before Monte Carlo unless all required diagnostics pass automated routing."""
+    """Allow Monte Carlo past review warnings, but stop for concrete vetos."""
     signal = validate_signal_suffix(signal)
     rejection = _load_object(workspace.path / "decisions" / "decisive_rejection.json")
     if rejection is not None and rejection.get("candidate_id") == workspace.candidate_id and rejection.get("status") == "decisive-rejection":
+        write_triceratops_vetting_decision(
+            workspace, signal=signal, execution_status="blocked", triage_status="not-run",
+            blocking_reasons=["candidate-local decisive rejection record exists"],
+            input_artifacts=[artifact for artifact in [_artifact(workspace, workspace.path / "decisions" / "decisive_rejection.json")] if artifact],
+        )
         raise RuntimeError("TRICERATOPS is prohibited by the candidate-local decisive rejection record.")
-    # Preserve a candidate-local blocked evidence record even when the command
-    # cannot proceed. This report does not run an engine or create a claim.
+    try:
+        _require_real_data_prerequisites(workspace, signal)
+    except RuntimeError as exc:
+        write_triceratops_vetting_decision(
+            workspace, signal=signal, execution_status="blocked", triage_status="not-run",
+            blocking_reasons=[str(exc)], input_artifacts=_decision_input_artifacts(workspace, signal),
+        )
+        raise
+
     evidence_path = build_statistical_vetting_evidence(workspace, signal=signal)
-    # Establish candidate-data provenance before automated triage. Otherwise a
-    # malformed or synthetic artifact could alter the routed decision before the
-    # real-data gate rejects it.
-    _require_real_data_prerequisites(workspace, signal)
-    # Keep the human-visible automated triage decision synchronized with the
-    # candidate-data evidence that passed the prerequisite gate. The import is
-    # local to avoid a module cycle because ``triage`` itself builds evidence.
     from .engines import run_automated_triage
 
-    run_automated_triage(workspace, signal=signal)
+    triage_path = run_automated_triage(workspace, signal=signal)
     evidence = _load_object(evidence_path)
-    if evidence is None or evidence.get("status") != "pass":
-        status = evidence.get("status") if evidence else "blocked"
-        raise RuntimeError(
-            "TRICERATOPS requires passing candidate-local statistical vetting evidence; current routing is {0}.".format(status)
+    triage = _load_object(triage_path)
+    triage_status = triage.get("status") if isinstance(triage, dict) else "blocked"
+    reasons: List[str] = []
+    if evidence is None:
+        reasons.append("statistical vetting evidence is missing or unreadable")
+    else:
+        blocked = [record.get("name", "unknown") for record in evidence.get("diagnostics", []) if isinstance(record, dict) and record.get("status") == "blocked"]
+        if blocked:
+            reasons.append("blocked diagnostic evidence: {0}".format(", ".join(str(name) for name in blocked)))
+        reasons.extend(_screening_veto_reasons(workspace, evidence))
+    if triage_status == "blocked" and not reasons:
+        reasons.append("automated triage is blocked")
+    localization_reason = _calibrated_localization_veto_reason(workspace)
+    if localization_reason:
+        reasons.append(localization_reason)
+    if reasons:
+        write_triceratops_vetting_decision(
+            workspace, signal=signal, execution_status="blocked", triage_status=triage_status,
+            blocking_reasons=reasons, input_artifacts=_decision_input_artifacts(workspace, signal),
         )
-    _require_real_data_prerequisites(workspace, signal)
+        raise RuntimeError("TRICERATOPS readiness veto: {0}.".format("; ".join(reasons)))
+    write_triceratops_vetting_decision(
+        workspace, signal=signal, execution_status="ready", triage_status=triage_status,
+        result_status="review-required" if triage_status == "review-required" else "unresolved",
+        input_artifacts=_decision_input_artifacts(workspace, signal),
+    )
     return evidence_path

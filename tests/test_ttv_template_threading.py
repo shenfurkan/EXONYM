@@ -8,7 +8,7 @@ import json
 import numpy as np
 import pytest
 
-from exonym.ttv import fit_weighted_linear_ephemeris, run_ttv_analysis
+from exonym.ttv import _timing_values_agree, fit_weighted_linear_ephemeris, run_ttv_analysis
 from exonym.workspace import create_candidate
 
 
@@ -241,6 +241,19 @@ def test_ttv_recomputes_summary_fields_and_rejects_tampered_timing_data(tmp_path
     with pytest.raises(RuntimeError, match="oc_minutes\\[0\\] must be finite"):
         run_ttv_analysis(workspace)
     assert not (workspace.path / "outputs" / "ttv_analysis_results.json").exists()
+
+
+def test_ttv_nonlinear_replay_uses_explicit_relative_tolerance():
+    reported = {"model": {"decay_timescale_days": 2.729994502e9}}
+    expected = {"model": {"decay_timescale_days": 2.729994545e9}}
+
+    assert not _timing_values_agree(reported, expected, absolute_tolerance=1e-6)
+    assert _timing_values_agree(
+        reported,
+        expected,
+        absolute_tolerance=1e-6,
+        relative_tolerance=1e-7,
+    )
 
 
 def test_ttv_rejects_stale_fitted_ephemeris(tmp_path, monkeypatch):

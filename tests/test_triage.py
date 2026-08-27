@@ -546,6 +546,7 @@ def test_statistical_vetting_requires_review_for_alternating_events(tmp_path: Pa
 
     screening = next(record for record in evidence["diagnostics"] if record["name"] == "screening")
     assert screening["status"] == "review-required"
+    assert "doubled-period/alternating-event control" in screening["reason"]
 
     screen["screen"]["half_phase_control"]["depth_significance_sigma"] = 0.1
     screen["screen"]["double_period_hypothesis"]["alternating_event"][
@@ -823,14 +824,12 @@ def test_statistical_vetting_blocks_activity_alias_triage_without_screening_ephe
     assert evidence["status"] == "blocked"
 
 
-def test_vetting_readiness_refuses_review_required_evidence_without_claims(tmp_path: Path):
+def test_vetting_readiness_allows_review_required_evidence_without_claims(tmp_path: Path):
     from exonym.statistical_vetting import require_vetting_readiness
 
     candidate_path = _setup_synthetic_workspace(tmp_path, "synth-vet-review")
     cand = load_candidate(tmp_path, "synth-vet-review")
-    run_engine(cand, "screen")
     _write_passing_pre_vetting_artifacts(candidate_path, cand.candidate_id)
-    _write_remaining_real_data_prerequisites(candidate_path)
     localization = candidate_path / "outputs" / "prf_localization_results.json"
     localization.write_text(
         json.dumps(
@@ -843,12 +842,69 @@ def test_vetting_readiness_refuses_review_required_evidence_without_claims(tmp_p
         encoding="utf-8",
     )
 
-    with pytest.raises(RuntimeError, match="current routing is review-required"):
-        require_vetting_readiness(cand)
+    evidence_path = require_vetting_readiness(cand)
 
     triage = json.loads((candidate_path / "decisions" / "automated_triage.json").read_text(encoding="utf-8"))
     assert triage["status"] == "review-required"
+    decision = json.loads((candidate_path / "decisions" / "triceratops_vetting_decision.json").read_text(encoding="utf-8"))
+    assert evidence_path.is_file()
+    assert decision["execution_status"] == "ready"
+    assert decision["triage_status"] == "review-required"
+    assert decision["claim_eligible"] is False
     assert not list((candidate_path / "claims").glob("*.json"))
+
+
+@pytest.mark.parametrize("half_phase_sigma", (3.0, -3.0, 7.5, -7.5))
+def test_vetting_readiness_blocks_signed_half_phase_anomalies(tmp_path: Path, half_phase_sigma: float):
+    from exonym.statistical_vetting import require_vetting_readiness
+
+    candidate_path = _setup_synthetic_workspace(tmp_path, "synth-vet-half-phase")
+    candidate = load_candidate(tmp_path, "synth-vet-half-phase")
+    _write_passing_pre_vetting_artifacts(candidate_path, candidate.candidate_id)
+    screen_path = candidate_path / "outputs" / "fixed_ephemeris_screen.json"
+    screen = json.loads(screen_path.read_text(encoding="utf-8"))
+    screen["screen"]["half_phase_control"]["depth_significance_sigma"] = half_phase_sigma
+    screen_path.write_text(json.dumps(screen), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="abs\\(half_phase_significance\\)"):
+        require_vetting_readiness(candidate)
+
+    decision = json.loads((candidate_path / "decisions" / "triceratops_vetting_decision.json").read_text(encoding="utf-8"))
+    assert decision["execution_status"] == "blocked"
+    assert any("abs(half_phase_significance)" in reason for reason in decision["blocking_reasons"])
+
+
+def test_vetting_readiness_blocks_odd_even_mismatch(tmp_path: Path):
+    from exonym.statistical_vetting import require_vetting_readiness
+
+    candidate_path = _setup_synthetic_workspace(tmp_path, "synth-vet-odd-even")
+    candidate = load_candidate(tmp_path, "synth-vet-odd-even")
+    _write_passing_pre_vetting_artifacts(candidate_path, candidate.candidate_id)
+    screen_path = candidate_path / "outputs" / "fixed_ephemeris_screen.json"
+    screen = json.loads(screen_path.read_text(encoding="utf-8"))
+    screen["screen"]["odd_even"]["z"] = -3.0
+    screen_path.write_text(json.dumps(screen), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="abs\\(odd_even_z\\)"):
+        require_vetting_readiness(candidate)
+
+
+def test_calibrated_localization_ratio_is_a_veto_but_uncalibrated_is_not(tmp_path: Path):
+    from exonym.statistical_vetting import _calibrated_localization_veto_reason
+
+    candidate_path = _setup_synthetic_workspace(tmp_path, "synth-vet-localization")
+    candidate = load_candidate(tmp_path, "synth-vet-localization")
+    _write_passing_pre_vetting_artifacts(candidate_path, candidate.candidate_id)
+    localization_path = candidate_path / "outputs" / "prf_localization_results.json"
+    localization = json.loads(localization_path.read_text(encoding="utf-8"))
+    localization["summary"]["median_target_to_other_difference_ratio"] = 0.5
+    localization["summary"]["source_assignment_interpretable"] = True
+    localization_path.write_text(json.dumps(localization), encoding="utf-8")
+
+    assert _calibrated_localization_veto_reason(candidate) is None
+    localization["calibration_status"] = "calibrated"
+    localization_path.write_text(json.dumps(localization), encoding="utf-8")
+    assert "ratio <= 1.0" in _calibrated_localization_veto_reason(candidate)
 
 
 def test_vetting_readiness_requires_all_real_data_prerequisites(tmp_path: Path):
@@ -862,6 +918,10 @@ def test_vetting_readiness_requires_all_real_data_prerequisites(tmp_path: Path):
 
     with pytest.raises(RuntimeError, match="real candidate-data prerequisite outputs: search"):
         require_vetting_readiness(cand)
+
+    decision = json.loads((candidate_path / "decisions" / "triceratops_vetting_decision.json").read_text(encoding="utf-8"))
+    assert decision["execution_status"] == "blocked"
+    assert "search" in decision["blocking_reasons"][0]
 
 
 def test_vetting_readiness_rejects_a_non_detection_bls_artifact(tmp_path: Path):
@@ -911,6 +971,10 @@ def test_decisive_rejection_prohibits_triceratops(tmp_path: Path):
 
     with pytest.raises(RuntimeError, match="decisive rejection"):
         require_vetting_readiness(cand)
+
+    decision = json.loads((candidate_path / "decisions" / "triceratops_vetting_decision.json").read_text(encoding="utf-8"))
+    assert decision["execution_status"] == "blocked"
+    assert decision["triage_status"] == "not-run"
 
 
 def test_decisive_rejection_rejects_evidence_outside_the_candidate_workspace(tmp_path: Path):

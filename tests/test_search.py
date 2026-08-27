@@ -214,6 +214,55 @@ def test_find_transits_tls_uses_native_cadence_uncertainties(monkeypatch):
     assert result["sde"] == 9.0
 
 
+def test_find_transits_tls_rejects_backend_period_outside_requested_range(monkeypatch):
+    class FakeModel:
+        def power(self, **_kwargs):
+            return types.SimpleNamespace(
+                period=1.2,
+                T0=1.0,
+                depth=0.999,
+                duration=0.125,
+                SDE=9.0,
+            )
+
+    def fake_tls(_time, _flux, _flux_err, verbose):
+        assert verbose is False
+        return FakeModel()
+
+    fake_module = types.ModuleType("transitleastsquares")
+    fake_module.transitleastsquares = fake_tls
+    monkeypatch.setitem(sys.modules, "transitleastsquares", fake_module)
+
+    time = np.linspace(0.0, 20.0, 100)
+    flux = np.ones_like(time)
+    flux_err = np.full_like(time, 0.001)
+    with pytest.raises(RuntimeError, match="outside the requested search interval"):
+        find_transits_tls(time, flux, flux_err, period_min=0.5, period_max=0.8)
+
+
+def test_find_transits_tls_rejects_backend_period_grid_expansion(monkeypatch):
+    class FakeModel:
+        def power(self, **_kwargs):
+            raise AssertionError("TLS power must not run after grid expansion")
+
+    def fake_tls(_time, _flux, _flux_err, verbose):
+        assert verbose is False
+        return FakeModel()
+
+    fake_module = types.ModuleType("transitleastsquares")
+    fake_module.transitleastsquares = fake_tls
+    fake_grid = types.ModuleType("transitleastsquares.grid")
+    fake_grid.period_grid = lambda **_kwargs: np.array([0.6, 14.0])
+    monkeypatch.setitem(sys.modules, "transitleastsquares", fake_module)
+    monkeypatch.setitem(sys.modules, "transitleastsquares.grid", fake_grid)
+
+    time = np.linspace(0.0, 20.0, 100)
+    flux = np.ones_like(time)
+    flux_err = np.full_like(time, 0.001)
+    with pytest.raises(RuntimeError, match="expanded the requested period interval"):
+        find_transits_tls(time, flux, flux_err, period_min=0.5, period_max=0.8)
+
+
 def test_run_bls_on_candidate_requires_real_photometry(tmp_path):
     workspace = create_candidate(tmp_path, "candidate-test-bls")
 

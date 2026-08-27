@@ -541,12 +541,17 @@ def _mist_main_sequence_check(
             "interpretation": "Candidate stellar parameters fall outside the frozen MIST main-sequence grid; no nearest-grid fallback was used.",
         }
     try:
-        predicted = {}
-        for band, column in MIST_ABSOLUTE_MAGNITUDE_COLUMNS.items():
-            interpolated = np.asarray(LinearNDInterpolator(points, grid[column])(target), dtype=float)
-            if interpolated.size != 1:
-                raise RuntimeError("frozen MIST grid interpolation returned an invalid scalar shape")
-            predicted[band] = float(interpolated.reshape(-1)[0])
+        bands = tuple(MIST_ABSOLUTE_MAGNITUDE_COLUMNS)
+        values = np.column_stack(
+            [grid[MIST_ABSOLUTE_MAGNITUDE_COLUMNS[band]] for band in bands]
+        )
+        interpolated = np.asarray(LinearNDInterpolator(points, values)(target), dtype=float)
+        if interpolated.size != len(bands):
+            raise RuntimeError("frozen MIST grid interpolation returned an invalid vector shape")
+        predicted = {
+            band: float(value)
+            for band, value in zip(bands, interpolated.reshape(-1))
+        }
     except Exception as exc:
         raise RuntimeError("frozen MIST grid cannot interpolate the declared stellar parameters: {0}".format(exc)) from exc
     if not all(math.isfinite(value) for value in predicted.values()):

@@ -352,6 +352,15 @@ def run_triceratops_simulation(
     tic_str = workspace.metadata.get("identifiers", {}).get("tic")
     tic_id = int(tic_str) if tic_str and str(tic_str).isdigit() else None
     observed_input: Optional[Dict[str, Any]] = None
+    from ..statistical_vetting import write_triceratops_vetting_decision
+
+    def _existing_vetting_decision() -> Dict[str, Any]:
+        path = workspace.path / "decisions" / "triceratops_vetting_decision.json"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
     if tic_id is not None:
         # The public function is also an API entry point. Enforce the same
@@ -413,6 +422,7 @@ def run_triceratops_simulation(
     scenarios: Dict[str, float] = {}
     source = "not-run"
     triceratops_error: Optional[str] = None
+    triceratops_exception_type: Optional[str] = None
     backend: Optional[Dict[str, str]] = None
     scene_artifacts = []
 
@@ -497,12 +507,27 @@ def run_triceratops_simulation(
             nfpp = float("nan")
             scenarios = {}
             triceratops_error = "{0}: {1}".format(type(exc).__name__, exc)
+            triceratops_exception_type = type(exc).__name__
             warnings.warn(
                 "TRICERATOPS Monte Carlo failed: {0!r}. "
                 "FPP will be marked UNVALIDATED.".format(exc),
                 stacklevel=2,
             )
             source = "triceratops-failed-UNVALIDATED"
+
+    if source in ("not-run", "triceratops-failed-UNVALIDATED"):
+        unavailable = source == "not-run" or triceratops_exception_type in {
+            "ImportError", "ModuleNotFoundError", "PackageNotFoundError",
+        }
+        failure = triceratops_error or "TRICERATOPS could not run because no numeric TIC identifier is available."
+        write_triceratops_vetting_decision(
+            workspace,
+            signal=signal,
+            execution_status="unavailable" if unavailable else "failed",
+            triage_status=_existing_vetting_decision().get("triage_status", "not-run"),
+            blocking_reasons=[],
+            error={"code": "triceratops-unavailable" if unavailable else "triceratops-runtime-failed", "message": failure},
+        )
 
     # Raise before writing any files when the Monte Carlo was not run and the
     # caller has not explicitly opted in to an unvalidated fallback.
@@ -546,5 +571,30 @@ def run_triceratops_simulation(
     suffix = f".{signal.lstrip('.')}" if signal else ""
     report_path = outputs_dir / f"triceratops_report{suffix}.json"
     report_path.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+
+    if source == "triceratops-monte-carlo":
+        passes = fpp_rounded is not None and nfpp_rounded is not None and fpp_rounded < FPP_THRESHOLD and nfpp_rounded < NFPP_THRESHOLD
+        previous = _existing_vetting_decision()
+        triage_status = previous.get("triage_status", "not-run")
+        write_triceratops_vetting_decision(
+            workspace,
+            signal=signal,
+            execution_status="succeeded",
+            triage_status=triage_status,
+            result_status=("review-required" if passes and triage_status == "review-required" else "fpp-pass" if passes else "fpp-fail"),
+            fpp=fpp_rounded,
+            nfpp=nfpp_rounded,
+            triceratops_report={"path": report_path.relative_to(workspace.path).as_posix(), "sha256": _sha256(report_path)},
+        )
+    elif allow_fallback:
+        previous = _existing_vetting_decision()
+        write_triceratops_vetting_decision(
+            workspace,
+            signal=signal,
+            execution_status=previous.get("execution_status", "failed"),
+            triage_status=previous.get("triage_status", "not-run"),
+            result_status="unresolved",
+            triceratops_report={"path": report_path.relative_to(workspace.path).as_posix(), "sha256": _sha256(report_path)},
+        )
 
     return report_path

@@ -1230,15 +1230,16 @@ def run_prf_localization(
         if np.isfinite(row["difference_centroid_offset_arcsec"])
     ]
     median_offset = float(np.median(offsets)) if offsets else None
-    median_ratio = (
-        float(
-            np.median(
-                [row["target_to_max_other_difference_ratio"] for row in sectors_with_neighbors]
-            )
-        )
-        if sectors_with_neighbors
-        else None
-    )
+    # A modeled neighbour can still have a zero/undefined NNLS amplitude.
+    # Preserve that sector in the competition count, but exclude its missing
+    # ratio from the numeric median instead of passing None to NumPy.
+    ratios = [
+        ratio
+        for row in sectors_with_neighbors
+        for ratio in (_finite_float(row.get("target_to_max_other_difference_ratio")),)
+        if ratio is not None
+    ]
+    median_ratio = float(np.median(ratios)) if ratios else None
     # --- Triage routing (see methods/engine-execution-and-triage.md) ---
     if source == "not-run-no-candidate-tpf":
         status = "inconclusive_no_candidate_tpf"

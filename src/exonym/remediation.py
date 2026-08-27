@@ -221,28 +221,8 @@ def _refresh_bls_bound_transit_configs(
     return actions
 
 
-def _sync_triage(workspace: CandidateWorkspace) -> List[str]:
-    triage_path = workspace.path / "decisions" / "automated_triage.json"
-    if not triage_path.is_file():
-        return []
-    triage = _read_object(triage_path)
-    policy_id = triage.get("policy_id") if triage is not None else None
-    policy_version = triage.get("policy_version") if triage is not None else None
-    if not (
-        isinstance(policy_id, str)
-        and policy_id
-        and isinstance(policy_version, str)
-        and policy_version
-    ):
-        return ["triage sync skipped: existing triage has no usable policy identity"]
-    from .engines import run_automated_triage
-
-    run_automated_triage(workspace, policy_id=policy_id, policy_version=policy_version)
-    return ["synchronized decisions/automated_triage.json"]
-
-
 def remediate_candidate_drift(repository_root: Path) -> Dict[str, List[str]]:
-    """Repair only hash and derived-triage drift proven to be non-scientific.
+    """Repair only byte-level manifest drift proven to be non-scientific.
 
     Args:
         repository_root: Repository containing candidate workspaces to inspect.
@@ -261,10 +241,10 @@ def remediate_candidate_drift(repository_root: Path) -> Dict[str, List[str]]:
     for workspace in discover_candidates(repository_root):
         candidate_actions = _refresh_detrending_manifests(workspace)
         candidate_actions.extend(_refresh_search_manifests(workspace))
-        try:
-            candidate_actions.extend(_sync_triage(workspace))
-        except (OSError, RuntimeError, ValueError) as exc:
-            candidate_actions.append("triage sync skipped: {0}".format(exc))
+        # Triage is evidence, not a byte-level container. Re-running it can
+        # change its digest and invalidate historical engine-run provenance,
+        # even when no raw product changed. Operators must request `triage` or
+        # `vet` explicitly when they intend to refresh that scientific routing.
         if candidate_actions:
             actions[workspace.candidate_id] = candidate_actions
     return actions

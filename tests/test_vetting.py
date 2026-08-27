@@ -539,6 +539,12 @@ def test_run_triceratops_rejects_nonfinite_monte_carlo_fpp(tmp_path, monkeypatch
         run_triceratops_simulation(stub, allow_fallback=False)
 
     assert not (tmp_path / "claims" / "fpp_claim.json").exists()
+    decision = json.loads((tmp_path / "decisions" / "triceratops_vetting_decision.json").read_text(encoding="utf-8"))
+    assert decision["execution_status"] == "failed"
+    assert decision["result_status"] == "unresolved"
+    assert decision["FPP"] is None
+    assert decision["NFPP"] is None
+    assert decision["claim_eligible"] is False
 
 
 def test_run_triceratops_allow_fallback_writes_null_fpp_without_claim(tmp_path):
@@ -1167,6 +1173,45 @@ def test_prf_localization_requires_a_competing_source_for_target_dominance(tmp_p
     assert report["summary"]["conclusion"] == "inconclusive_no_candidate_tpf"
     assert report["summary"]["sectors_with_competing_sources_modeled"] == 0
     assert report["sector_results"] == []
+
+
+def test_prf_localization_ignores_missing_competitor_ratio_in_summary(tmp_path):
+    from exonym.localization import run_prf_localization
+
+    workspace = type("Workspace", (), {"path": tmp_path, "candidate_id": "test-target"})()
+    ephemeris = {
+        "period_days": 2.0,
+        "epoch_btjd": 0.5,
+        "duration_days": 0.1,
+        "source": "candidate-data",
+        "field_sources": {
+            "period_days": "candidate-data",
+            "epoch_btjd": "candidate-data",
+            "duration_days": "candidate-data",
+        },
+    }
+    fake_row = {
+        "sector": 1,
+        "skipped": False,
+        "n_modeled_neighbors": 1,
+        "target_to_max_other_difference_ratio": None,
+        "difference_centroid_offset_arcsec": 0.2,
+    }
+
+    with patch("exonym.localization.load_transit_ephemeris", return_value=ephemeris), patch(
+        "exonym.localization._load_archival_gaia_neighbors", return_value=([], "test-catalog")
+    ), patch(
+        "exonym.localization.load_tpf_cubes",
+        return_value=[{"path": tmp_path / "missing.fits", "sector": 1, "header": {}}],
+    ), patch(
+        "exonym.localization.extract_tpf_difference_image",
+        return_value=(np.ones((3, 3)), np.ones((3, 3), dtype=bool), 1.0, 1.0, 4, 4),
+    ), patch("exonym.localization._fit_one_difference_image", return_value=fake_row):
+        output = run_prf_localization(workspace)
+
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["summary"]["sectors_with_competing_sources_modeled"] == 1
+    assert report["summary"]["median_target_to_other_difference_ratio"] is None
 
 
 def test_prf_localization_retains_skipped_tpf_diagnostics(tmp_path):

@@ -49,6 +49,7 @@ def _repo(tmp_path):
         "ttv-analysis.schema.json",
         "statistical-vetting-evidence.schema.json",
         "decisive-rejection.schema.json",
+        "triceratops-vetting-decision.schema.json",
         "catalog-query-manifest.schema.json",
         "catalog-raw-response-metadata.schema.json",
         "catalog-snapshot.schema.json",
@@ -248,7 +249,11 @@ def test_cli_vet_blocks_before_triceratops_without_required_evidence(tmp_path, m
         main(root + ["vet", "candidate-alpha"])
 
     assert exc_info.value.code == 2
-    assert (repo / "candidate" / "candidate-alpha" / "outputs" / "statistical_vetting_evidence.json").is_file()
+    decision_path = repo / "candidate" / "candidate-alpha" / "decisions" / "triceratops_vetting_decision.json"
+    assert decision_path.is_file()
+    decision = json.loads(decision_path.read_text(encoding="utf-8"))
+    assert decision["execution_status"] == "blocked"
+    assert decision["triage_status"] == "not-run"
     assert not (repo / "candidate" / "candidate-alpha" / "decisions" / "automated_triage.json").exists()
 
 

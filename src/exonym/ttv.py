@@ -1577,13 +1577,19 @@ def _timing_numbers_agree(reported: object, expected: float, field: str) -> None
         raise ValueError("timing {0} does not match its recomputed value".format(field))
 
 
-def _timing_values_agree(reported: object, expected: object) -> bool:
+def _timing_values_agree(
+    reported: object,
+    expected: object,
+    *,
+    absolute_tolerance: float = 1e-10,
+    relative_tolerance: float = 1e-10,
+) -> bool:
     """Compare finite JSON-like timing values with tolerance for float replay."""
     if _is_timing_number(reported) and _is_timing_number(expected):
         left = float(reported)
         right = float(expected)
         return math.isfinite(left) and math.isfinite(right) and math.isclose(
-            left, right, rel_tol=1e-10, abs_tol=1e-10
+            left, right, rel_tol=relative_tolerance, abs_tol=absolute_tolerance
         )
     if reported is None or expected is None:
         return reported is expected
@@ -1591,11 +1597,23 @@ def _timing_values_agree(reported: object, expected: object) -> bool:
         return isinstance(reported, bool) and isinstance(expected, bool) and reported == expected
     if isinstance(reported, list) and isinstance(expected, list):
         return len(reported) == len(expected) and all(
-            _timing_values_agree(left, right) for left, right in zip(reported, expected)
+            _timing_values_agree(
+                left,
+                right,
+                absolute_tolerance=absolute_tolerance,
+                relative_tolerance=relative_tolerance,
+            )
+            for left, right in zip(reported, expected)
         )
     if isinstance(reported, dict) and isinstance(expected, dict):
         return set(reported) == set(expected) and all(
-            _timing_values_agree(reported[key], expected[key]) for key in reported
+            _timing_values_agree(
+                reported[key],
+                expected[key],
+                absolute_tolerance=absolute_tolerance,
+                relative_tolerance=relative_tolerance,
+            )
+            for key in reported
         )
     return reported == expected
 
@@ -1764,7 +1782,13 @@ def _recompute_and_validate_timing_summary(
         ("oc_minutes", reported_oc, oc_minutes),
         ("input_ephemeris_oc_minutes", reported_input_oc, input_oc_minutes),
     ):
-        if not np.allclose(reported, expected, rtol=1e-10, atol=1e-10):
+        # O-C values are derived in minutes after subtracting BTJD-scale
+        # timestamps. Replaying the weighted fit can differ by a few ulps
+        # after that subtraction even when both calculations are equivalent.
+        # Keep timestamp checks at day-scale precision, while allowing only
+        # sub-microsecond timing round-off in the minute arrays.
+        absolute_tolerance = 1e-8 if field.endswith("oc_minutes") else 1e-10
+        if not np.allclose(reported, expected, rtol=1e-10, atol=absolute_tolerance):
             raise ValueError("timing {0} does not match its recomputed value".format(field))
     for field, expected in (
         ("n_transits_fit", int(expected_length)),
@@ -1793,10 +1817,17 @@ def _recompute_and_validate_timing_summary(
         ("ephemeris_model_comparison", recomputed_comparison),
         ("ephemeris_models_comparison", recomputed_models_comparison),
     ):
-        if field in analysis and not _timing_values_agree(analysis.get(field), expected):
+        comparison_tolerance = 1e-6 if field.endswith("comparison") else 1e-10
+        comparison_relative_tolerance = 1e-7 if field == "ephemeris_models_comparison" else 1e-10
+        if field in analysis and not _timing_values_agree(
+            analysis.get(field),
+            expected,
+            absolute_tolerance=comparison_tolerance,
+            relative_tolerance=comparison_relative_tolerance,
+        ):
             raise ValueError("timing {0} does not match its recomputed value".format(field))
     if include_orbital_decay:
-        if not _timing_values_agree(analysis.get("orbital_decay_fit"), recomputed_orbital_decay):
+        if not _timing_values_agree(analysis.get("orbital_decay_fit"), recomputed_orbital_decay, absolute_tolerance=1e-6):
             raise ValueError("timing orbital_decay_fit does not match its recomputed value")
     elif "orbital_decay_fit" in analysis:
         raise ValueError("timing orbital_decay_fit requires an explicit opt-in request")

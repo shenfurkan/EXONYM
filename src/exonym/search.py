@@ -775,6 +775,31 @@ def find_transits_tls(
             "TLS search requires the optional 'discovery' dependency group"
         ) from exc
 
+    # The TLS package silently replaces a sparse requested grid with its
+    # default grid.  Preflight the effective grid when the package exposes
+    # its grid helper so an unrelated peak cannot be returned as evidence for
+    # a narrow search interval.
+    try:
+        from transitleastsquares.grid import period_grid
+
+        effective_periods = np.asarray(
+            period_grid(
+                R_star=1.0,
+                M_star=1.0,
+                time_span=float(np.max(time) - np.min(time)),
+                period_min=period_min,
+                period_max=period_max,
+            ),
+            dtype=float,
+        )
+    except (ImportError, TypeError, ValueError):
+        effective_periods = np.asarray([], dtype=float)
+    if effective_periods.size and np.nanmax(effective_periods) > period_max:
+        raise RuntimeError(
+            "TLS backend expanded the requested period interval; "
+            "the effective period grid is not the caller's interval"
+        )
+
     # Run TLS with verbose=False and no progress bar (headless operation).
     # use_threads=1 avoids multiprocessing failures on Windows.
     result = transitleastsquares(time, values, errors, verbose=False).power(
@@ -798,6 +823,11 @@ def find_transits_tls(
     )
     if not np.all(np.isfinite(values_to_check)) or not 0.0 < depth_relative < 1.0:
         raise RuntimeError("TLS did not return a physical transit solution")
+    if not period_min <= float(result.period) <= period_max:
+        raise RuntimeError(
+            "TLS returned a period outside the requested search interval; "
+            "the backend may have expanded a sparse period grid"
+        )
     return {
         "best_period": float(result.period),
         "best_epoch": float(result.T0),

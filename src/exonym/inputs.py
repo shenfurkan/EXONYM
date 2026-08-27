@@ -989,6 +989,10 @@ def _load_detrended_light_curve_table(
                 "data_sha256": data_sha256,
             },
         },
+        "sampling": {
+            "mode": "median-binned" if max_points is not None else "native",
+            "max_points": int(max_points) if max_points is not None else None,
+        },
     }
 
 
@@ -1222,6 +1226,10 @@ def load_light_curve_table(
         "input_files": [table["path"] for table in tables],
         "input_sha256s": [table["sha256"] for table in tables],
         "time_system": BTJD_TIME_SYSTEM,
+        "sampling": {
+            "mode": "median-binned" if max_points is not None else "native",
+            "max_points": int(max_points) if max_points is not None else None,
+        },
     }
 
 

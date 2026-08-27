@@ -54,6 +54,7 @@ SED_FIT_SCHEMA = "sed-fit-results.schema.json"
 TTV_ANALYSIS_SCHEMA = "ttv-analysis.schema.json"
 STATISTICAL_VETTING_EVIDENCE_SCHEMA = "statistical-vetting-evidence.schema.json"
 DECISIVE_REJECTION_SCHEMA = "decisive-rejection.schema.json"
+TRICERATOPS_VETTING_DECISION_SCHEMA = "triceratops-vetting-decision.schema.json"
 CATALOG_QUERY_MANIFEST_SCHEMA = "catalog-query-manifest.schema.json"
 CATALOG_RAW_RESPONSE_METADATA_SCHEMA = "catalog-raw-response-metadata.schema.json"
 CATALOG_SNAPSHOT_SCHEMA = "catalog-snapshot.schema.json"
@@ -616,6 +617,7 @@ def _load_schemas(root: Path, report: IsolationReport) -> Dict[str, object]:
         TTV_ANALYSIS_SCHEMA,
         STATISTICAL_VETTING_EVIDENCE_SCHEMA,
         DECISIVE_REJECTION_SCHEMA,
+        TRICERATOPS_VETTING_DECISION_SCHEMA,
         CATALOG_QUERY_MANIFEST_SCHEMA,
         CATALOG_RAW_RESPONSE_METADATA_SCHEMA,
         CATALOG_SNAPSHOT_SCHEMA,
@@ -1012,6 +1014,7 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
     ttv_analysis_schema = schemas.get(TTV_ANALYSIS_SCHEMA)
     statistical_vetting_schema = schemas.get(STATISTICAL_VETTING_EVIDENCE_SCHEMA)
     decisive_rejection_schema = schemas.get(DECISIVE_REJECTION_SCHEMA)
+    triceratops_vetting_decision_schema = schemas.get(TRICERATOPS_VETTING_DECISION_SCHEMA)
     catalog_query_schema = schemas.get(CATALOG_QUERY_MANIFEST_SCHEMA)
     catalog_raw_metadata_schema = schemas.get(CATALOG_RAW_RESPONSE_METADATA_SCHEMA)
     catalog_snapshot_schema = schemas.get(CATALOG_SNAPSHOT_SCHEMA)
@@ -1235,7 +1238,30 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
                                 rejection_path,
                                 workspace_dir,
                                 [instance["evidence"]],
-                                "decisive rejection",
+                            "decisive rejection",
+                        )
+
+        if triceratops_vetting_decision_schema is not None:
+            decision_path = workspace_dir / "decisions" / "triceratops_vetting_decision.json"
+            if decision_path.is_file():
+                try:
+                    instance = _read_json(decision_path)
+                except (OSError, UnicodeError, ValueError) as exc:
+                    report.add(decision_path, "schema-violation", "invalid JSON: {0}".format(exc))
+                else:
+                    _validate(report, decision_path, instance, triceratops_vetting_decision_schema, validate_func)
+                    if isinstance(instance, dict):
+                        if instance.get("candidate_id") != workspace_dir.name:
+                            report.add(decision_path, "schema-violation", "TRICERATOPS decision candidate_id does not match its workspace")
+                        _validate_artifacts(
+                            report, decision_path, workspace_dir,
+                            instance.get("input_artifacts"), "TRICERATOPS decision input",
+                        )
+                        report_artifact = instance.get("triceratops_report")
+                        if isinstance(report_artifact, dict):
+                            _validate_artifacts(
+                                report, decision_path, workspace_dir,
+                                [report_artifact], "TRICERATOPS decision report",
                             )
 
         if detrending_manifest_schema is not None:
@@ -2189,6 +2215,12 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
             ("decisions", "decisive_rejection.json"),
             "decisive-rejection-outside-candidate",
             "decisive rejection records must be direct files in candidate/<id>/decisions/",
+        ),
+        (
+            "triceratops_vetting_decision.json",
+            ("decisions", "triceratops_vetting_decision.json"),
+            "triceratops-vetting-decision-outside-candidate",
+            "TRICERATOPS vetting decisions must be direct files in candidate/<id>/decisions/",
         ),
     ):
         for path in sorted(root.rglob(filename)):

@@ -4,6 +4,7 @@ import hashlib
 import json
 
 import numpy as np
+import pytest
 
 from exonym.detrending import detrend_candidate
 from exonym.remediation import numerical_npz_sha256, remediate_candidate_drift, semantic_json_sha256
@@ -114,7 +115,8 @@ def test_remediation_keeps_bls_derived_config_bound_to_refreshed_manifest(tmp_pa
     ).hexdigest()
 
 
-def test_remediation_preserves_existing_triage_policy_identity(tmp_path, monkeypatch):
+def test_remediation_never_rewrites_existing_triage_evidence(tmp_path, monkeypatch):
+    # Arrange
     workspace = create_candidate(tmp_path, "remediation-triage-policy")
     triage_path = workspace.path / "decisions" / "automated_triage.json"
     triage_path.write_text(
@@ -126,28 +128,40 @@ def test_remediation_preserves_existing_triage_policy_identity(tmp_path, monkeyp
         ),
         encoding="utf-8",
     )
-    captured = {}
-
-    def _rerun_triage(candidate, policy_id, policy_version):
-        captured.update(
+    original = triage_path.read_bytes()
+    run_manifest_path = (
+        workspace.path / "runs" / "statistical-vetting" / "run-001" / "engine-run.json"
+    )
+    run_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    run_manifest_path.write_text(
+        json.dumps(
             {
-                "candidate_id": candidate.candidate_id,
-                "policy_id": policy_id,
-                "policy_version": policy_version,
+                "outputs": [
+                    {
+                        "path": "decisions/automated_triage.json",
+                        "sha256": hashlib.sha256(original).hexdigest(),
+                    }
+                ]
             }
-        )
-        return triage_path
+        ),
+        encoding="utf-8",
+    )
+    original_manifest = run_manifest_path.read_bytes()
+    monkeypatch.setattr(
+        "exonym.engines.run_automated_triage",
+        lambda *_args, **_kwargs: pytest.fail("--fix must not rerun triage evidence"),
+    )
 
-    monkeypatch.setattr("exonym.engines.run_automated_triage", _rerun_triage)
-
+    # Act
     actions = remediate_candidate_drift(tmp_path)
 
-    assert actions[workspace.candidate_id] == ["synchronized decisions/automated_triage.json"]
-    assert captured == {
-        "candidate_id": workspace.candidate_id,
-        "policy_id": "custom-pre-vetting-policy",
-        "policy_version": "2.4.1",
-    }
+    # Assert
+    assert actions == {}
+    assert triage_path.read_bytes() == original
+    assert run_manifest_path.read_bytes() == original_manifest
+    assert json.loads(run_manifest_path.read_text(encoding="utf-8"))["outputs"][0]["sha256"] == hashlib.sha256(
+        triage_path.read_bytes()
+    ).hexdigest()
 
 
 def test_remediation_skips_manifest_paths_that_escape_the_workspace(tmp_path):

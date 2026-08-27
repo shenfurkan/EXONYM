@@ -129,6 +129,10 @@ EXPTIME_SECONDS = 120.0     # Nominal TESS 2-minute SPOC cadence (seconds)
 # SCIENTIFIC_BOUNDARY: the folded/binned display uses a coarser effective
 # integration time; this is not the native-cadence posterior exposure.
 FITTED_BIN_EXPOSURE_SECONDS = BIN_MINUTES * 60.0
+# PERFORMANCE_BOUND: multi-sector fits use deterministic per-product median
+# binning by default. This keeps every selected sector while bounding the
+# likelihood workload; the loader records the policy in its returned table.
+FIT_MAX_POINTS_PER_PRODUCT = 4000
 
 # Parameter vectors for circular and eccentric orbits
 PARAMETER_NAMES_CIRCULAR = (
@@ -1477,6 +1481,104 @@ def _native_transit_window_data(
     return phase_days, flux, flux_err, sector_index, sector_labels, np.asarray(exposure_seconds)
 
 
+def _phase_bin_transit_window_data(
+    phase_days: np.ndarray,
+    flux: np.ndarray,
+    flux_err: np.ndarray,
+    sector_index: np.ndarray,
+    sector_labels: Sequence[int],
+    period_days: float,
+    bin_minutes: float = BIN_MINUTES,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[int], np.ndarray]:
+    """Median-bin folded transit windows independently for each sector.
+
+    This is a deterministic workload bound for exploratory inference. Bins
+    retain sector ownership, use robust within-bin scatter plus reported
+    uncertainty, and use the bin width as the model integration exposure.
+    """
+    if not math.isfinite(period_days) or period_days <= 0.0:
+        raise ValueError("phase-binning requires a positive finite period")
+    if not math.isfinite(bin_minutes) or bin_minutes <= 0.0:
+        raise ValueError("phase-binning requires a positive bin width")
+    phase = np.asarray(phase_days, dtype=float)
+    values = np.asarray(flux, dtype=float)
+    errors = np.asarray(flux_err, dtype=float)
+    compact_sectors = np.asarray(sector_index, dtype=int)
+    if not (phase.shape == values.shape == errors.shape == compact_sectors.shape):
+        raise ValueError("phase-binning inputs must have identical shapes")
+
+    half_window_days = min(WINDOW_HALF_HOURS / 24.0, 0.5 * period_days)
+    bin_width_days = bin_minutes / (24.0 * 60.0)
+    bin_count = max(1, int(math.ceil(2.0 * half_window_days / bin_width_days)))
+    edges = np.linspace(-half_window_days, half_window_days, bin_count + 1)
+    phase_blocks: List[np.ndarray] = []
+    flux_blocks: List[np.ndarray] = []
+    error_blocks: List[np.ndarray] = []
+    sector_blocks: List[np.ndarray] = []
+    retained_labels: List[int] = []
+
+    for compact_index, label in enumerate(sector_labels):
+        sector_mask = compact_sectors == compact_index
+        local_phase: List[float] = []
+        local_flux: List[float] = []
+        local_error: List[float] = []
+        for bin_index in range(bin_count):
+            if bin_index == bin_count - 1:
+                selected = sector_mask & (phase >= edges[bin_index]) & (phase <= edges[bin_index + 1])
+            else:
+                selected = sector_mask & (phase >= edges[bin_index]) & (phase < edges[bin_index + 1])
+            selected &= np.isfinite(phase) & np.isfinite(values) & np.isfinite(errors) & (errors > 0.0)
+            count = int(np.count_nonzero(selected))
+            if count < 3:
+                continue
+            bin_values = values[selected]
+            bin_errors = errors[selected]
+            scatter_error = 1.253 * float(np.std(bin_values)) / math.sqrt(count)
+            reported_error = float(np.median(bin_errors)) / math.sqrt(count)
+            combined_error = math.sqrt(scatter_error ** 2 + reported_error ** 2)
+            if not math.isfinite(combined_error) or combined_error <= 0.0:
+                continue
+            local_phase.append(0.5 * (edges[bin_index] + edges[bin_index + 1]))
+            local_flux.append(float(np.median(bin_values)))
+            local_error.append(combined_error)
+        if local_phase:
+            retained_labels.append(int(label))
+            block_size = len(local_phase)
+            phase_blocks.append(np.asarray(local_phase, dtype=float))
+            flux_blocks.append(np.asarray(local_flux, dtype=float))
+            error_blocks.append(np.asarray(local_error, dtype=float))
+            sector_blocks.append(np.full(block_size, len(retained_labels) - 1, dtype=int))
+
+    if not phase_blocks or sum(block.size for block in phase_blocks) < 20:
+        raise ValueError("insufficient phase-binned transit-window coverage")
+    return (
+        np.concatenate(phase_blocks),
+        np.concatenate(flux_blocks),
+        np.concatenate(error_blocks),
+        np.concatenate(sector_blocks),
+        retained_labels,
+        np.full(len(retained_labels), float(bin_minutes) * 60.0, dtype=float),
+    )
+
+def _apply_fit_sampling_policy(
+    table: Dict[str, Any],
+    ephemeris: Dict[str, Any],
+    data: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[int], np.ndarray],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[int], np.ndarray]:
+    """Apply the recorded deterministic phase-binning policy to fit inputs."""
+    sampling = table.get("sampling", {})
+    if not isinstance(sampling, dict) or sampling.get("mode") != "median-binned":
+        return data
+    return _phase_bin_transit_window_data(
+        data[0],
+        data[1],
+        data[2],
+        data[3],
+        data[4],
+        float(ephemeris["period_days"]),
+        bin_minutes=BIN_MINUTES,
+    )
+
 def _parameter_names(
     eccentric: bool,
     n_sectors: int = 1,
@@ -2063,13 +2165,16 @@ def _log_likelihood(
         or np.any(exposure_seconds_by_sector <= 0)
     ):
         return -np.inf
-    model = np.empty(np.asarray(phase_days).shape, dtype=float)
-    for sector_number in range(n_sectors):
-        selected = sector_index == sector_number
-        if not np.any(selected):
-            return -np.inf
-        sector_model = batman_transit_flux(
-            np.asarray(phase_days)[selected],
+    if np.any(np.bincount(sector_index, minlength=n_sectors) == 0):
+        return -np.inf
+    phase_values = np.asarray(phase_days, dtype=float)
+    # PERFORMANCE_BOUND: phase-binned fits use one common exposure and one
+    # phase grid for each sector. Evaluate the identical batman model once;
+    # sector-specific baselines remain applied element-wise below.
+    if np.allclose(exposure_seconds_by_sector, exposure_seconds_by_sector[0]):
+        unique_phase, inverse_phase = np.unique(phase_values, return_inverse=True)
+        common_model = batman_transit_flux(
+            unique_phase,
             period_days,
             rp,
             a_rs,
@@ -2079,11 +2184,31 @@ def _log_likelihood(
             1.0,
             eccentricity=eccentricity,
             omega_deg=omega_deg,
-            exposure_seconds=float(exposure_seconds_by_sector[sector_number]),
+            exposure_seconds=float(exposure_seconds_by_sector[0]),
         )
-        if sector_model is None:
+        if common_model is None:
             return -np.inf
-        model[selected] = baselines[sector_number] * sector_model
+        model = baselines[sector_index] * common_model[inverse_phase]
+    else:
+        model = np.empty(phase_values.shape, dtype=float)
+        for sector_number in range(n_sectors):
+            selected = sector_index == sector_number
+            sector_model = batman_transit_flux(
+                phase_values[selected],
+                period_days,
+                rp,
+                a_rs,
+                b,
+                q1,
+                q2,
+                1.0,
+                eccentricity=eccentricity,
+                omega_deg=omega_deg,
+                exposure_seconds=float(exposure_seconds_by_sector[sector_number]),
+            )
+            if sector_model is None:
+                return -np.inf
+            model[selected] = baselines[sector_number] * sector_model
 
     # NUMERICAL_GUARD: jitter is fitted in log space, so exp(...) is
     # always positive; adding in quadrature with the reported uncertainty
@@ -2156,12 +2281,21 @@ def _map_optimize(
     bounds.extend([(-12.0, -2.0), (0.01, 0.99), (0.01, 0.99)])
     if eccentric:
         bounds.extend([(-1.0, 1.0), (-1.0, 1.0)])
-    offsets = (
-        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-        (0.01, 0.2, -0.1, 0.05, -0.05, 0.1),
-        (-0.01, -0.2, 0.1, -0.05, 0.05, -0.1),
-    )
-    jitter_starts = np.array([0.0, -2.0, -4.0, -6.0, -8.0])
+    # PERFORMANCE_BOUND: multi-sector transit fits have one baseline nuisance
+    # parameter per sector. Keep one physically valid MAP start for large
+    # sector counts; MCMC remains responsible for posterior exploration.
+    if n_sectors > 8:
+        offsets = ((0.0, 0.0, 0.0, 0.0, 0.0, 0.0),)
+        jitter_starts = np.array([0.0])
+        map_maxiter = 100
+    else:
+        offsets = (
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            (0.01, 0.2, -0.1, 0.05, -0.05, 0.1),
+            (-0.01, -0.2, 0.1, -0.05, 0.05, -0.1),
+        )
+        jitter_starts = np.array([0.0, -2.0, -4.0, -6.0, -8.0])
+        map_maxiter = 400
     best_objective = np.inf
     best_point = start
 
@@ -2201,7 +2335,7 @@ def _map_optimize(
                 candidate,
                 method="L-BFGS-B",
                 bounds=bounds,
-                options={"maxiter": 400, "ftol": 1e-9},
+                options={"maxiter": map_maxiter, "ftol": 1e-9},
             )
             if np.isfinite(result.fun) and result.fun < best_objective:
                 best_objective = float(result.fun)
@@ -2965,7 +3099,7 @@ def _fit_emcee_candidate_transit_fit(
 
     table = load_light_curve_table(
         workspace,
-        max_points=None,
+        max_points=FIT_MAX_POINTS_PER_PRODUCT,
         require_raw_provenance=True,
         detrending_method=detrending_method,
     )
@@ -2984,6 +3118,26 @@ def _fit_emcee_candidate_transit_fit(
         ) = _native_transit_window_data(
             table, ephemeris
         )
+        if table.get("sampling", {}).get("mode") == "median-binned":
+            (
+                phase_days,
+                native_flux,
+                native_error,
+                sector_index,
+                sector_labels,
+                exposure_seconds_by_sector,
+            ) = _apply_fit_sampling_policy(
+                table,
+                ephemeris,
+                (
+                    phase_days,
+                    native_flux,
+                    native_error,
+                    sector_index,
+                    sector_labels,
+                    exposure_seconds_by_sector,
+                ),
+            )
     except ValueError as exc:
         raise RuntimeError("candidate photometry cannot support a transit fit") from exc
 
@@ -2994,20 +3148,25 @@ def _fit_emcee_candidate_transit_fit(
     start = _initial_fit_parameters(
         depth_ppm, rho_prior_solar, scatter, eccentric, n_sectors=n_sectors
     )
-    map_point = _map_optimize(
-        phase_days,
-        native_flux,
-        native_error,
-        ephemeris,
-        rho_prior_solar,
-        rho_prior_log10_sigma,
-        eccentric,
-        start,
-        ldtk_prior,
-        sector_index=sector_index,
-        exposure_seconds_by_sector=exposure_seconds_by_sector,
-        n_sectors=n_sectors,
-    )
+    if n_sectors > 8:
+        # PERFORMANCE_BOUND: MAP is only a walker-initialisation aid. Avoid a
+        # high-dimensional numerical multi-start before the posterior sampler.
+        map_point = start.copy()
+    else:
+        map_point = _map_optimize(
+            phase_days,
+            native_flux,
+            native_error,
+            ephemeris,
+            rho_prior_solar,
+            rho_prior_log10_sigma,
+            eccentric,
+            start,
+            ldtk_prior,
+            sector_index=sector_index,
+            exposure_seconds_by_sector=exposure_seconds_by_sector,
+            n_sectors=n_sectors,
+        )
 
     ndim = int(map_point.size)
     if n_walkers is None:
@@ -3250,6 +3409,14 @@ def _fit_emcee_candidate_transit_fit(
         },
     )
 
+    sampling = table.get("sampling", {"mode": "native", "max_points": None})
+    raw_sampling_mode = str(sampling.get("mode", "native"))
+    sampling_mode = "phase-binned" if raw_sampling_mode == "median-binned" else raw_sampling_mode
+    scientific_status = (
+        "exploratory-phase-binned-inference"
+        if sampling_mode == "phase-binned"
+        else "exploratory-native-cadence-inference"
+    )
     payload = {
         "schema_version": "1.0",
         "work_package": "MCMC_TRANSIT_FIT",
@@ -3262,7 +3429,7 @@ def _fit_emcee_candidate_transit_fit(
         # independent-chain convergence validation, or dilution/contamination
         # correction.  A full validation-grade posterior requires the
         # scene-model framework (methods/phasecurve-secondary-control.md).
-        "scientific_status": "exploratory-native-cadence-inference",
+        "scientific_status": scientific_status,
         "validation_eligible": False,
         "validation_reason": (
             "This likelihood has per-sector flux normalizations but no "
@@ -3311,7 +3478,8 @@ def _fit_emcee_candidate_transit_fit(
             "fallback_reason": backend_fallback_reason,
         },
         "likelihood": {
-            "cadence": "native",
+            "cadence": sampling_mode,
+            "max_points_per_product": sampling.get("max_points"),
             "n_points": int(phase_days.size),
             "sector_labels": sector_labels,
             "exposure_seconds_by_sector": {
@@ -3323,7 +3491,7 @@ def _fit_emcee_candidate_transit_fit(
         },
         "signal": signal,
         "caveat": (
-            "Exploratory native-cadence fit with independent Gaussian residuals; "
+            f"Exploratory {sampling_mode} fit with independent Gaussian residuals; "
             "not an adopted posterior or validation claim."
         ),
     }
@@ -3426,7 +3594,7 @@ def _run_numpyro_candidate_transit_fit(
     ldtk_prior = _load_ldtk_prior(workspace) if use_ldtk_prior else None
     table = load_light_curve_table(
         workspace,
-        max_points=None,
+        max_points=FIT_MAX_POINTS_PER_PRODUCT,
         require_raw_provenance=True,
         detrending_method=detrending_method,
     )
@@ -3441,6 +3609,26 @@ def _run_numpyro_candidate_transit_fit(
             sector_labels,
             exposure_seconds_by_sector,
         ) = _native_transit_window_data(table, ephemeris)
+        if table.get("sampling", {}).get("mode") == "median-binned":
+            (
+                phase_days,
+                native_flux,
+                native_error,
+                sector_index,
+                sector_labels,
+                exposure_seconds_by_sector,
+            ) = _apply_fit_sampling_policy(
+                table,
+                ephemeris,
+                (
+                    phase_days,
+                    native_flux,
+                    native_error,
+                    sector_index,
+                    sector_labels,
+                    exposure_seconds_by_sector,
+                ),
+            )
     except ValueError as exc:
         raise RuntimeError("candidate photometry cannot support a transit fit") from exc
 
@@ -3847,7 +4035,7 @@ def _run_dynesty_transit_fit(
     ldtk_prior = _load_ldtk_prior(workspace) if use_ldtk_prior else None
     table = load_light_curve_table(
         workspace,
-        max_points=None,
+        max_points=FIT_MAX_POINTS_PER_PRODUCT,
         require_raw_provenance=True,
         detrending_method=detrending_method,
     )
@@ -3865,6 +4053,26 @@ def _run_dynesty_transit_fit(
         ) = _native_transit_window_data(
             table, ephemeris
         )
+        if table.get("sampling", {}).get("mode") == "median-binned":
+            (
+                phase_days,
+                native_flux,
+                native_error,
+                sector_index,
+                sector_labels,
+                exposure_seconds_by_sector,
+            ) = _apply_fit_sampling_policy(
+                table,
+                ephemeris,
+                (
+                    phase_days,
+                    native_flux,
+                    native_error,
+                    sector_index,
+                    sector_labels,
+                    exposure_seconds_by_sector,
+                ),
+            )
     except ValueError as exc:
         raise RuntimeError("candidate photometry cannot support a transit fit") from exc
 

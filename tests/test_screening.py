@@ -69,9 +69,9 @@ def test_run_fixed_ephemeris_screen_requires_a_signal_prior_and_writes_scoped_ou
         json.dumps(
             {
                     "transit": {
-                        "period_days": 2.6,
-                        "epoch_btjd": 0.75,
-                        "duration_hours": 2.4,
+                        "period_days": 2.600000123456,
+                        "epoch_btjd": 0.750000987654,
+                        "duration_hours": 2.400000123456,
                         "depth_ppm": 800.0,
                     }
             }
@@ -95,6 +95,9 @@ def test_run_fixed_ephemeris_screen_requires_a_signal_prior_and_writes_scoped_ou
     assert payload["source"] == "candidate-data"
     assert payload["signal"] == ".01"
     assert payload["screen"]["primary"]["status"] == "measured"
+    assert payload["ephemeris"]["period_days"] == pytest.approx(2.600000123456)
+    assert payload["ephemeris"]["epoch_btjd"] == pytest.approx(0.750000987654)
+    assert payload["ephemeris"]["duration_hours"] == pytest.approx(2.400000123456)
     with pytest.raises(ValueError, match="no readable signal prior"):
         run_fixed_ephemeris_screen(workspace, signal=".02")
 

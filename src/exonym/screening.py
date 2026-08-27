@@ -338,8 +338,11 @@ def run_fixed_ephemeris_screen(
     outputs_dir = workspace.path / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
     output = outputs_dir / "fixed_ephemeris_screen{0}.json".format(signal or "")
+    serialized_payload = _rounded_payload(payload)
+    # Preserve the exact candidate ephemeris for hash-bound BLS replay.
+    serialized_payload["ephemeris"] = payload["ephemeris"]
     output.write_text(
-        json.dumps(_rounded_payload(payload), indent=2, sort_keys=True, allow_nan=False) + "\n",
+        json.dumps(serialized_payload, indent=2, sort_keys=True, allow_nan=False) + "\n",
         encoding="utf-8",
     )
     return output

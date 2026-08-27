@@ -45,6 +45,7 @@ def _make_repo(tmp_path, with_templates=True):
         "ttv-analysis.schema.json",
         "statistical-vetting-evidence.schema.json",
         "decisive-rejection.schema.json",
+        "triceratops-vetting-decision.schema.json",
         "catalog-query-manifest.schema.json",
         "catalog-raw-response-metadata.schema.json",
         "catalog-snapshot.schema.json",
@@ -89,6 +90,34 @@ def _prepare_freeze_source(repo):
 def test_clean_repository_passes_schema_validation(tmp_path):
     report = _audit(_make_repo(tmp_path))
     assert report.ok
+
+
+def test_triceratops_vetting_decision_is_schema_valid_and_candidate_local(tmp_path):
+    repo = _make_repo(tmp_path)
+    decision_path = repo / "candidate" / "candidate-alpha" / "decisions" / "triceratops_vetting_decision.json"
+    decision_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "candidate_id": "candidate-alpha",
+                "generated_at": "2026-01-01T00:00:00+00:00",
+                "signal": None,
+                "execution_status": "unavailable",
+                "triage_status": "review-required",
+                "result_status": "unresolved",
+                "FPP": None,
+                "NFPP": None,
+                "blocking_reasons": [],
+                "error": {"code": "missing-engine", "message": "Synthetic unavailable engine."},
+                "input_artifacts": [],
+                "triceratops_report": None,
+                "claim_eligible": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _audit(repo).ok
 
 
 def test_schema_definition_validation_rejects_invalid_shared_schema(tmp_path):
