@@ -80,7 +80,31 @@
         "n_distinct_transit_events": {"type": "integer", "minimum": 0},
         "n_period_trials": {"type": "integer", "minimum": 0},
         "detection_status": {"enum": ["detected", "no-detection"]},
-        "best_depth_uncertainty_ppm": {"type": ["number", "null"], "minimum": 0}
+        "best_depth_uncertainty_ppm": {"type": ["number", "null"], "minimum": 0},
+        "best_subthreshold_peak": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": [
+            "period_days",
+            "epoch_btjd",
+            "depth_ppm",
+            "depth_uncertainty_ppm",
+            "duration_hours",
+            "ranking_snr",
+            "n_distinct_transit_events",
+            "rejection_reason"
+          ],
+          "properties": {
+            "period_days": {"type": "number", "exclusiveMinimum": 0},
+            "epoch_btjd": {"type": "number"},
+            "depth_ppm": {"type": "number"},
+            "depth_uncertainty_ppm": {"type": ["number", "null"], "minimum": 0},
+            "duration_hours": {"type": "number", "exclusiveMinimum": 0},
+            "ranking_snr": {"type": "number", "minimum": 0},
+            "n_distinct_transit_events": {"type": "integer", "minimum": 0},
+            "rejection_reason": {"type": "string"}
+          }
+        }
       }
     },
     "branch": {

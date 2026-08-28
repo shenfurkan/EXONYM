@@ -332,6 +332,7 @@ def test_injection_recovery_literal_none_preserves_non_detection_trial_metadata(
         "n_period_trials": 10,
         "detection_status": "no-detection",
         "best_depth_uncertainty_ppm": None,
+        "best_subthreshold_peak": None,
     }
 
 
