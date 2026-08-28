@@ -20,6 +20,7 @@ import json
 import math
 import re
 import shutil
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -530,8 +531,16 @@ def stream_tce_rows(source: str, timeout: float = DEFAULT_HTTP_TIMEOUT_SECONDS) 
     parsed = urllib.parse.urlparse(source)
     if parsed.scheme != "https" or not parsed.netloc:
         raise ValueError("TCE stream source must be a local file or HTTPS URL")
-    with _https_response(source, timeout, "text/csv") as response:
-        with io.TextIOWrapper(response, encoding="utf-8-sig", errors="replace", newline="") as handle:
+    # Fully stage a remote release before issuing per-row novelty requests.
+    # Leaving the response socket idle while those synchronous requests run
+    # lets a remote CSV host reset the connection in the middle of harvest.
+    # A temporary file keeps the source stream decoupled from later network
+    # calls without retaining an unbounded release body in memory.
+    with tempfile.TemporaryFile(mode="w+b") as staged:
+        with _https_response(source, timeout, "text/csv") as response:
+            shutil.copyfileobj(response, staged, length=1024 * 1024)
+        staged.seek(0)
+        with io.TextIOWrapper(staged, encoding="utf-8-sig", errors="replace", newline="") as handle:
             non_comments = (line for line in handle if not line.lstrip().startswith("#") and line.strip())
             for row in csv.DictReader(non_comments):
                 yield dict(row)

@@ -108,7 +108,7 @@ def _write_synthetic_mist_contract(workspace):
 
 
 def _update_manifest_grid_digest(manifest_path, grid_path):
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
     manifest["grid_artifact"]["sha256"] = _sha256(grid_path)
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
@@ -149,6 +149,23 @@ def test_synthetic_mist_contract_evaluates_hash_bound_interpolated_grid(tmp_path
             "role": "synthetic-grid-source",
         }
     ]
+
+
+def test_mist_contract_accepts_hash_bound_utf8_bom_inputs(tmp_path):
+    from exonym.sed import _mist_main_sequence_check
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "mist-grid-utf8-bom")
+    inputs = _write_synthetic_mist_contract(workspace)
+    manifest_path = inputs["manifest_path"]
+    grid_path = inputs["grid_path"]
+    grid_path.write_bytes(b"\xef\xbb\xbf" + grid_path.read_bytes())
+    _update_manifest_grid_digest(manifest_path, grid_path)
+    manifest_path.write_bytes(b"\xef\xbb\xbf" + manifest_path.read_bytes())
+
+    result = _mist_main_sequence_check(workspace, inputs["stellar"])
+
+    assert result["status"] == "evaluated"
 
 
 def test_mist_contract_rejects_grid_hash_tampering(tmp_path):

@@ -18,6 +18,7 @@ import importlib
 import importlib.util
 import json
 import math
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -716,6 +717,12 @@ def _write_statistical_vetting_manifest(
     run_id = "{0}-statistical-vetting".format(timestamp_slug)
     run_dir = workspace.path / "runs" / "statistical-vetting" / run_id
     run_dir.mkdir(parents=True)
+    # Each run must own an immutable output snapshot.  The canonical evidence
+    # path is rewritten by the next triage/vet invocation; recording that
+    # mutable path in a historical manifest makes every older run appear
+    # tampered when the verifier compares hashes later.
+    snapshot_path = run_dir / "evidence.json"
+    shutil.copyfile(evidence_path, snapshot_path)
     inputs = [{
         "path": "candidate.json",
         "sha256": _file_sha256(workspace.path / "candidate.json"),
@@ -746,11 +753,21 @@ def _write_statistical_vetting_manifest(
             "executable": "exonym.statistical_vetting",
         },
         "inputs": inputs,
-        "outputs": [{
-            "path": evidence_path.relative_to(workspace.path).as_posix(),
-            "sha256": _file_sha256(evidence_path),
-            "role": "statistical_vetting_evidence",
-        }],
+        "outputs": [
+            # Keep the canonical path in the manifest so triage records can
+            # bind to the evidence they expose, while the run-owned snapshot
+            # provides immutable historical provenance.
+            {
+                "path": evidence_path.relative_to(workspace.path).as_posix(),
+                "sha256": _file_sha256(evidence_path),
+                "role": "statistical_vetting_evidence",
+            },
+            {
+                "path": snapshot_path.relative_to(workspace.path).as_posix(),
+                "sha256": _file_sha256(snapshot_path),
+                "role": "statistical_vetting_evidence_snapshot",
+            },
+        ],
     }
     manifest_path = run_dir / "engine-run.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")

@@ -35,6 +35,7 @@ def _repo(tmp_path):
         "survey-robustness.schema.json",
         "survey-sensitivity.schema.json",
         "engine-run.schema.json",
+        "analysis-completion.schema.json",
         "automated-triage.schema.json",
         "radial-velocity-observations.schema.json",
         "rv-keplerian-fit.schema.json",
@@ -280,7 +281,7 @@ def test_cli_search_forwards_tls_engine(tmp_path, capsys, monkeypatch):
     main(root + ["init", "candidate-alpha"])
     calls = []
 
-    def fake_search(candidate, period_min, period_max, signal, engine, detrending_method):
+    def fake_search(candidate, period_min, period_max, signal, engine, duration_grid_hours, detrending_method):
         calls.append(
             {
                 "candidate": candidate.candidate_id,
@@ -288,6 +289,7 @@ def test_cli_search_forwards_tls_engine(tmp_path, capsys, monkeypatch):
                 "period_max": period_max,
                 "signal": signal,
                 "engine": engine,
+                "duration_grid_hours": duration_grid_hours,
                 "detrending_method": detrending_method,
             }
         )
@@ -306,10 +308,45 @@ def test_cli_search_forwards_tls_engine(tmp_path, capsys, monkeypatch):
             "period_max": None,
             "signal": None,
             "engine": "tls",
+            "duration_grid_hours": None,
             "detrending_method": None,
         }
     ]
     assert "tls_search_results.json" in capsys.readouterr().out
+
+
+def test_cli_search_forwards_blind_bls_duration_grid(tmp_path, capsys, monkeypatch):
+    repo = _repo(tmp_path)
+    root = ["--root", str(repo)]
+    main(root + ["init", "candidate-alpha"])
+    received = {}
+
+    def fake_search(candidate, **kwargs):
+        received["candidate"] = candidate.candidate_id
+        received.update(kwargs)
+        output = candidate.path / "outputs" / "bls_search_results.json"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("{}\n", encoding="utf-8")
+        return output
+
+    monkeypatch.setattr("exonym.search.run_bls_on_candidate", fake_search)
+
+    assert main(root + ["search", "candidate-alpha", "--duration-grid-hours", "0.5", "1.0"]) == 0
+    assert received["candidate"] == "candidate-alpha"
+    assert received["duration_grid_hours"] == [0.5, 1.0]
+    assert "bls_search_results.json" in capsys.readouterr().out
+
+
+def test_cli_verify_candidate_scope_ignores_unrelated_workspace_errors(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    root = ["--root", str(repo)]
+    assert main(root + ["init", "candidate-alpha"]) == 0
+    assert main(root + ["init", "candidate-beta"]) == 0
+    (repo / "candidate" / "candidate-beta" / "candidate.json").write_text("{\n", encoding="utf-8")
+
+    assert main(root + ["verify", "--candidates", "--candidate", "candidate-alpha"]) == 0
+    assert main(root + ["verify", "--candidates"]) == 1
+    assert "candidate-beta" in capsys.readouterr().out
 
 
 def test_cli_detrend_derives_and_forwards_candidate_ephemeris_mask(tmp_path, capsys, monkeypatch):

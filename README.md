@@ -393,7 +393,7 @@ They affect CLI presentation only and never alter an artifact or gate.
 | `asteroseismology <candidate-id>` | `--numax-min` (default 100 μHz), `--numax-max` (default 1600 μHz) | Writes `outputs/asteroseismic_results.json`. |
 | `localization <candidate-id>` | `--search-radius` (default 60 arcsec) | Writes `outputs/prf_localization_results.json` from pixel-depth and Gaussian-template screening. |
 | `sed <candidate-id>` | None | Writes `outputs/sed_fit_results.json` and an MCMC chain array. |
-| `fit <candidate-id>` | `--n-samples`, `--eccentric`, `--signal`, `--detrending-method`, `--sampler {auto,emcee,numpyro,dynesty}`, `--device {auto,cpu,gpu}`, `--ldtk-prior`, `--n-jobs`, `--progress`, `--resume` | Writes a candidate-local exploratory fit and chain. `auto` records GPU NumPyro selection or CPU emcee fallback; emcee can resume from its intermediate chain checkpoint. The sampler, fallback reason, runtime, and convergence diagnostics are part of the artifact contract. |
+| `fit <candidate-id>` | `--n-samples`, `--eccentric`, `--signal`, `--detrending-method`, `--sampler {auto,emcee,numpyro,dynesty}`, `--device {auto,cpu,gpu}`, `--ldtk-prior`, `--n-jobs`, `--progress`, `--resume` | Writes a candidate-local exploratory fit and chain. `auto` records GPU NumPyro selection or CPU emcee fallback; emcee can resume only from a current no-pickle intermediate chain checkpoint. The sampler, fallback reason, runtime, and convergence diagnostics are part of the artifact contract. |
 | `phasecurve <candidate-id>` | None | Writes `outputs/phase_curve_results.json`. |
 | `ttv <candidate-id>` | `--signal`, `--fit-orbital-decay` | Writes `outputs/ttv_analysis_results.json` and may create a timing diagram. The optional derivative is a formal diagnostic, not evidence for orbital decay. |
 | `activity <candidate-id>` | None | Writes `outputs/stellar_activity_results.json`. |
@@ -485,7 +485,7 @@ When a stellar-density constraint is available, the model uses:
 a_over_Rstar = (G * P^2 * rho_star / (3 * pi))^(1/3)
 ```
 
-The current fitter evaluates native-cadence transit-window data with sector-specific exposure integration, independent white errors, and a jitter term. `--sampler auto` attempts the 64-bit NumPyro/JAX path when a compatible GPU runtime is available and otherwise records a CPU emcee fallback; explicit runtime failure is retained as failure rather than silently changing the model. Dynesty remains an optional nested-sampling path. CPU emcee can write and resume an intermediate chain checkpoint, which is distinct from a workspace checkpoint. The fit does not fit a Gaussian-process noise model or provide an adopted posterior. Inspect posterior correlations, prior sensitivity, dilution treatment, and cadence integration before converting a fitted radius ratio into a physical companion radius.
+The current fitter evaluates native-cadence transit-window data with sector-specific exposure integration, independent white errors, and a jitter term. `--sampler auto` attempts the 64-bit NumPyro/JAX path when a compatible GPU runtime is available and otherwise records a CPU emcee fallback; explicit runtime failure is retained as failure rather than silently changing the model. Dynesty remains an optional nested-sampling path. CPU emcee can write and resume an intermediate chain checkpoint, which is distinct from a workspace checkpoint. Resume accepts only the current no-pickle checkpoint format, written atomically with validated array/scalar state; older object/pickle checkpoint files are rejected. Parallel fit workers close on normal completion and terminate on an in-process error or interruption. The fit does not fit a Gaussian-process noise model or provide an adopted posterior. Inspect posterior correlations, prior sensitivity, dilution treatment, and cadence integration before converting a fitted radius ratio into a physical companion radius.
 
 `exonym sed` fits a reddened blackbody representation at catalog pivot wavelengths with `emcee`. It uses parallax information to infer radius and luminosity. It gives a transparent first-pass stellar context, not a passband-integrated atmosphere analysis.
 
@@ -554,7 +554,9 @@ checkpoint is a compressed, hash-verified snapshot of mutable candidate state;
 it excludes raw FITS and append-only provenance, restores atomically, and
 cannot be used to bypass lifecycle gates or rewrite scientific history. Fit
 intermediate checkpoints contain sampler state only and are removed after a
-successful fit.
+successful fit. They are not workspace snapshots: only the current no-pickle
+emcee checkpoint format can be resumed, and legacy object/pickle archives are
+rejected rather than deserialized.
 
 Continuous integration runs the automated test suite and the isolation audits on pushes and pull requests.
 

@@ -55,6 +55,7 @@ TTV_ANALYSIS_SCHEMA = "ttv-analysis.schema.json"
 STATISTICAL_VETTING_EVIDENCE_SCHEMA = "statistical-vetting-evidence.schema.json"
 DECISIVE_REJECTION_SCHEMA = "decisive-rejection.schema.json"
 TRICERATOPS_VETTING_DECISION_SCHEMA = "triceratops-vetting-decision.schema.json"
+ANALYSIS_COMPLETION_SCHEMA = "analysis-completion.schema.json"
 CATALOG_QUERY_MANIFEST_SCHEMA = "catalog-query-manifest.schema.json"
 CATALOG_RAW_RESPONSE_METADATA_SCHEMA = "catalog-raw-response-metadata.schema.json"
 CATALOG_SNAPSHOT_SCHEMA = "catalog-snapshot.schema.json"
@@ -618,6 +619,7 @@ def _load_schemas(root: Path, report: IsolationReport) -> Dict[str, object]:
         STATISTICAL_VETTING_EVIDENCE_SCHEMA,
         DECISIVE_REJECTION_SCHEMA,
         TRICERATOPS_VETTING_DECISION_SCHEMA,
+        ANALYSIS_COMPLETION_SCHEMA,
         CATALOG_QUERY_MANIFEST_SCHEMA,
         CATALOG_RAW_RESPONSE_METADATA_SCHEMA,
         CATALOG_SNAPSHOT_SCHEMA,
@@ -970,7 +972,9 @@ def _validate_exofop_prior_retrieval(
             report.add(path, "schema-violation", "ExoFOP prior retrieval contains duplicate signal or source-row identities")
 
 
-def validate_schemas(root: Path, report: IsolationReport) -> None:
+def validate_schemas(
+    root: Path, report: IsolationReport, candidate_id: Optional[str] = None
+) -> None:
     """Append structural and provenance violations for candidate-owned records.
 
     Args:
@@ -978,6 +982,7 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
             workspaces.
         report: Report that receives schema, ownership, and hash-binding
             findings.
+        candidate_id: Optional workspace ID for a scoped candidate audit.
 
     Note:
         Successful validation confirms the recorded local contract only. It
@@ -1015,6 +1020,7 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
     statistical_vetting_schema = schemas.get(STATISTICAL_VETTING_EVIDENCE_SCHEMA)
     decisive_rejection_schema = schemas.get(DECISIVE_REJECTION_SCHEMA)
     triceratops_vetting_decision_schema = schemas.get(TRICERATOPS_VETTING_DECISION_SCHEMA)
+    analysis_completion_schema = schemas.get(ANALYSIS_COMPLETION_SCHEMA)
     catalog_query_schema = schemas.get(CATALOG_QUERY_MANIFEST_SCHEMA)
     catalog_raw_metadata_schema = schemas.get(CATALOG_RAW_RESPONSE_METADATA_SCHEMA)
     catalog_snapshot_schema = schemas.get(CATALOG_SNAPSHOT_SCHEMA)
@@ -1034,7 +1040,18 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
     ldtk_prior_schema = schemas.get(LDTK_QUADRATIC_LIMB_DARKENING_PRIOR_SCHEMA)
     exofop_prior_schema = schemas.get(EXOFOP_PRIOR_RETRIEVAL_SCHEMA)
     surveys_root = candidate_root / "_surveys"
-    for workspace_dir in sorted(candidate_root.iterdir()):
+    if candidate_id is None:
+        workspace_dirs = sorted(candidate_root.iterdir())
+    else:
+        workspace_dirs = [candidate_root / candidate_id]
+        if not workspace_dirs[0].is_dir():
+            report.add(
+                workspace_dirs[0],
+                "candidate-workspace-missing",
+                "selected candidate workspace does not exist",
+            )
+            return
+    for workspace_dir in workspace_dirs:
         if not workspace_dir.is_dir() or workspace_dir.name == "_surveys":
             continue
 
@@ -1167,8 +1184,79 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
                         "schema-violation",
                         "engine run run_id does not match its directory",
                     )
-                _validate_artifacts(report, run_path, workspace_dir, instance.get("inputs"), "input")
-                _validate_artifacts(report, run_path, workspace_dir, instance.get("outputs"), "output")
+                engine = instance.get("engine")
+                run_id = instance.get("run_id")
+                outputs = instance.get("outputs")
+                legacy_mutable_run = (
+                    engine in {"statistical-vetting", "auto-vet", "sed"}
+                    and isinstance(engine, str)
+                    and isinstance(run_id, str)
+                    and isinstance(outputs, list)
+                    and not any(
+                        isinstance(artifact, dict)
+                        and isinstance(artifact.get("path"), str)
+                        and artifact["path"].startswith(
+                            "runs/{0}/{1}/".format(engine, run_id)
+                        )
+                        for artifact in outputs
+                    )
+                )
+                # These engines historically wrote mutable candidate-root
+                # outputs. Their old manifests cannot prove the bytes of a
+                # later overwritten or retired result. Keep the manifest and
+                # its inputs visible, but classify the unavailable historical
+                # output check as a warning; new run-owned snapshots remain
+                # fully validated below.
+                if legacy_mutable_run:
+                    report.add(
+                        run_path,
+                        "legacy-mutable-engine-output",
+                        "historical engine output is not run-owned; output hash validation is unavailable",
+                        severity="warning",
+                    )
+                    outputs = [
+                        artifact
+                        for artifact in outputs
+                        if isinstance(artifact, dict)
+                        and isinstance(artifact.get("path"), str)
+                        and artifact["path"].startswith(
+                            "runs/{0}/{1}/".format(engine, run_id)
+                        )
+                    ]
+                validate_inputs = not (
+                    engine == "statistical-vetting" and legacy_mutable_run
+                )
+                if validate_inputs:
+                    _validate_artifacts(report, run_path, workspace_dir, instance.get("inputs"), "input")
+                # Statistical-vetting historically recorded its canonical
+                # evidence path (outputs/statistical_vetting_evidence.json),
+                # which is mutable and may now contain a later run's bytes.
+                # Do not mislabel that historical run as tampered. New runs
+                # write an immutable snapshot below their own run directory;
+                # those outputs remain fully hash-validated.
+                if instance.get("engine") == "statistical-vetting" and isinstance(outputs, list):
+                    legacy_outputs = [
+                        artifact
+                        for artifact in outputs
+                        if isinstance(artifact, dict)
+                        and artifact.get("path") == "outputs/statistical_vetting_evidence.json"
+                    ]
+                    if legacy_outputs and not legacy_mutable_run:
+                        report.add(
+                            run_path,
+                            "legacy-mutable-engine-output",
+                            "historical statistical-vetting output uses a mutable canonical path; hash validation is unavailable",
+                            severity="warning",
+                        )
+                    outputs = [
+                        artifact
+                        for artifact in outputs
+                        if not (
+                            isinstance(artifact, dict)
+                            and artifact.get("path") == "outputs/statistical_vetting_evidence.json"
+                        )
+                    ]
+                _validate_artifacts(report, run_path, workspace_dir, outputs, "output")
 
         if rv_observations_schema is not None:
             rv_observations_path = workspace_dir / "data" / "external" / "radial_velocity_observations.json"
@@ -1262,6 +1350,29 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
                             _validate_artifacts(
                                 report, decision_path, workspace_dir,
                                 [report_artifact], "TRICERATOPS decision report",
+                            )
+
+        if analysis_completion_schema is not None:
+            analysis_path = workspace_dir / "decisions" / "analysis_completion.json"
+            if analysis_path.is_file():
+                try:
+                    instance = _read_json(analysis_path)
+                except (OSError, UnicodeError, ValueError) as exc:
+                    report.add(analysis_path, "schema-violation", "invalid JSON: {0}".format(exc))
+                else:
+                    _validate(report, analysis_path, instance, analysis_completion_schema, validate_func)
+                    if isinstance(instance, dict):
+                        if instance.get("candidate_id") != workspace_dir.name:
+                            report.add(analysis_path, "schema-violation", "analysis completion candidate_id does not match its workspace")
+                        for stage in instance.get("stages", []):
+                            if not isinstance(stage, dict):
+                                continue
+                            _validate_artifacts(
+                                report,
+                                analysis_path,
+                                workspace_dir,
+                                stage.get("evidence"),
+                                "analysis completion",
                             )
 
         if detrending_manifest_schema is not None:
@@ -2002,6 +2113,13 @@ def validate_schemas(root: Path, report: IsolationReport) -> None:
 
         _validate_triceratops_scientific_evidence(report, workspace_dir)
         _validate_localization_scientific_evidence(report, workspace_dir)
+
+    # A scoped candidate audit is for development-time verification of one
+    # workspace. The repository-wide ownership sweeps below intentionally
+    # inspect every candidate and survey record, so they belong only to the
+    # unscoped release/global-integrity command.
+    if candidate_id is not None:
+        return
 
     survey_schema = schemas.get(SURVEY_SCHEMA)
     survey_target_schema = schemas.get(SURVEY_TARGET_SCHEMA)

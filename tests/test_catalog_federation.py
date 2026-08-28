@@ -144,6 +144,22 @@ def test_nasa_known_signal_templates_use_current_tic_contracts(tmp_path):
     assert "WHERE tid = 123456789" in unquote_plus(toi.source_uri)
 
 
+@pytest.mark.parametrize("provider", ["mast", "mast-hubble-jwst"])
+def test_mast_api_v0_templates_send_service_payload_in_request_form_field(tmp_path, provider):
+    candidate = _candidate(tmp_path)
+    if provider == "mast-hubble-jwst":
+        _write_coordinate_context(candidate)
+
+    request = _request_for(PROVIDERS[provider], candidate)
+
+    assert request.headers["Content-Type"] == "application/x-www-form-urlencoded"
+    assert request.body is not None
+    form = dict(item.split("=", 1) for item in request.body.decode("ascii").split("&"))
+    assert "request" in form
+    payload = json.loads(unquote_plus(form["request"]))
+    assert payload["format"] == "json"
+
+
 @pytest.mark.parametrize("provider", ["lamost-dr11", "smoka", "mast-hubble-jwst"])
 def test_coordinate_bound_discovery_templates_are_fixed_and_metadata_only(tmp_path, provider):
     # Arrange

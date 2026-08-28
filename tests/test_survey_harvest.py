@@ -1,6 +1,7 @@
 """Tests for streamed survey harvesting and bounded autonomous execution."""
 
 import json
+from contextlib import contextmanager
 import hashlib
 from pathlib import Path
 from urllib.error import URLError
@@ -21,6 +22,7 @@ from exonym.survey_harvest import (
     harvest_tces,
     novelty_provider_urls,
     novelty_response_has_registration,
+    stream_tce_rows,
 )
 from exonym.workspace import create_candidate, load_candidate
 
@@ -412,6 +414,39 @@ def test_auto_vet_intersects_requested_sectors_with_common_archive_products():
     assert _select_download_sectors(common, None) == [2]
     with pytest.raises(RuntimeError, match="No requested sectors"):
         _select_download_sectors(common, [9])
+
+
+def test_remote_tce_stream_is_fully_staged_before_first_row(monkeypatch):
+    class Response:
+        def __init__(self):
+            self._body = b"tic,period\n123456789,3.0\n987654321,4.0\n"
+            self.read_calls = 0
+            self.finished = False
+
+        def read(self, size=-1):
+            self.read_calls += 1
+            if not self._body:
+                self.finished = True
+                return b""
+            if size is None or size < 0:
+                chunk, self._body = self._body, b""
+                return chunk
+            chunk, self._body = self._body[:size], self._body[size:]
+            return chunk
+
+    response = Response()
+
+    @contextmanager
+    def fake_https_response(*_args, **_kwargs):
+        yield response
+
+    monkeypatch.setattr("exonym.survey_harvest._https_response", fake_https_response)
+
+    rows = stream_tce_rows("https://example.invalid/release.csv")
+    assert next(rows)["tic"] == "123456789"
+    assert response.finished
+    assert response.read_calls >= 2
+    rows.close()
 
 
 @pytest.mark.parametrize("value", (0, -1, True))

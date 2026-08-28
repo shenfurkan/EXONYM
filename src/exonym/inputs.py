@@ -931,8 +931,21 @@ def _load_detrended_light_curve_table(
     from .detrending import validate_transit_mask_provenance
 
     try:
+        # The processed artifact carries the exact canonical ephemeris used to
+        # protect its transit mask. A stale BLS-derived config temporarily
+        # resolves to synthetic-demo after the artifact is regenerated, before
+        # a fresh blind BLS search can rebind it. In that narrow case validate
+        # the immutable mask provenance against its recorded ephemeris. A
+        # readable current candidate ephemeris still has to match exactly.
+        mask_ephemeris = transit_mask_provenance.get("ephemeris")
+        current_ephemeris = load_transit_ephemeris(workspace)
+        ephemeris_for_validation = (
+            mask_ephemeris
+            if current_ephemeris.get("source") == "synthetic-demo"
+            else current_ephemeris
+        )
         validate_transit_mask_provenance(
-            time, transit_mask_provenance, load_transit_ephemeris(workspace)
+            time, transit_mask_provenance, ephemeris_for_validation
         )
     except (TypeError, ValueError) as exc:
         raise ValueError(

@@ -353,7 +353,7 @@ def _read_mist_main_sequence_input(
         )
     try:
         payload = json.loads(
-            manifest_path.read_text(encoding="utf-8"),
+            manifest_path.read_text(encoding="utf-8-sig"),
             parse_constant=_reject_nonfinite_json_constant,
             parse_float=_parse_finite_json_float,
             object_pairs_hook=_reject_duplicate_json_keys,
@@ -405,7 +405,7 @@ def _load_mist_main_sequence_grid(grid_path: Path) -> Dict[str, np.ndarray]:
     }
     rows: Dict[str, List[float]] = {name: [] for name in required_columns if name != "evolutionary_stage"}
     try:
-        with grid_path.open("r", encoding="utf-8", newline="") as handle:
+        with grid_path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
             if reader.fieldnames is None or not required_columns.issubset(reader.fieldnames):
                 raise RuntimeError("frozen MIST grid lacks required main-sequence columns")

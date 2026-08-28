@@ -332,8 +332,12 @@ def _request_for(spec: ProviderSpec, candidate: CandidateWorkspace) -> CatalogRe
         }
         return CatalogRequest(
             "POST", "https://mast.stsci.edu/api/v0/invoke",
-            {"Content-Type": "application/json", "Accept": "application/json"},
-            json.dumps(payload, sort_keys=True).encode("utf-8"), {"tic": tic},
+            {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+            },
+            urlencode({"request": json.dumps(payload, sort_keys=True)}).encode("ascii"),
+            {"tic": tic, "request_encoding": "form-urlencoded"},
         )
     if spec.name == "gaia":
         source_id = _gaia_source_id(candidate)
@@ -427,8 +431,12 @@ def _request_for(spec: ProviderSpec, candidate: CandidateWorkspace) -> CatalogRe
         }
         return CatalogRequest(
             "POST", "https://mast.stsci.edu/api/v0/invoke",
-            {"Content-Type": "application/json", "Accept": "application/json"},
-            json.dumps(payload, sort_keys=True).encode("utf-8"), coordinates,
+            {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+            },
+            urlencode({"request": json.dumps(payload, sort_keys=True)}).encode("ascii"),
+            {**coordinates, "request_encoding": "form-urlencoded"},
         )
     raise ValueError("unsupported catalog provider: {0}".format(spec.name))
 

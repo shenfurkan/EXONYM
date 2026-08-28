@@ -136,6 +136,13 @@ def test_find_transits_uses_weighted_astropy_bls_and_observed_event_count(monkey
     assert result.snr == pytest.approx(6.0)
     assert result.detection_status == "no-detection"
     assert result.best_period is None
+    assert result.best_subthreshold_peak is not None
+    assert result.best_subthreshold_peak["period_days"] == pytest.approx(3.0)
+    assert result.best_subthreshold_peak["epoch_btjd"] == pytest.approx(1.0)
+    assert result.best_subthreshold_peak["depth_ppm"] == pytest.approx(3000.0)
+    assert result.best_subthreshold_peak["duration_hours"] == pytest.approx(2.0)
+    assert result.best_subthreshold_peak["ranking_snr"] == pytest.approx(6.0)
+    assert result.best_subthreshold_peak["rejection_reason"] == "below-minimum-bls-candidate-snr"
     assert result.n_distinct_transit_events >= 2
     assert result.n_period_trials == 1
 

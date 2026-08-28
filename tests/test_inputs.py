@@ -281,6 +281,31 @@ def test_detrended_loader_rejects_a_changed_transit_mask_ephemeris(tmp_path):
     )
     assert unchanged is not None
 
+    ephemeris_path.write_text(
+        json.dumps(
+            {
+                "source": "candidate-data-bls",
+                "transit": {
+                    "period_days": 3.0,
+                    "epoch_btjd": 1.0,
+                    "duration_days": 0.12,
+                    "depth_ppm": 1000.0,
+                },
+                "bls_provenance": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    # An invalidated BLS binding resolves to synthetic-demo while a fresh BLS
+    # rerun is pending. The existing detrended artifact remains usable because
+    # its own immutable mask provenance is complete and hash-bound.
+    assert load_light_curve_table(
+        workspace,
+        max_points=None,
+        require_raw_provenance=True,
+        detrending_method="running-median",
+    ) is not None
+
     write_ephemeris(1.1)
     with pytest.raises(ValueError, match="transit mask provenance is stale or mismatched"):
         load_light_curve_table(

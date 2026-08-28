@@ -604,7 +604,9 @@ def _iter_neutral_entries(root: Path) -> Iterable[Path]:
                 yield path
 
 
-def _scan_candidate_reparse_points(report: IsolationReport, candidate_root: Path) -> None:
+def _scan_candidate_reparse_points(
+    report: IsolationReport, candidate_root: Path, candidate_id: Optional[str] = None
+) -> None:
     """Reject links in candidate workspaces without inspecting their payload."""
     if not candidate_root.exists() and not candidate_root.is_symlink():
         return
@@ -616,8 +618,17 @@ def _scan_candidate_reparse_points(report: IsolationReport, candidate_root: Path
         )
         return
 
+    scan_root = candidate_root / candidate_id if candidate_id is not None else candidate_root
+    if candidate_id is not None and not scan_root.is_dir():
+        report.add(
+            scan_root,
+            "candidate-workspace-missing",
+            "selected candidate workspace does not exist",
+        )
+        return
+
     for current, directory_names, file_names in os.walk(
-        str(candidate_root), topdown=True, followlinks=False
+        str(scan_root), topdown=True, followlinks=False
     ):
         directory = Path(current)
         next_directories: List[str] = []
@@ -636,7 +647,9 @@ def _scan_candidate_reparse_points(report: IsolationReport, candidate_root: Path
                 report.add(path, "symlink-or-reparse-point", "not permitted in candidate workspaces")
 
 
-def _check_repository(root: Path, include_candidates: bool) -> IsolationReport:
+def _check_repository(
+    root: Path, include_candidates: bool, candidate_id: Optional[str] = None
+) -> IsolationReport:
     """Run the repository isolation check, optionally including candidate workspaces."""
     requested_root = Path(root)
     report = IsolationReport()
@@ -718,7 +731,9 @@ def _check_repository(root: Path, include_candidates: bool) -> IsolationReport:
             _scan_ast(report, path, relative)
 
     if include_candidates:
-        _scan_candidate_reparse_points(report, root / CANDIDATE_DIRECTORY)
+        _scan_candidate_reparse_points(
+            report, root / CANDIDATE_DIRECTORY, candidate_id=candidate_id
+        )
 
     if exception_paths:
         kept: List[Violation] = []
@@ -748,7 +763,7 @@ def check_neutral_repository(root: Path) -> IsolationReport:
     return _check_repository(root, include_candidates=False)
 
 
-def check_repository(root: Path) -> IsolationReport:
+def check_repository(root: Path, candidate_id: Optional[str] = None) -> IsolationReport:
     """Run the full isolation audit, including candidate workspaces.
 
     Args:
@@ -758,10 +773,12 @@ def check_repository(root: Path) -> IsolationReport:
         Report with protected-zone findings plus candidate-workspace link and
         ownership findings.
     """
-    return _check_repository(root, include_candidates=True)
+    return _check_repository(root, include_candidates=True, candidate_id=candidate_id)
 
 
-def run_audit(root: Path, *, use_cache: bool = True) -> IsolationReport:
+def run_audit(
+    root: Path, *, use_cache: bool = True, candidate_id: Optional[str] = None
+) -> IsolationReport:
     """Run isolation checks and candidate-record schema validation together.
 
     Args:
@@ -773,13 +790,13 @@ def run_audit(root: Path, *, use_cache: bool = True) -> IsolationReport:
         Combined isolation and schema-validation report. Unexpected schema
         validation failures are captured as report findings rather than raised.
     """
-    report = check_repository(root)
+    report = check_repository(root, candidate_id=candidate_id)
     try:
         from .schemas import validate_schemas
         from .verification_cache import candidate_verification_cache
 
         with candidate_verification_cache(root, enabled=use_cache) as cache:
-            validate_schemas(root, report)
+            validate_schemas(root, report, candidate_id=candidate_id)
         report.cache_statistics = cache.statistics()
     except Exception as exc:  # pragma: no cover - defensive
         report.add(Path(root), "schema-validation-error", str(exc))
@@ -798,6 +815,12 @@ def add_verify_arguments(parser: argparse.ArgumentParser) -> None:
     scope.add_argument("--source", action="store_true", help="Audit target-neutral source and resources only.")
     scope.add_argument("--candidates", action="store_true", help="Audit candidate data, records, and provenance.")
     parser.add_argument(
+        "--candidate",
+        dest="candidate_id",
+        default=None,
+        help="Limit --candidates validation to one candidate workspace.",
+    )
+    parser.add_argument(
         "--schemas-only",
         action="store_true",
         help="Validate schema definitions only; combine with --candidates for candidate records.",
@@ -806,13 +829,19 @@ def add_verify_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--fresh", action="store_true", help="Bypass candidate hash and metadata caches.")
 
 
-def _append_schema_validation(root: Path, report: IsolationReport, *, candidate_scope: bool) -> None:
+def _append_schema_validation(
+    root: Path,
+    report: IsolationReport,
+    *,
+    candidate_scope: bool,
+    candidate_id: Optional[str] = None,
+) -> None:
     """Append schema findings while converting unexpected validator failures to a report entry."""
     try:
         if candidate_scope:
             from .schemas import validate_schemas
 
-            validate_schemas(root, report)
+            validate_schemas(root, report, candidate_id=candidate_id)
         else:
             from .schemas import validate_schema_definitions
 
@@ -830,6 +859,7 @@ def run_verify_command(
     schemas_only: bool = False,
     fix: bool = False,
     fresh: bool = False,
+    candidate_id: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, List[str]]], IsolationReport]:
     """Run the shared ``verify`` dispatch used by both command-line entry points.
 
@@ -841,6 +871,7 @@ def run_verify_command(
         schemas_only: Limit the selected scope to JSON Schema validation.
         fix: Repair safely provable manifest and triage drift before auditing.
         fresh: Disable candidate verification-cache reuse for a full audit.
+        candidate_id: Optional workspace ID for a scoped candidate audit.
 
     Returns:
         A pair of optional remediation actions and the completed audit report.
@@ -858,6 +889,12 @@ def run_verify_command(
 
     root = Path(root).resolve()
     candidate_scope = bool(candidates or legacy_scope == "candidate")
+    if candidate_id is not None:
+        if not candidate_scope:
+            raise ValueError("--candidate requires --candidates")
+        from .workspace import validate_candidate_id
+
+        candidate_id = validate_candidate_id(candidate_id)
     if fix and not candidate_scope:
         raise ValueError("--fix requires --candidates")
 
@@ -869,9 +906,14 @@ def run_verify_command(
 
     if schemas_only:
         report = IsolationReport()
-        _append_schema_validation(root, report, candidate_scope=candidate_scope)
+        _append_schema_validation(
+            root,
+            report,
+            candidate_scope=candidate_scope,
+            candidate_id=candidate_id,
+        )
     elif candidate_scope:
-        report = run_audit(root, use_cache=not fresh)
+        report = run_audit(root, use_cache=not fresh, candidate_id=candidate_id)
     else:
         report = check_neutral_repository(root)
         _append_schema_validation(root, report, candidate_scope=False)
@@ -970,6 +1012,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             schemas_only=args.schemas_only,
             fix=args.fix,
             fresh=args.fresh,
+            candidate_id=args.candidate_id,
         )
     except ValueError as exc:
         parser.error(str(exc))

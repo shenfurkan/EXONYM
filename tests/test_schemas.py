@@ -31,6 +31,7 @@ def _make_repo(tmp_path, with_templates=True):
         "survey-robustness.schema.json",
         "survey-sensitivity.schema.json",
         "engine-run.schema.json",
+        "analysis-completion.schema.json",
         "automated-triage.schema.json",
         "radial-velocity-observations.schema.json",
         "rv-keplerian-fit.schema.json",

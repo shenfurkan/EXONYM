@@ -98,6 +98,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import multiprocessing
 import os
+import tempfile
 
 import numpy as np
 
@@ -133,6 +134,12 @@ FITTED_BIN_EXPOSURE_SECONDS = BIN_MINUTES * 60.0
 # binning by default. This keeps every selected sector while bounding the
 # likelihood workload; the loader records the policy in its returned table.
 FIT_MAX_POINTS_PER_PRODUCT = 4000
+
+# Checkpoint files are an operational recovery aid.  They must remain plain
+# NumPy arrays and scalar values so ``--resume`` never deserializes Python
+# objects supplied by an untrusted path.
+_CHECKPOINT_SCHEMA_VERSION = 1
+_CHECKPOINT_RANDOM_STATE_ALGORITHM = "MT19937"
 
 # Parameter vectors for circular and eccentric orbits
 PARAMETER_NAMES_CIRCULAR = (
@@ -3002,6 +3009,148 @@ def run_mcmc_transit_fit(
     )
 
 
+def _checkpoint_random_state_fields(random_state: Any) -> Dict[str, np.ndarray]:
+    """Convert an emcee/RandomState state into non-object NPZ fields."""
+    if not isinstance(random_state, tuple) or len(random_state) != 5:
+        raise ValueError("emcee random state has an unsupported shape")
+    algorithm, keys, position, has_gauss, cached_gaussian = random_state
+    if algorithm != _CHECKPOINT_RANDOM_STATE_ALGORITHM:
+        raise ValueError("emcee random state must use MT19937")
+    key_array = np.asarray(keys, dtype=np.uint32)
+    if key_array.ndim != 1 or key_array.size != 624:
+        raise ValueError("emcee random state has invalid MT19937 keys")
+    try:
+        position_value = int(position)
+        has_gauss_value = int(has_gauss)
+        cached_gaussian_value = float(cached_gaussian)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("emcee random state has invalid scalar fields") from exc
+    if not 0 <= position_value <= key_array.size:
+        raise ValueError("emcee random state position is outside the key array")
+    if has_gauss_value not in (0, 1) or not math.isfinite(cached_gaussian_value):
+        raise ValueError("emcee random state has invalid Gaussian cache fields")
+    return {
+        "random_state_algorithm": np.asarray(algorithm),
+        "random_state_keys": key_array,
+        "random_state_position": np.asarray(position_value, dtype=np.int64),
+        "random_state_has_gauss": np.asarray(has_gauss_value, dtype=np.int8),
+        "random_state_cached_gaussian": np.asarray(cached_gaussian_value, dtype=np.float64),
+    }
+
+
+def _checkpoint_scalar(archive: Any, name: str) -> int:
+    """Read one finite integer scalar from a no-pickle checkpoint archive."""
+    value = np.asarray(archive[name])
+    if value.shape != ():
+        raise ValueError("checkpoint field {0} must be a scalar".format(name))
+    numeric = float(value.item())
+    if not math.isfinite(numeric) or not numeric.is_integer():
+        raise ValueError("checkpoint field {0} must be a finite integer".format(name))
+    return int(numeric)
+
+
+def _write_emcee_checkpoint(
+    path: Path,
+    chain: np.ndarray,
+    iteration: int,
+    burn_in: int,
+    random_state: Any,
+) -> None:
+    """Atomically write a no-pickle emcee recovery checkpoint."""
+    chain_array = np.asarray(chain, dtype=float)
+    if chain_array.ndim != 3 or chain_array.shape[0] < 1 or not np.all(np.isfinite(chain_array)):
+        raise ValueError("checkpoint chain must be a non-empty finite three-dimensional array")
+    if int(iteration) != chain_array.shape[0] or int(burn_in) < 0:
+        raise ValueError("checkpoint iteration or burn-in is inconsistent with its chain")
+    fields: Dict[str, Any] = {
+        "checkpoint_schema_version": np.asarray(_CHECKPOINT_SCHEMA_VERSION, dtype=np.int64),
+        "chain": chain_array,
+        "iteration": np.asarray(int(iteration), dtype=np.int64),
+        "burn_in": np.asarray(int(burn_in), dtype=np.int64),
+    }
+    fields.update(_checkpoint_random_state_fields(random_state))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=path.stem + ".", suffix=".npz", dir=str(path.parent)
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        np.savez_compressed(str(temporary_path), **fields)
+        temporary_path.replace(path)
+    finally:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _load_emcee_checkpoint(
+    path: Path, expected_walkers: int, expected_dimensions: int, expected_burn_in: int
+) -> Dict[str, Any]:
+    """Load and validate a current no-pickle emcee recovery checkpoint."""
+    required_fields = {
+        "checkpoint_schema_version",
+        "chain",
+        "iteration",
+        "burn_in",
+        "random_state_algorithm",
+        "random_state_keys",
+        "random_state_position",
+        "random_state_has_gauss",
+        "random_state_cached_gaussian",
+    }
+    try:
+        with np.load(str(path), allow_pickle=False) as archive:
+            if not required_fields.issubset(set(archive.files)):
+                raise ValueError("checkpoint is missing required safe-format fields")
+            if _checkpoint_scalar(archive, "checkpoint_schema_version") != _CHECKPOINT_SCHEMA_VERSION:
+                raise ValueError("checkpoint schema version is unsupported")
+            chain = np.asarray(archive["chain"], dtype=float)
+            iteration = _checkpoint_scalar(archive, "iteration")
+            burn_in = _checkpoint_scalar(archive, "burn_in")
+            algorithm = str(np.asarray(archive["random_state_algorithm"]).item())
+            random_state = (
+                algorithm,
+                np.asarray(archive["random_state_keys"], dtype=np.uint32),
+                _checkpoint_scalar(archive, "random_state_position"),
+                _checkpoint_scalar(archive, "random_state_has_gauss"),
+                float(np.asarray(archive["random_state_cached_gaussian"]).item()),
+            )
+        _checkpoint_random_state_fields(random_state)
+        if (
+            chain.ndim != 3
+            or chain.shape[0] < 1
+            or chain.shape[1] != int(expected_walkers)
+            or chain.shape[2] != int(expected_dimensions)
+            or not np.all(np.isfinite(chain))
+        ):
+            raise ValueError("checkpoint chain shape or values do not match this fit")
+        if iteration != chain.shape[0] or burn_in != int(expected_burn_in) or burn_in < 0:
+            raise ValueError("checkpoint iteration or burn-in does not match this fit")
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "resume checkpoint is invalid or unsafe; only current Exonym no-pickle checkpoints are accepted"
+        ) from exc
+    return {
+        "chain": chain,
+        "iteration": iteration,
+        "burn_in": burn_in,
+        "random_state": random_state,
+    }
+
+
+def _shutdown_worker_pool(pool: Any, failed: bool) -> None:
+    """End spawned likelihood workers promptly after success or interruption."""
+    try:
+        if failed:
+            pool.terminate()
+        else:
+            pool.close()
+    finally:
+        pool.join()
+
+
 def _fit_emcee_candidate_transit_fit(
     workspace: CandidateWorkspace,
     n_samples: int = CPU_EMCEE_PRODUCTION,
@@ -3232,11 +3381,16 @@ def _fit_emcee_candidate_transit_fit(
         saved_rstate = np.random.RandomState(seed).get_state()
         remaining_steps = burn_in + n_samples
     else:
-        ck = np.load(resume, allow_pickle=True)
+        ck = _load_emcee_checkpoint(
+            Path(resume),
+            expected_walkers=n_walkers,
+            expected_dimensions=ndim,
+            expected_burn_in=burn_in,
+        )
         saved_chain = ck["chain"]        # shape (n_iter, n_walkers, ndim)
         saved_iter = int(ck["iteration"])
         saved_burn = int(ck["burn_in"])
-        saved_rstate = ck["random_state"].item()
+        saved_rstate = ck["random_state"]
         p0 = saved_chain[-1]             # last walker positions
         remaining_steps = burn_in + n_samples - saved_iter
         if remaining_steps <= 0:
@@ -3321,9 +3475,9 @@ def _fit_emcee_candidate_transit_fit(
                 if checkpoint_interval > 0 and iteration % checkpoint_interval == 0 and iteration > 0:
                     try:
                         raw_snap = sampler.get_chain(flat=False)
-                        np.savez(
-                            str(checkpoint_path),
-                            chain=raw_snap,
+                        _write_emcee_checkpoint(
+                            checkpoint_path,
+                            raw_snap,
                             iteration=iteration,
                             burn_in=burn_in,
                             random_state=sampler.random_state,
@@ -3345,10 +3499,13 @@ def _fit_emcee_candidate_transit_fit(
                             old_tau = tau_mean
                     except Exception:
                         pass
-    finally:
+    except BaseException:
         if pool is not None:
-            pool.close()
-            pool.join()
+            _shutdown_worker_pool(pool, failed=True)
+        raise
+    else:
+        if pool is not None:
+            _shutdown_worker_pool(pool, failed=False)
 
     if not _resume_done:
         raw_chain = sampler.get_chain(discard=burn_in, flat=False)

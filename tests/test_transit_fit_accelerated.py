@@ -9,8 +9,11 @@ from exonym.transit_fit import (
     GPU_NUTS_TARGET_ACCEPT_PROB,
     GPU_NUTS_WARMUP,
     _GpuBackendUnavailable,
+    _load_emcee_checkpoint,
+    _shutdown_worker_pool,
     _summarize_accelerated_samples,
     _validate_accelerated_transit_fit_data,
+    _write_emcee_checkpoint,
     fit_transit_light_curve,
     run_mcmc_transit_fit,
 )
@@ -128,6 +131,62 @@ def test_candidate_fit_auto_dispatches_to_gpu_nuts_when_available(monkeypatch):
     assert captured["num_warmup"] == GPU_NUTS_WARMUP
     assert captured["num_samples"] == GPU_NUTS_SAMPLES
     assert captured["target_accept_prob"] == GPU_NUTS_TARGET_ACCEPT_PROB
+
+
+def test_emcee_checkpoint_round_trip_uses_only_non_pickle_fields(tmp_path):
+    path = tmp_path / "checkpoint.npz"
+    chain = np.arange(2 * 4 * 3, dtype=float).reshape(2, 4, 3)
+    random_state = np.random.RandomState(9).get_state()
+
+    _write_emcee_checkpoint(path, chain, iteration=2, burn_in=1, random_state=random_state)
+
+    with np.load(path, allow_pickle=False) as archive:
+        assert "random_state" not in archive.files
+        assert archive["checkpoint_schema_version"].item() == 1
+    restored = _load_emcee_checkpoint(path, expected_walkers=4, expected_dimensions=3, expected_burn_in=1)
+
+    assert np.array_equal(restored["chain"], chain)
+    assert restored["iteration"] == 2
+    assert restored["burn_in"] == 1
+    assert restored["random_state"][0] == "MT19937"
+    assert np.array_equal(restored["random_state"][1], random_state[1])
+
+
+def test_emcee_checkpoint_rejects_legacy_pickle_payload(tmp_path):
+    path = tmp_path / "legacy-checkpoint.npz"
+    np.savez(
+        path,
+        chain=np.ones((2, 4, 3)),
+        iteration=2,
+        burn_in=1,
+        random_state=np.asarray(np.random.RandomState(9).get_state(), dtype=object),
+    )
+
+    with pytest.raises(RuntimeError, match="invalid or unsafe"):
+        _load_emcee_checkpoint(path, expected_walkers=4, expected_dimensions=3, expected_burn_in=1)
+
+
+def test_worker_pool_terminates_after_failure_and_closes_after_success():
+    class FakePool:
+        def __init__(self):
+            self.calls = []
+
+        def close(self):
+            self.calls.append("close")
+
+        def terminate(self):
+            self.calls.append("terminate")
+
+        def join(self):
+            self.calls.append("join")
+
+    failed_pool = FakePool()
+    _shutdown_worker_pool(failed_pool, failed=True)
+    assert failed_pool.calls == ["terminate", "join"]
+
+    successful_pool = FakePool()
+    _shutdown_worker_pool(successful_pool, failed=False)
+    assert successful_pool.calls == ["close", "join"]
 
 
 def test_normalized_output_has_every_required_posterior_summary():

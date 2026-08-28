@@ -309,6 +309,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Per-signal configuration suffix (for example .01).",
     )
 
+    analysis_status_parser = commands.add_parser(
+        "analysis-status", help="Record candidate-local analysis coverage and unavailable stages."
+    )
+    analysis_status_parser.add_argument("candidate_id")
+
     rejection_parser = commands.add_parser(
         "record-rejection",
         help="Record candidate-local decisive evidence that makes TRICERATOPS inapplicable.",
@@ -470,6 +475,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Search engine: BLS or optional native-cadence Transit Least Squares.",
     )
     search_parser.add_argument(
+        "--duration-grid-hours",
+        nargs="+",
+        type=float,
+        default=None,
+        metavar="HOURS",
+        help=(
+            "BLS-only blind-search transit-duration trials in hours. "
+            "Cannot be combined with --signal."
+        ),
+    )
+    search_parser.add_argument(
         "--signal",
         default=None,
         help="Targeted search using prior from config/signals/transit_config<signal>.json",
@@ -606,7 +622,7 @@ def _build_parser() -> argparse.ArgumentParser:
     fit_parser.add_argument(
         "--resume",
         default=None,
-        help="Path to a previous checkpoint .npz to resume from.",
+        help="Path to a current Exonym no-pickle checkpoint .npz to resume from.",
     )
 
     phasecurve_parser = commands.add_parser(
@@ -780,6 +796,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 schemas_only=args.schemas_only,
                 fix=args.fix,
                 fresh=args.fresh,
+                candidate_id=args.candidate_id,
             )
             if remediated is not None:
                 _print_json({"remediated": remediated})
@@ -1056,6 +1073,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(triage_path.relative_to(repository_root).as_posix())
             return 0
 
+        if args.command == "analysis-status":
+            from .analysis_status import build_analysis_status
+
+            candidate = load_candidate(repository_root, args.candidate_id)
+            print(build_analysis_status(candidate).relative_to(repository_root).as_posix())
+            return 0
+
         if args.command == "record-rejection":
             from .statistical_vetting import record_decisive_rejection
 
@@ -1210,6 +1234,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 period_max=args.period_max,
                 signal=args.signal,
                 engine=args.engine,
+                duration_grid_hours=args.duration_grid_hours,
                 detrending_method=args.detrending_method,
             )
             print(output.relative_to(repository_root).as_posix())

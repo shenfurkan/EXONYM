@@ -169,6 +169,7 @@ class BLSSearchResult:
     n_period_trials: int = 0
     detection_status: str = "detected"
     best_depth_uncertainty_ppm: Optional[float] = None
+    best_subthreshold_peak: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -185,6 +186,10 @@ class BLSSearchResult:
                 if self.best_depth_uncertainty_ppm is not None
                 else None
             ),
+            # DIAGNOSTIC_ONLY: this field cannot seed an ephemeris or satisfy
+            # a detection gate. It explains why the best finite BLS peak was
+            # retained as a no-detection result.
+            "best_subthreshold_peak": self.best_subthreshold_peak,
         }
 
 
@@ -637,6 +642,16 @@ def find_transits(
             n_period_trials=int(periodogram.period.size),
             detection_status="no-detection",
             best_depth_uncertainty_ppm=best["depth_err"] * 1e6,
+            best_subthreshold_peak={
+                "period_days": best["period"],
+                "epoch_btjd": best["epoch"],
+                "depth_ppm": best["depth"] * 1e6,
+                "depth_uncertainty_ppm": best["depth_err"] * 1e6,
+                "duration_hours": duration_hours,
+                "ranking_snr": best["snr"],
+                "n_distinct_transit_events": int(best["n_events"]),
+                "rejection_reason": "below-minimum-bls-candidate-snr",
+            },
         )
 
     # NUMERICAL_GUARD: clamp non-negative snr; the gate above ensures it is

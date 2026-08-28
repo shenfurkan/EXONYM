@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/analysis-completion-1.0.json",
+  "title": "Candidate-local analysis coverage record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "candidate_id", "generated_at", "overall_status", "claim_eligible", "scientific_interpretation", "stages"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "candidate_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "overall_status": {"enum": ["complete", "partial"]},
+    "claim_eligible": {"const": false},
+    "scientific_interpretation": {"type": "string", "minLength": 1},
+    "stages": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/stage"}}
+  },
+  "$defs": {
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "status", "evidence", "reason"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "status": {"enum": ["succeeded", "unavailable", "blocked"]},
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/artifact"}},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    }
+  }
+}
