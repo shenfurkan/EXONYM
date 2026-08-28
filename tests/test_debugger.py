@@ -112,6 +112,24 @@ def test_blocking_static_finding_preserves_sandbox(tmp_path: Path, monkeypatch) 
     assert static.findings[0].rule_id == "EXD003"
 
 
+def test_debugger_infrastructure_failure_keeps_traceback_and_sandbox(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Unexpected debugger faults preserve reproducible failure evidence."""
+    monkeypatch.setattr(
+        debugger,
+        "_run_static_contract_scan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("synthetic fault")),
+    )
+
+    report = debugger.run_debug(tmp_path, mode="changed")
+
+    failure = report.run_dir / "tools" / "debugger-internal-error.txt"
+    assert report.exit_code == 1
+    assert (report.run_dir / "tmp").is_dir()
+    assert "RuntimeError: synthetic fault" in failure.read_text(encoding="utf-8")
+
+
 def test_sarif_contains_static_source_locations(tmp_path: Path, monkeypatch) -> None:
     """SARIF output carries source locations for editor and CI integration."""
     source = tmp_path / "src" / "exonym" / "unsafe.py"

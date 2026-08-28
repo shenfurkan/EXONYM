@@ -15,6 +15,7 @@ import os
 import shutil
 import subprocess
 import sys
+import traceback
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -214,10 +215,10 @@ def run_debug(
         for name, command in _tool_commands(root, mode, changed_paths, tmp_dir):
             results.append(_run_tool(name, command, root, environment, tools_dir))
         preserve_tmp = any(result.status in ("failed", "error") for result in results)
-    except Exception as exc:  # noqa: BLE001 - preserve the sandbox for debugger faults.
+    except Exception as exc:  # exonym: fail-closed - preserve sandbox on debugger faults.
         failure_path = tools_dir / "debugger-internal-error.txt"
         failure_path.write_text(
-            "{0}: {1}\n".format(type(exc).__name__, exc), encoding="utf-8"
+            traceback.format_exc(), encoding="utf-8"
         )
         results.append(
             ToolResult(
@@ -226,7 +227,9 @@ def run_debug(
                 command=[],
                 returncode=None,
                 output_path=_relative(run_dir, failure_path),
-                detail="Unexpected debugger infrastructure failure.",
+                detail="Unexpected debugger infrastructure failure: {0}".format(
+                    type(exc).__name__
+                ),
             )
         )
         preserve_tmp = True
@@ -653,7 +656,8 @@ def _run_static_contract_scan(root: Path, paths: Sequence[Path], tools_dir: Path
     for relative in python_paths:
         source_path = root / relative
         try:
-            tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(relative))
+            source = source_path.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=str(relative))
         except (OSError, SyntaxError, UnicodeError) as exc:
             findings.append(
                 Finding(
@@ -663,7 +667,7 @@ def _run_static_contract_scan(root: Path, paths: Sequence[Path], tools_dir: Path
                 )
             )
             continue
-        findings.extend(_scan_tree(tree, relative))
+        findings.extend(_scan_tree(tree, relative, source))
 
     output_path = tools_dir / "static-contract.json"
     output_path.write_text(
@@ -682,7 +686,7 @@ def _run_static_contract_scan(root: Path, paths: Sequence[Path], tools_dir: Path
     )
 
 
-def _scan_tree(tree: ast.AST, relative: Path) -> List[Finding]:
+def _scan_tree(tree: ast.AST, relative: Path, source: str) -> List[Finding]:
     """Return high-signal unsafe-operation and exception findings for one module."""
     findings: List[Finding] = []
     for node in ast.walk(tree):
@@ -705,9 +709,23 @@ def _scan_tree(tree: ast.AST, relative: Path) -> List[Finding]:
         if isinstance(node, ast.ExceptHandler):
             if node.type is None:
                 findings.append(_finding("EXD101", "warning", relative, node, "bare except hides control-flow and system exceptions", "Catch the narrow expected exception type."))
-            elif isinstance(node.type, ast.Name) and node.type.id == "Exception":
+            elif (
+                isinstance(node.type, ast.Name)
+                and node.type.id == "Exception"
+                and not _is_documented_fail_closed_handler(node, source)
+            ):
                 findings.append(_finding("EXD102", "warning", relative, node, "broad Exception handler requires review", "Catch explicit failure types or document the fail-closed boundary."))
     return findings
+
+
+def _is_documented_fail_closed_handler(handler: ast.ExceptHandler, source: str) -> bool:
+    """Return whether an intentional broad handler has an explicit rationale."""
+    lines = source.splitlines()
+    line_index = handler.lineno - 1
+    return (
+        0 <= line_index < len(lines)
+        and "# exonym: fail-closed" in lines[line_index].lower()
+    )
 
 
 def _dotted_name(node: ast.AST) -> str:

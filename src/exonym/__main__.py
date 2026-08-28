@@ -779,7 +779,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         try:
             _sys.stdout.reconfigure(encoding="utf-8", errors="replace")
             _sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
+        except (AttributeError, OSError, ValueError):
             pass
 
     parser = _build_parser()

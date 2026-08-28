@@ -151,7 +151,7 @@ def _check_user_key() -> bool:
             if r:
                 sys.stdin.read(1)
                 return True
-        except Exception:
+        except (OSError, TypeError, ValueError):
             pass
     return False
 
@@ -450,7 +450,7 @@ def run_banner(skip: bool = False) -> None:
                 _wait_for_user_key(timeout=30.0)
                 break
 
-    except Exception:  # noqa: BLE001
+    except (OSError, RuntimeError, ValueError):
         pass
     finally:
         stdout.write(_ESC + "[?25h")   # restore cursor

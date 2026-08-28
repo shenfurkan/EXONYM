@@ -859,8 +859,12 @@ def run_audit(
         with candidate_verification_cache(root, enabled=use_cache) as cache:
             validate_schemas(root, report, candidate_id=candidate_id)
         report.cache_statistics = cache.statistics()
-    except Exception as exc:  # pragma: no cover - defensive
-        report.add(Path(root), "schema-validation-error", str(exc))
+    except Exception as exc:  # exonym: fail-closed - return the schema error in the audit report.
+        report.add(
+            Path(root),
+            "schema-validation-error",
+            "{0}: {1}".format(type(exc).__name__, exc),
+        )
     return report
 
 
@@ -907,8 +911,12 @@ def _append_schema_validation(
             from .schemas import validate_schema_definitions
 
             validate_schema_definitions(root, report)
-    except Exception as exc:  # pragma: no cover - defensive
-        report.add(Path(root), "schema-validation-error", str(exc))
+    except Exception as exc:  # exonym: fail-closed - return the schema error in the audit report.
+        report.add(
+            Path(root),
+            "schema-validation-error",
+            "{0}: {1}".format(type(exc).__name__, exc),
+        )
 
 
 def run_verify_command(
