@@ -3,7 +3,13 @@ repos:
     hooks:
       - id: exonym-verify
         name: EXONYM isolation and schema audit
-        entry: python -m exonym --root . verify
+        entry: exonym --root . verify --source
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: exonym-debug-changed
+        name: EXONYM candidate-free changed-source debugger
+        entry: exonym --root . debug --changed
         language: system
         pass_filenames: false
         always_run: true

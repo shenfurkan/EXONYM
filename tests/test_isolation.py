@@ -50,13 +50,14 @@ def test_clean_repository_passes(tmp_path):
 
 
 def test_neutral_audit_does_not_traverse_candidate_workspaces(tmp_path, monkeypatch):
-    # Source audits read metadata for aliases but must not walk candidate payloads.
+    # Source audits must not read candidate metadata or walk candidate payloads.
     repo = _make_repo(tmp_path)
 
     def fail_if_called(*args, **kwargs):
         raise AssertionError("candidate workspace was traversed")
 
     monkeypatch.setattr(isolation, "_scan_candidate_reparse_points", fail_if_called)
+    monkeypatch.setattr(isolation, "_alias_tokens", fail_if_called)
 
     assert check_neutral_repository(repo).ok
 
@@ -69,7 +70,7 @@ def test_neutral_audit_detects_registered_alias_leaks(tmp_path):
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     _write(repo, "docs/note.md", "Synthetic Alias 42 must remain candidate-local.\n")
 
-    report = check_neutral_repository(repo)
+    report = check_repository(repo)
 
     assert not report.ok
     assert any(violation.rule == "registered-alias-leak" for violation in report.violations)

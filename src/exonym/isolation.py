@@ -29,7 +29,6 @@ from datetime import date
 import json
 import os
 import re
-import sys
 import tokenize
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -55,6 +54,8 @@ NEUTRAL_EXTENSIONS = {
 # this into an allowlist of project source folders.
 EXCLUDED_TOP_LEVEL_DIRECTORIES = {".agents", ".opencode", "images", "assets", "textbooks", "log", "logs"}
 EXCLUDED_DIRECTORY_NAMES = {".git", "__pycache__", ".pytest_cache"}
+DEBUG_SOURCE_DIRECTORIES = {".github", "policy", "schemas", "src", "templates", "tests"}
+DEBUG_SOURCE_FILES = {".pre-commit-config.yaml", "pyproject.toml"}
 
 RESEARCH_PAYLOAD_EXTENSIONS = {
     ".fits", ".fit", ".fz", ".csv", ".tsv", ".parquet",
@@ -604,6 +605,37 @@ def _iter_neutral_entries(root: Path) -> Iterable[Path]:
                 yield path
 
 
+def _iter_debug_source_entries(root: Path) -> Iterable[Path]:
+    """Yield only debugger-owned source inputs without reading candidate/ or operator folders."""
+    for name in sorted(DEBUG_SOURCE_DIRECTORIES):
+        source_root = root / name
+        if not source_root.exists():
+            continue
+        if source_root.is_file():
+            yield source_root
+            continue
+        for current, directory_names, file_names in os.walk(
+            str(source_root), topdown=True, followlinks=False
+        ):
+            directory = Path(current)
+            next_directories: List[str] = []
+            for child_name in sorted(directory_names):
+                path = directory / child_name
+                relative = path.relative_to(root)
+                yield path
+                if not is_reparse_point(path) and not _is_excluded_neutral_directory(relative):
+                    next_directories.append(child_name)
+            directory_names[:] = next_directories
+            for child_name in sorted(file_names):
+                path = directory / child_name
+                if not _is_excluded_neutral_directory(path.relative_to(root)):
+                    yield path
+    for name in sorted(DEBUG_SOURCE_FILES):
+        path = root / name
+        if path.is_file():
+            yield path
+
+
 def _scan_candidate_reparse_points(
     report: IsolationReport, candidate_root: Path, candidate_id: Optional[str] = None
 ) -> None:
@@ -648,7 +680,12 @@ def _scan_candidate_reparse_points(
 
 
 def _check_repository(
-    root: Path, include_candidates: bool, candidate_id: Optional[str] = None
+    root: Path,
+    include_candidates: bool,
+    candidate_id: Optional[str] = None,
+    *,
+    include_candidate_aliases: bool = True,
+    debug_source_only: bool = False,
 ) -> IsolationReport:
     """Run the repository isolation check, optionally including candidate workspaces."""
     requested_root = Path(root)
@@ -661,26 +698,28 @@ def _check_repository(
         )
     root = requested_root.resolve()
     exception_paths = _load_exceptions(root, report)
-    # Source audits read registered metadata solely to enforce alias isolation;
-    # they still do not traverse candidate-owned payload trees.
-    alias_tokens = _alias_tokens(root / CANDIDATE_DIRECTORY)
+    # Source-only audits must not access candidate metadata.  Full repository
+    # verification supplies registered aliases to enforce their isolation.
+    alias_tokens = _alias_tokens(root / CANDIDATE_DIRECTORY) if include_candidate_aliases else {}
 
-    archive_root = root / "archive"
-    if archive_root.exists() or archive_root.is_symlink():
-        report.add(
-            archive_root,
-            "top-level-archive-forbidden",
-            "archived targets must remain under candidate/<candidate-id>/",
-        )
-    data_root = root / "data"
-    if data_root.exists() or data_root.is_symlink():
-        report.add(
-            data_root,
-            "top-level-data-forbidden",
-            "target data must live under candidate/<candidate-id>/data/",
-        )
+    if not debug_source_only:
+        archive_root = root / "archive"
+        if archive_root.exists() or archive_root.is_symlink():
+            report.add(
+                archive_root,
+                "top-level-archive-forbidden",
+                "archived targets must remain under candidate/<candidate-id>/",
+            )
+        data_root = root / "data"
+        if data_root.exists() or data_root.is_symlink():
+            report.add(
+                data_root,
+                "top-level-data-forbidden",
+                "target data must live under candidate/<candidate-id>/data/",
+            )
 
-    for path in _iter_neutral_entries(root):
+    entries = _iter_debug_source_entries(root) if debug_source_only else _iter_neutral_entries(root)
+    for path in entries:
         if is_reparse_point(path):
             report.add(path, "symlink-or-reparse-point", "not permitted outside candidate/")
             continue
@@ -751,7 +790,7 @@ def _check_repository(
 
 
 def check_neutral_repository(root: Path) -> IsolationReport:
-    """Audit the protected shared zone without reading candidate payloads.
+    """Audit the protected shared zone without reading candidate workspaces.
 
     Args:
         root: Repository root to audit.
@@ -760,7 +799,29 @@ def check_neutral_repository(root: Path) -> IsolationReport:
         Report containing neutral-zone ownership, identifier-leak, AST, and
         reparse-point findings.
     """
-    return _check_repository(root, include_candidates=False)
+    return _check_repository(
+        root,
+        include_candidates=False,
+        include_candidate_aliases=False,
+    )
+
+
+def run_debug_source_audit(root: Path) -> IsolationReport:
+    """Audit debugger-owned source paths without accessing candidate workspaces.
+
+    This is intentionally narrower than :func:`check_neutral_repository`:
+    it limits traversal to debugger-owned code, schema, template, policy, and
+    test paths.  Both source-only modes are forbidden from reading
+    ``candidate/`` in any form.
+    """
+    report = _check_repository(
+        root,
+        include_candidates=False,
+        include_candidate_aliases=False,
+        debug_source_only=True,
+    )
+    _append_schema_validation(Path(root).resolve(), report, candidate_scope=False)
+    return report
 
 
 def check_repository(root: Path, candidate_id: Optional[str] = None) -> IsolationReport:

@@ -14,6 +14,7 @@ Commands:
   plot     Generate diagnostic vetting figures for a candidate
   fetch-priors Fetch catalog parameters from ExoFOP and save to transit config
   verify   Audit source or candidate integrity with scoped cache-aware checks
+  debug    Run candidate-free source diagnostics and synthetic regressions
 
 Scientific analysis commands:
   asteroseismology  Oscillation envelope, Delta-nu, and seismic M*/R*
@@ -440,6 +441,14 @@ def _build_parser() -> argparse.ArgumentParser:
     verify_parser = commands.add_parser("verify", help="Audit source isolation or candidate integrity.")
     add_verify_arguments(verify_parser)
 
+    debug_parser = commands.add_parser(
+        "debug",
+        help="Audit target-neutral code without reading or writing candidate workspaces.",
+    )
+    from .debugger import add_debug_arguments
+
+    add_debug_arguments(debug_parser)
+
     export_paper_parser = commands.add_parser(
         "export-paper", help="Export candidate evidence into a candidate-local manuscript macro bundle."
     )
@@ -787,6 +796,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     try:
+        if args.command == "debug":
+            from .debugger import format_debug_report, run_debug
+
+            report = run_debug(
+                repository_root,
+                mode=args.debug_mode,
+                since=args.since,
+            )
+            print(format_debug_report(report, args.debug_format))
+            return report.exit_code
+
         if args.command == "verify":
             remediated, report = run_verify_command(
                 repository_root,

@@ -368,6 +368,7 @@ They affect CLI presentation only and never alter an artifact or gate.
 | `record-rejection <candidate-id>` | `--reason`, `--evidence` | Records an immutable candidate-local reason why TRICERATOPS is inappropriate. |
 | `verify --source` | `--schemas-only` | Audits shared files and validates shared schema definitions without traversing `candidate/`. |
 | `verify --candidates` | `--schemas-only`, `--fresh`, `--fix` | Runs the cache-aware candidate integrity audit. `--fresh` rehashes, and `--fix` repairs safe derived drift. |
+| `debug --changed` / `debug --full` | `--since <git-ref>`, `--format {text,json,sarif}` | Runs source-only diagnostics and synthetic regressions. It never traverses `candidate/`; reports and temporary test sandboxes are stored under `log/debug/`, with failed sandboxes retained for investigation. |
 | `export-paper <candidate-id>` | `--signal` | Writes candidate-local TeX macros and a hash-bound manuscript export manifest without making a claim. |
 
 ### Acquisition, search, and screening commands

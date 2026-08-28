@@ -3,27 +3,27 @@ name: policy
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "17 3 * * *"
 
 jobs:
   policy:
     runs-on: ubuntu-latest
+    env:
+      EXONYM_REPO_ROOT: ""
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.9"
       - name: Install
-        run: pip install -e ".[test,security]"
-      - name: Compile check
-        run: python -m compileall -q src tests
-      - name: Unit tests
-        run: python -m pytest -q
-      - name: Python security scan
-        run: bandit -r src -lll
-      - name: Isolation audit
-        run: python -m exonym --root . verify --source
-      - name: JSON schema validation
-        run: python -m exonym --root . verify --candidates
+        run: pip install -e ".[test,security,debug]"
+      - name: Candidate-free changed-source debugger
+        env:
+          DEBUG_SINCE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: exonym --root . debug --changed --since "$DEBUG_SINCE"
       # Semgrep 1.136.0 publishes wheels through Python 3.11 and its
       # OpenTelemetry dependency imports pkg_resources from setuptools.
       - name: Set up Semgrep runtime
@@ -36,6 +36,35 @@ jobs:
           pipx run --python "${{ steps.semgrep-python.outputs.python-path }}"
           --pip-args="setuptools<81" "semgrep==1.136.0" scan
           --config p/python --severity ERROR --error --metrics=off src
+      - name: Upload debug report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-changed-report
+          path: log/debug
+          if-no-files-found: ignore
+
+  debug-full:
+    if: github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      EXONYM_REPO_ROOT: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: Install debug environment
+        run: pip install -e ".[test,security,debug]"
+      - name: Candidate-free full debugger
+        run: exonym --root . debug --full
+      - name: Upload full debug report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-full-report
+          path: log/debug
+          if-no-files-found: ignore
 
   secrets:
     runs-on: ubuntu-latest

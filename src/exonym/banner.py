@@ -477,6 +477,7 @@ def print_cli_overview() -> None:
         f"  {_BOLD}{'freeze':<18}{_RESET} Build an immutable reproducibility release bundle",
         f"  {_BOLD}{'verify-release':<18}{_RESET} Replay and verify bundle integrity and offline load",
         f"  {_BOLD}{'verify':<18}{_RESET} Audit shared code; use 'verify candidate' for workspaces",
+        f"  {_BOLD}{'debug':<18}{_RESET} Audit code and synthetic tests without touching candidate workspaces",
         "",
         _BOLD + "SCIENTIFIC ANALYSIS & VETTING" + _RESET,
         f"  {_BOLD}{'search':<18}{_RESET} Run BLS transit search on candidate photometry",
