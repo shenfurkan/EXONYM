@@ -58,6 +58,7 @@ docs/
 #LOCAL WORKSPACE
 
 methods/
+log/
 literature/
 resources/
 .agents/
