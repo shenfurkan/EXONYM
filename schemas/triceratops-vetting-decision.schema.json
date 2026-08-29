@@ -8,6 +8,7 @@
     "schema_version", "candidate_id", "generated_at", "signal",
     "execution_status", "triage_status", "result_status", "FPP", "NFPP",
     "blocking_reasons", "error", "input_artifacts", "triceratops_report",
+    "audit_status", "audit_invalid_reason",
     "claim_eligible"
   ],
   "properties": {
@@ -37,8 +38,34 @@
     "triceratops_report": {
       "anyOf": [{ "$ref": "#/$defs/artifact" }, { "type": "null" }]
     },
+    "audit_status": { "enum": ["valid", "invalid"] },
+    "audit_invalid_reason": { "type": ["string", "null"], "minLength": 1 },
     "claim_eligible": { "const": false }
   },
+  "allOf": [
+    {
+      "if": { "properties": { "audit_status": { "const": "valid" } } },
+      "then": {
+        "properties": {
+          "execution_status": { "const": "succeeded" },
+          "FPP": { "type": "number", "minimum": 0, "maximum": 1 },
+          "NFPP": { "type": "number", "minimum": 0, "maximum": 1 },
+          "triceratops_report": { "$ref": "#/$defs/artifact" },
+          "audit_invalid_reason": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "audit_status": { "const": "invalid" } } },
+      "then": {
+        "properties": {
+          "FPP": { "type": "null" },
+          "NFPP": { "type": "null" },
+          "audit_invalid_reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  ],
   "$defs": {
     "artifact": {
       "type": "object",

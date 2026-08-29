@@ -603,7 +603,7 @@ def extract_tpf_difference_image(
     path = cube["path"]
     try:
         with fits.open(path, memmap=False) as hdul:
-            pix_hdu, ap_hdu = hdul[1], hdul[2]
+            _, ap_hdu = hdul[1], hdul[2]
             aperture = np.asarray(ap_hdu.data)
             # Pipeline optimal aperture: bit 1 (= value 2) marks pixels used
             # by the SPOC photometric extraction (Twicken et al. 2018).
@@ -626,7 +626,6 @@ def extract_tpf_difference_image(
     time = cube["time"]
     quality = cube["quality"]
     flux = cube["flux"]
-    shape = pipeline.shape
     # Quality-filter: reject cadences whose bitwise quality intersects
     # the hard mask (momentum dumps, desat, cosmic rays).
     good = (

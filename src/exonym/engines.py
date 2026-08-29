@@ -14,15 +14,17 @@ calibrated or its result is a claim.
 from __future__ import annotations
 
 import hashlib
-import importlib
 import importlib.util
+from importlib.metadata import PackageNotFoundError, distribution, version
 import json
-import math
 import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
+
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.version import InvalidVersion, Version
 
 from . import __version__
 from .workspace import CandidateWorkspace, load_candidate
@@ -39,6 +41,8 @@ class EngineDescriptor:
             with the engine.
         module_name (str): Importable module path used for availability checks.
         description (str): Short user-facing capability summary.
+        distribution_name (Optional[str]): Installed distribution name when it
+            differs from the importable top-level module.
     """
 
     name: str
@@ -46,6 +50,7 @@ class EngineDescriptor:
     optional_group: str
     module_name: str
     description: str
+    distribution_name: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -61,6 +66,9 @@ class EngineStatus:
         installed (bool): Whether the top-level module has an import spec.
         version (Optional[str]): Installed package or module version when it
             can be determined without treating absence as an error.
+        dependency_issues (Tuple[str, ...]): Unsatisfied direct distribution
+            requirements detected from local package metadata. The check never
+            imports an engine or contacts a package index.
     """
 
     name: str
@@ -70,6 +78,7 @@ class EngineStatus:
     description: str
     installed: bool
     version: Optional[str]
+    dependency_issues: Tuple[str, ...] = ()
 
 
 # Target-neutral canonical catalog of Exonym engines
@@ -101,6 +110,7 @@ _ENGINE_CATALOG: Tuple[EngineDescriptor, ...] = (
         optional_group="core",
         module_name="batman",
         description="Mandel-Agol transit light curve modeler.",
+        distribution_name="batman-package",
     ),
     EngineDescriptor(
         name="emcee",
@@ -220,6 +230,7 @@ _ENGINE_CATALOG: Tuple[EngineDescriptor, ...] = (
         optional_group="core",
         module_name="batman",
         description="Transit timing variation (O-C) diagram and resonance search.",
+        distribution_name="batman-package",
     ),
     EngineDescriptor(
         name="phasecurve",
@@ -252,21 +263,45 @@ def _runtime_version_fields(value: object) -> Dict[str, Any]:
     return {"version": version, "version_known": version is not None}
 
 
-def _get_module_version(module_name: str) -> Optional[str]:
-    """Retrieve an installed top-level package version when it is observable."""
-    package_name = module_name.split(".")[0]
+def _get_distribution_version(distribution_name: str) -> Optional[str]:
+    """Retrieve a locally installed distribution version without importing it."""
     try:
-        from importlib.metadata import version
-
-        return _known_version(version(package_name))
-    except Exception:
-        pass
-
-    try:
-        mod = importlib.import_module(package_name)
-        return _known_version(getattr(mod, "__version__", None))
-    except Exception:
+        return _known_version(version(distribution_name))
+    except PackageNotFoundError:
         return None
+
+
+def _dependency_issues(distribution_name: str) -> Tuple[str, ...]:
+    """Check direct installed-package requirements using local metadata only."""
+    try:
+        requirements = distribution(distribution_name).requires or []
+    except PackageNotFoundError:
+        return (f"distribution metadata for '{distribution_name}' is unavailable",)
+
+    issues: List[str] = []
+    for raw_requirement in requirements:
+        try:
+            requirement = Requirement(raw_requirement)
+        except InvalidRequirement:
+            issues.append(f"invalid declared requirement {raw_requirement!r}")
+            continue
+        if requirement.marker is not None and not requirement.marker.evaluate():
+            continue
+        try:
+            installed_version = version(requirement.name)
+        except PackageNotFoundError:
+            issues.append(f"requires {requirement}, but '{requirement.name}' is not installed")
+            continue
+        try:
+            compatible = requirement.specifier.contains(Version(installed_version), prereleases=True)
+        except InvalidVersion:
+            issues.append(
+                f"requires {requirement}, but '{requirement.name}' has invalid version {installed_version!r}"
+            )
+            continue
+        if not compatible:
+            issues.append(f"requires {requirement}, but {requirement.name} {installed_version} is installed")
+    return tuple(issues)
 
 
 def get_engine_status(descriptor: EngineDescriptor) -> EngineStatus:
@@ -276,13 +311,18 @@ def get_engine_status(descriptor: EngineDescriptor) -> EngineStatus:
         descriptor (EngineDescriptor): Static registration data for the engine.
 
     Returns:
-        EngineStatus: Import-spec availability and best-effort version metadata.
-        It does not execute the engine or validate its interface.
+        EngineStatus: Import-spec availability, local version metadata, and
+        direct dependency contract findings. It does not execute the engine.
     """
     package_name = descriptor.module_name.split(".")[0]
-    spec = importlib.util.find_spec(package_name)
+    try:
+        spec = importlib.util.find_spec(package_name)
+    except (ImportError, AttributeError, ValueError):
+        spec = None
     installed = spec is not None
-    version = _get_module_version(descriptor.module_name) if installed else None
+    distribution_name = descriptor.distribution_name or package_name
+    installed_version = _get_distribution_version(distribution_name) if installed else None
+    dependency_issues = _dependency_issues(distribution_name) if installed else ()
 
     return EngineStatus(
         name=descriptor.name,
@@ -291,7 +331,8 @@ def get_engine_status(descriptor: EngineDescriptor) -> EngineStatus:
         module_name=descriptor.module_name,
         description=descriptor.description,
         installed=installed,
-        version=version,
+        version=installed_version,
+        dependency_issues=dependency_issues,
     )
 
 
@@ -338,8 +379,8 @@ def check_engine(name: str) -> Tuple[bool, str]:
 
     Returns:
         Tuple[bool, str]: Readiness flag and an operator-facing diagnostic.  A
-        ready result confirms module availability only, not candidate inputs,
-        package-interface compatibility, or scientific applicability.
+        ready result confirms local module availability and direct installed
+        package requirements, not candidate inputs or scientific applicability.
     """
     status = get_engine(name)
     if status is None:
@@ -350,6 +391,13 @@ def check_engine(name: str) -> Tuple[bool, str]:
         return (
             False,
             f"Engine '{status.name}' ({status.module_name}) is not installed. Install with: pip install {status.module_name}",
+        )
+
+    if status.dependency_issues:
+        return (
+            False,
+            f"Engine '{status.name}' dependency/interface contract is incompatible: "
+            + "; ".join(status.dependency_issues),
         )
 
     ver_str = f" v{status.version}" if status.version else ""
@@ -472,6 +520,11 @@ def run_engine(
 
     if not engine_status.installed:
         raise RuntimeError(f"Engine '{engine_name}' ({engine_status.module_name}) is not installed.")
+    if engine_status.dependency_issues:
+        raise RuntimeError(
+            f"Engine '{engine_name}' dependency/interface contract is incompatible: "
+            + "; ".join(engine_status.dependency_issues)
+        )
 
     engine_name = engine_status.name
     if engine_name not in _RUNNABLE_ENGINES:
@@ -624,21 +677,23 @@ def report_candidate_engines(workspace: CandidateWorkspace) -> List[Dict[str, An
         return runs
 
     for manifest_path in sorted(runs_dir.glob("*/*/engine-run.json")):
-        try:
-            data = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                runs.append({
-                    "engine": data.get("engine"),
-                    "run_id": data.get("run_id"),
-                    "status": data.get("status"),
-                    "started_at": data.get("started_at"),
-                    "completed_at": data.get("completed_at"),
-                    "inputs_count": len(data.get("inputs", [])),
-                    "outputs_count": len(data.get("outputs", [])),
-                    "path": str(manifest_path.relative_to(workspace.path)).replace("\\", "/"),
-                })
-        except Exception:
+        data = _load_json_object(manifest_path)
+        if data is None:
             continue
+        inputs = data.get("inputs")
+        outputs = data.get("outputs")
+        if not isinstance(inputs, list) or not isinstance(outputs, list):
+            continue
+        runs.append({
+            "engine": data.get("engine"),
+            "run_id": data.get("run_id"),
+            "status": data.get("status"),
+            "started_at": data.get("started_at"),
+            "completed_at": data.get("completed_at"),
+            "inputs_count": len(inputs),
+            "outputs_count": len(outputs),
+            "path": str(manifest_path.relative_to(workspace.path)).replace("\\", "/"),
+        })
 
     return runs
 

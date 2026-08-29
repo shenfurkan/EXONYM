@@ -6,12 +6,11 @@ All tests use synthetic data and unittest.mock; no network calls are made.
 from __future__ import annotations
 
 import hashlib
-import io
 import threading
 import time
 from pathlib import Path
 from typing import Iterator
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -20,7 +19,6 @@ from exonym.download import (
     DownloadEngine,
     DownloadError,
     DownloadItem,
-    DownloadResult,
     _tmp_path,
 )
 
@@ -112,7 +110,12 @@ def test_download_resume(tmp_path: Path) -> None:
         resp = _mock_response(
             remaining,
             status_code=206,
-            headers={"Content-Length": str(len(remaining))},
+            headers={
+                "Content-Length": str(len(remaining)),
+                "Content-Range": "bytes {0}-{1}/{2}".format(
+                    len(partial), len(_FAKE_CONTENT) - 1, len(_FAKE_CONTENT)
+                ),
+            },
         )
         return resp
 
@@ -143,7 +146,7 @@ def test_download_rate_limit_retry_after(tmp_path: Path) -> None:
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            return _mock_response(b"", status_code=429, headers={"Retry-After": "0"})
+            return _mock_response(b"", status_code=429, headers={"Retry-After": "2.5"})
         return _mock_response(_FAKE_CONTENT)
 
     with patch("requests.get", side_effect=fake_get), patch("time.sleep") as mock_sleep:
@@ -151,7 +154,57 @@ def test_download_rate_limit_retry_after(tmp_path: Path) -> None:
 
     assert results[0].destination.is_file()
     assert call_count == 2
-    mock_sleep.assert_called_once_with(0.0)
+    mock_sleep.assert_called_once_with(2.5)
+
+
+@pytest.mark.parametrize("retry_after", ["0", "-1", "NaN", "inf", "65", "invalid"])
+def test_download_rate_limit_rejects_unsafe_retry_after(tmp_path: Path, retry_after: str) -> None:
+    item = _make_item(tmp_path)
+    engine = DownloadEngine(quiet=True, max_retries=2)
+    responses = [
+        _mock_response(b"", status_code=429, headers={"Retry-After": retry_after}),
+        _mock_response(_FAKE_CONTENT),
+    ]
+
+    with patch("requests.get", side_effect=responses), patch("time.sleep") as mock_sleep:
+        results = engine.download_many([item])
+
+    assert results[0].destination.is_file()
+    mock_sleep.assert_called_once_with(1.0)
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Content-Length": str(len(_FAKE_CONTENT) // 2)},
+        {"Content-Length": str(len(_FAKE_CONTENT) // 2), "Content-Range": "bytes invalid"},
+        {
+            "Content-Length": str(len(_FAKE_CONTENT) // 2),
+            "Content-Range": "bytes {0}-{1}/{2}".format(
+                len(_FAKE_CONTENT) // 2 + 1, len(_FAKE_CONTENT) - 1, len(_FAKE_CONTENT)
+            ),
+        },
+        {
+            "Content-Length": str(len(_FAKE_CONTENT) // 2 - 1),
+            "Content-Range": "bytes {0}-{1}/{2}".format(
+                len(_FAKE_CONTENT) // 2, len(_FAKE_CONTENT) - 1, len(_FAKE_CONTENT)
+            ),
+        },
+    ],
+)
+def test_download_resume_rejects_invalid_content_range(tmp_path: Path, headers: dict) -> None:
+    item = _make_item(tmp_path)
+    partial = _FAKE_CONTENT[: len(_FAKE_CONTENT) // 2]
+    tmp = _tmp_path(item.destination)
+    tmp.write_bytes(partial)
+    engine = DownloadEngine(quiet=True, max_retries=1)
+
+    with patch("requests.get", return_value=_mock_response(_FAKE_CONTENT[len(partial) :], status_code=206, headers=headers)):
+        with pytest.raises(DownloadError, match="HTTP 206"):
+            engine.download_many([item])
+
+    assert tmp.read_bytes() == partial
+    assert not item.destination.exists()
 
 
 # ---------------------------------------------------------------------------

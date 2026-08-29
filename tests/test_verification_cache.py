@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 
 from exonym.verification_cache import CandidateVerificationCache
 from exonym.workspace import create_candidate
@@ -50,8 +51,8 @@ def test_changed_candidate_json_drops_stale_digest_before_hashing(tmp_path):
     )
     assert second.sha256(metadata_path) == expected_digest
     assert second.statistics() == {
-        "hash_cache_hits": 0,
-        "hash_cache_misses": 1,
+        "hash_cache_hits": 1,
+        "hash_cache_misses": 0,
         "candidate_json_cache_hits": 0,
         "candidate_json_cache_misses": 1,
     }
@@ -64,6 +65,42 @@ def test_changed_candidate_json_drops_stale_digest_before_hashing(tmp_path):
     third = CandidateVerificationCache(tmp_path)
     assert third.sha256(metadata_path) == expected_digest
     assert third.statistics()["hash_cache_hits"] == 1
+
+
+def test_cache_rehashes_and_reparses_same_size_mtime_rewrites(tmp_path):
+    workspace = create_candidate(tmp_path, "cache-synthetic")
+    artifact = workspace.path / "outputs" / "artifact.json"
+    artifact.write_text("original", encoding="utf-8")
+    metadata_path = workspace.path / "candidate.json"
+
+    first = CandidateVerificationCache(tmp_path)
+    first.sha256(artifact)
+    first.read_candidate_json(metadata_path, json.loads)
+    first.save()
+
+    artifact_stat = artifact.stat()
+    metadata_stat = metadata_path.stat()
+    artifact.write_text("rewrote!", encoding="utf-8")
+    metadata_path.write_text(
+        metadata_path.read_text(encoding="utf-8").replace("cache-synthetic", "cache-rewritten"),
+        encoding="utf-8",
+    )
+    os.utime(artifact, ns=(artifact_stat.st_atime_ns, artifact_stat.st_mtime_ns))
+    os.utime(metadata_path, ns=(metadata_stat.st_atime_ns, metadata_stat.st_mtime_ns))
+    assert artifact.stat().st_size == artifact_stat.st_size
+    assert artifact.stat().st_mtime_ns == artifact_stat.st_mtime_ns
+    assert metadata_path.stat().st_size == metadata_stat.st_size
+    assert metadata_path.stat().st_mtime_ns == metadata_stat.st_mtime_ns
+
+    second = CandidateVerificationCache(tmp_path)
+    assert second.sha256(artifact) == hashlib.sha256(b"rewrote!").hexdigest()
+    assert second.read_candidate_json(metadata_path, json.loads)["candidate_id"] == "cache-rewritten"
+    assert second.statistics() == {
+        "hash_cache_hits": 0,
+        "hash_cache_misses": 1,
+        "candidate_json_cache_hits": 0,
+        "candidate_json_cache_misses": 1,
+    }
 
 
 def test_copied_cache_is_not_trusted_in_another_workspace(tmp_path):

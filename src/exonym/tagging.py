@@ -12,7 +12,6 @@ from typing import Iterable, List, Optional, Sequence
 from .workspace import (
     CandidateWorkspace,
     METADATA_FILENAME,
-    discover_candidates,
     validate_metadata,
 )
 

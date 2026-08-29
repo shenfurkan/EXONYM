@@ -16,7 +16,6 @@ of an artifact or recreate a remote service response.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import re
@@ -341,6 +340,26 @@ def _validate_triceratops_scientific_evidence(
                 "scientific-fpp-claim-disabled",
                 "TRICERATOPS may not declare an FPP claim eligible before calibrated scene constraints are integrated",
             )
+        audit_status = instance.get("audit_status")
+        audit_invalid_reason = instance.get("audit_invalid_reason")
+        if audit_status not in {"valid", "invalid"}:
+            report.add(report_path, "scientific-triceratops-invalid", "TRICERATOPS report must declare a valid or invalid audit status")
+            continue
+        if audit_status == "invalid":
+            if (
+                not isinstance(audit_invalid_reason, str)
+                or not audit_invalid_reason.strip()
+                or instance.get("FPP") is not None
+                or instance.get("NFPP") is not None
+            ):
+                report.add(report_path, "scientific-triceratops-invalid", "an invalid TRICERATOPS audit requires a reason and null FPP/NFPP")
+            continue
+        if (
+            instance.get("source") != "triceratops-monte-carlo"
+            or audit_invalid_reason is not None
+        ):
+            report.add(report_path, "scientific-triceratops-invalid", "a valid TRICERATOPS audit requires a completed Monte Carlo report")
+            continue
 
         provenance = instance.get("input_provenance")
         if not isinstance(provenance, dict):
@@ -362,6 +381,37 @@ def _validate_triceratops_scientific_evidence(
             report.add(report_path, "scientific-observed-photometry-invalid", "TRICERATOPS provenance has no hash-bound input photometry")
         else:
             _validate_artifacts(report, report_path, workspace_dir, input_files, "TRICERATOPS input")
+        artifacts_by_field = {}
+        for field, label in (
+            ("ephemeris_artifacts", "TRICERATOPS ephemeris input"),
+            ("bound_artifacts", "TRICERATOPS bound input"),
+            ("scene_artifacts", "TRICERATOPS scene output"),
+        ):
+            artifacts = provenance.get(field)
+            artifacts_by_field[field] = artifacts
+            if not isinstance(artifacts, list):
+                report.add(report_path, "scientific-observed-photometry-invalid", "TRICERATOPS provenance has no {0}".format(field))
+            else:
+                _validate_artifacts(report, report_path, workspace_dir, artifacts, label)
+        bound_artifacts = artifacts_by_field["bound_artifacts"]
+        ephemeris_artifacts = artifacts_by_field["ephemeris_artifacts"]
+        if not isinstance(bound_artifacts, list) or not bound_artifacts:
+            report.add(report_path, "scientific-observed-photometry-invalid", "TRICERATOPS provenance has no complete execution input snapshot")
+        else:
+            bound_pairs = {
+                (artifact.get("path"), artifact.get("sha256"))
+                for artifact in bound_artifacts
+                if isinstance(artifact, dict)
+            }
+            required_artifacts = list(input_files) if isinstance(input_files, list) else []
+            if isinstance(ephemeris_artifacts, list):
+                required_artifacts.extend(ephemeris_artifacts)
+            if any(
+                not isinstance(artifact, dict)
+                or (artifact.get("path"), artifact.get("sha256")) not in bound_pairs
+                for artifact in required_artifacts
+            ):
+                report.add(report_path, "scientific-observed-photometry-invalid", "TRICERATOPS execution snapshot does not bind every photometry and ephemeris artifact")
         field_sources = provenance.get("ephemeris_field_sources")
         required_fields = ("period_days", "epoch_btjd", "duration_days")
         if not isinstance(field_sources, dict) or any(
@@ -1330,8 +1380,12 @@ def validate_schemas(
                         )
 
         if triceratops_vetting_decision_schema is not None:
-            decision_path = workspace_dir / "decisions" / "triceratops_vetting_decision.json"
-            if decision_path.is_file():
+            decisions_dir = workspace_dir / "decisions"
+            decision_paths = [decisions_dir / "triceratops_vetting_decision.json"]
+            decision_paths.extend(sorted(decisions_dir.glob("triceratops_vetting_decision.[0-9][0-9].json")))
+            for decision_path in decision_paths:
+                if not decision_path.is_file():
+                    continue
                 try:
                     instance = _read_json(decision_path)
                 except (OSError, UnicodeError, ValueError) as exc:
@@ -1351,6 +1405,37 @@ def validate_schemas(
                                 report, decision_path, workspace_dir,
                                 [report_artifact], "TRICERATOPS decision report",
                             )
+                        expected_signal = (
+                            "." + decision_path.stem.rsplit(".", 1)[1]
+                            if decision_path.name != "triceratops_vetting_decision.json"
+                            else None
+                        )
+                        if instance.get("signal") != expected_signal:
+                            report.add(decision_path, "schema-violation", "TRICERATOPS decision signal does not match its filename")
+                        if instance.get("audit_status") == "valid" and (
+                            not isinstance(report_artifact, dict)
+                            or instance.get("audit_invalid_reason") is not None
+                        ):
+                            report.add(decision_path, "schema-violation", "a valid TRICERATOPS audit requires a bound report and no invalidity reason")
+                        elif instance.get("audit_status") == "valid":
+                            suffix = expected_signal or ""
+                            expected_report_path = "outputs/triceratops_report{0}.json".format(suffix)
+                            if report_artifact.get("path") != expected_report_path:
+                                report.add(decision_path, "schema-violation", "TRICERATOPS decision report path does not match its signal")
+                            else:
+                                report_path = workspace_dir / report_artifact["path"]
+                                try:
+                                    report_instance = _read_json(report_path)
+                                except (OSError, UnicodeError, ValueError) as exc:
+                                    report.add(decision_path, "schema-violation", "TRICERATOPS decision report is unreadable: {0}".format(exc))
+                                else:
+                                    if not isinstance(report_instance, dict) or (
+                                        report_instance.get("candidate_id") != workspace_dir.name
+                                        or report_instance.get("signal") != expected_signal
+                                    ):
+                                        report.add(decision_path, "schema-violation", "TRICERATOPS decision report does not match its candidate or signal")
+                        if instance.get("audit_status") == "invalid" and not isinstance(instance.get("audit_invalid_reason"), str):
+                            report.add(decision_path, "schema-violation", "an invalid TRICERATOPS audit requires an invalidity reason")
 
         if analysis_completion_schema is not None:
             analysis_path = workspace_dir / "decisions" / "analysis_completion.json"
@@ -2334,12 +2419,6 @@ def validate_schemas(
             "decisive-rejection-outside-candidate",
             "decisive rejection records must be direct files in candidate/<id>/decisions/",
         ),
-        (
-            "triceratops_vetting_decision.json",
-            ("decisions", "triceratops_vetting_decision.json"),
-            "triceratops-vetting-decision-outside-candidate",
-            "TRICERATOPS vetting decisions must be direct files in candidate/<id>/decisions/",
-        ),
     ):
         for path in sorted(root.rglob(filename)):
             if not path.is_file() or LEGACY_SUBTREE in path.parts:
@@ -2355,6 +2434,29 @@ def validate_schemas(
             )
             if not is_candidate_local:
                 report.add(path, rule, message)
+
+    for path in sorted(root.rglob("triceratops_vetting_decision*.json")):
+        if not path.is_file() or LEGACY_SUBTREE in path.parts:
+            continue
+        try:
+            relative = path.relative_to(candidate_root)
+        except ValueError:
+            relative = Path()
+        valid_name = path.name == "triceratops_vetting_decision.json" or bool(
+            re.fullmatch(r"triceratops_vetting_decision\.[0-9]{2}\.json", path.name)
+        )
+        is_candidate_local = (
+            len(relative.parts) >= 3
+            and relative.parts[-2] == "decisions"
+            and valid_name
+            and not any(part.startswith("_") for part in relative.parts[:-2])
+        )
+        if not is_candidate_local:
+            report.add(
+                path,
+                "triceratops-vetting-decision-outside-candidate",
+                "TRICERATOPS vetting decisions must be direct files in candidate/<id>/decisions/",
+            )
 
     for filename_pattern, rule, message in (
         (

@@ -16,6 +16,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -59,11 +61,38 @@ def _load_object(path: Path) -> Optional[Dict[str, Any]]:
 
 
 def _finite_number(value: object) -> Optional[float]:
-    try:
-        number = float(value)
-    except (TypeError, ValueError, OverflowError):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
+    number = float(value)
     return number if math.isfinite(number) else None
+
+
+def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
+    """Write finite JSON through a same-directory temporary file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".tmp", dir=str(path.parent)
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True, allow_nan=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(str(temporary_path), str(path))
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+
+
+def triceratops_vetting_decision_path(
+    workspace: CandidateWorkspace, signal: Optional[str]
+) -> Path:
+    """Return the decision path for exactly one validated signal."""
+    signal = validate_signal_suffix(signal)
+    suffix = ".{0}".format(signal.lstrip(".")) if signal else ""
+    return workspace.path / "decisions" / "triceratops_vetting_decision{0}.json".format(suffix)
 
 
 def _artifact(workspace: CandidateWorkspace, path: Path) -> Optional[Dict[str, str]]:
@@ -88,6 +117,8 @@ def write_triceratops_vetting_decision(
     error: Optional[Dict[str, str]] = None,
     input_artifacts: Optional[List[Dict[str, str]]] = None,
     triceratops_report: Optional[Dict[str, str]] = None,
+    audit_status: str = "invalid",
+    audit_invalid_reason: Optional[str] = "No completed TRICERATOPS report is bound to this decision.",
 ) -> Path:
     """Persist the candidate-local execution decision without changing claims."""
     if execution_status not in {"ready", "blocked", "succeeded", "failed", "unavailable"}:
@@ -97,9 +128,18 @@ def write_triceratops_vetting_decision(
     if result_status not in {"unresolved", "review-required", "fpp-pass", "fpp-fail"}:
         raise ValueError("invalid TRICERATOPS result status")
     for value, name in ((fpp, "FPP"), (nfpp, "NFPP")):
-        if value is not None and _finite_number(value) is None:
-            raise ValueError("{0} must be finite when recorded".format(name))
-    path = workspace.path / "decisions" / TRICERATOPS_VETTING_DECISION_FILENAME
+        number = _finite_number(value) if value is not None else None
+        if value is not None and (number is None or not 0.0 <= number <= 1.0):
+            raise ValueError("{0} must be a finite probability when recorded".format(name))
+    if audit_status not in {"valid", "invalid"}:
+        raise ValueError("invalid TRICERATOPS audit status")
+    if audit_status == "valid" and (triceratops_report is None or audit_invalid_reason is not None):
+        raise ValueError("a valid TRICERATOPS audit requires a report and no invalidity reason")
+    if audit_status == "invalid" and (
+        not isinstance(audit_invalid_reason, str) or not audit_invalid_reason.strip()
+    ):
+        raise ValueError("an invalid TRICERATOPS audit requires an invalidity reason")
+    path = triceratops_vetting_decision_path(workspace, signal)
     previous = _load_object(path) or {}
     payload = {
         "schema_version": 1,
@@ -115,13 +155,11 @@ def write_triceratops_vetting_decision(
         "error": error,
         "input_artifacts": list(input_artifacts) if input_artifacts is not None else previous.get("input_artifacts", []),
         "triceratops_report": triceratops_report,
+        "audit_status": audit_status,
+        "audit_invalid_reason": audit_invalid_reason,
         "claim_eligible": False,
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
+    _write_json_atomic(path, payload)
     return path
 
 
@@ -335,7 +373,6 @@ def _localization_record(workspace: CandidateWorkspace) -> Dict[str, Any]:
     if data is None or artifact is None:
         return _missing_record("localization", path)
     summary = data.get("summary")
-    conclusion = summary.get("conclusion") if isinstance(summary, dict) else None
     ratio = (
         _finite_number(summary.get("median_target_to_other_difference_ratio"))
         if isinstance(summary, dict)
@@ -595,11 +632,7 @@ def build_statistical_vetting_evidence(workspace: CandidateWorkspace, signal: Op
         "diagnostics": diagnostics,
     }
     path = workspace.path / "outputs" / "statistical_vetting_evidence{0}.json".format(suffix)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
+    _write_json_atomic(path, payload)
     return path
 
 
@@ -624,8 +657,7 @@ def record_decisive_rejection(workspace: CandidateWorkspace, reason: str, eviden
         "evidence": {"path": relative.as_posix(), "sha256": _sha256(evidence)},
     }
     path = workspace.path / "decisions" / "decisive_rejection.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _write_json_atomic(path, payload)
     return path
 
 

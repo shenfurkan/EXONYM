@@ -16,6 +16,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import tempfile
+import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +39,116 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(65536), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Durably replace a text record without exposing a partial file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
+    _atomic_write_text(
+        path, json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    )
+
+
+def record_autonomous_incident(
+    repository_root: Path, command: str, exc: BaseException, exit_code: int = 2
+) -> Path:
+    """Atomically retain an unexpected autonomous-command failure at repo root."""
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    suffix = uuid.uuid4().hex[:8]
+    issue_id = "ISSUE-{0}-{1}".format(now.strftime("%Y%m%d"), suffix)
+    timestamp = now.isoformat().replace("+00:00", "Z")
+    trace = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    content = """# {issue_id}
+
+- UTC Timestamp: `{timestamp}`
+- Exonym Version: `{version}`
+- CLI Command: `{command}`
+- Exit Code: `{exit_code}`
+
+## Expected Behavior
+
+The bounded autonomous command should retain durable progress records and return a controlled outcome.
+
+## Observed Behavior
+
+Unhandled `{exception_type}`: `{exception}`
+
+## Full Python Traceback
+
+```text
+{trace}```
+
+## Root Cause And Affected Modules
+
+The immediate cause is the unhandled exception above. Inspect the traceback for the affected `src/exonym/` modules.
+
+## Actionable Remediation
+
+Reproduce the recorded command, inspect its durable run record, and fix the failing operation without changing lifecycle state, disposition, or claim eligibility.
+""".format(
+        issue_id=issue_id,
+        timestamp=timestamp,
+        version=__version__,
+        command=command,
+        exit_code=exit_code,
+        exception_type=type(exc).__name__,
+        exception=exc,
+        trace=trace,
+    )
+    path = repository_root.resolve() / "log" / "issue-{0}-{1}.md".format(now.strftime("%Y%m%d"), suffix)
+    _atomic_write_text(path, content)
+    return path
+
+
+def create_run_loop_journal(survey: Any, configuration: Dict[str, Any]) -> Tuple[Path, Dict[str, Any]]:
+    """Create the durable parent record for one bounded survey run-loop."""
+    run_id = uuid.uuid4().hex
+    path = survey.path / "runs" / "run-loop" / run_id / "run-loop.json"
+    journal: Dict[str, Any] = {
+        "schema_version": 1,
+        "engine": "run-loop",
+        "run_id": run_id,
+        "survey_id": survey.survey_id,
+        "status": "running",
+        "started_at": _timestamp(),
+        "completed_at": None,
+        "configuration": configuration,
+        "cycles": [],
+        "claim_eligible": False,
+        "workflow_advanced": False,
+        "disposition_changed": False,
+    }
+    _atomic_write_json(path, journal)
+    return path, journal
+
+
+def write_run_loop_journal(path: Path, journal: Dict[str, Any]) -> None:
+    """Atomically checkpoint a run-loop parent record after each batch event."""
+    _atomic_write_json(path, journal)
+
+
+def auto_vet_started(candidate: CandidateWorkspace) -> bool:
+    """Return whether a candidate has any durable auto-vet run snapshot."""
+    return any(
+        path.is_file()
+        for path in (candidate.path / "runs" / "auto-vet").glob("*/engine-run.json")
+    )
 
 
 def _artifact(candidate: CandidateWorkspace, path: Path, role: str) -> Dict[str, str]:
@@ -179,6 +292,50 @@ def auto_vet_candidate(
     started_at = _timestamp()
     artifacts: List[Dict[str, str]] = []
     steps: List[Dict[str, str]] = []
+    manifest_path = run_dir / "engine-run.json"
+    manifest: Dict[str, Any] = {
+        "schema_version": 1,
+        "candidate_id": candidate.candidate_id,
+        "engine": "auto-vet",
+        "run_id": run_id,
+        "status": "blocked",
+        "started_at": started_at,
+        "completed_at": started_at,
+        "runtime": {
+            "kind": "direct",
+            "version": __version__,
+            "version_known": True,
+            "executable": "exonym.autonomous",
+        },
+        "inputs": [_artifact(candidate, candidate.path / "candidate.json", "candidate-metadata")],
+        "outputs": artifacts,
+        "failure": {
+            "code": "auto-vet-incomplete",
+            "message": "Auto-vet run started but has not completed.",
+        },
+        "automation": {
+            "steps": [
+                {
+                    "name": "initialization",
+                    "status": "skipped",
+                    "detail": "Durable auto-vet manifest initialized.",
+                }
+            ],
+            "sectors_used": sectors_used,
+            "claim_eligible": False,
+            "disposition_changed": False,
+            "workflow_advanced": False,
+        },
+    }
+
+    def checkpoint_manifest() -> None:
+        manifest["completed_at"] = _timestamp()
+        manifest["outputs"] = list(artifacts)
+        manifest["automation"]["steps"] = list(steps) or manifest["automation"]["steps"]
+        manifest["automation"]["sectors_used"] = sectors_used
+        _atomic_write_json(manifest_path, manifest)
+
+    checkpoint_manifest()
 
     def execute(name: str, operation: Callable[[], Any]) -> Optional[Any]:
         try:
@@ -188,9 +345,11 @@ def auto_vet_candidate(
                 if isinstance(output, Path) and output.is_file():
                     artifacts.append(_artifact(candidate, output, name))
             steps.append({"name": name, "status": "succeeded"})
+            checkpoint_manifest()
             return result
         except Exception as exc:  # Preserve later independent diagnostic attempts.
             steps.append({"name": name, "status": "blocked", "detail": "{0}: {1}".format(type(exc).__name__, exc)})
+            checkpoint_manifest()
             return None
 
     if download and not _has_raw_fits(candidate):
@@ -231,6 +390,7 @@ def auto_vet_candidate(
         execute("ingest", ingest)
     else:
         steps.append({"name": "ingest", "status": "skipped", "detail": "candidate-local raw FITS products already exist"})
+        checkpoint_manifest()
 
     def search() -> Path:
         from .search import run_bls_on_candidate
@@ -261,33 +421,11 @@ def auto_vet_candidate(
 
     vet_step = next((step for step in steps if step["name"] == "vet"), None)
     succeeded = vet_step is not None and vet_step["status"] == "succeeded"
-    manifest: Dict[str, Any] = {
-        "schema_version": 1,
-        "candidate_id": candidate.candidate_id,
-        "engine": "auto-vet",
-        "run_id": run_id,
-        "status": "succeeded" if succeeded else "blocked",
-        "started_at": started_at,
-        "completed_at": _timestamp(),
-        "runtime": {
-            "kind": "direct",
-            "version": __version__,
-            "version_known": True,
-            "executable": "exonym.autonomous",
-        },
-        "inputs": [_artifact(candidate, candidate.path / "candidate.json", "candidate-metadata")],
-        "outputs": artifacts,
-        "automation": {
-            "steps": steps,
-            "sectors_used": sectors_used,
-            "claim_eligible": False,
-            "disposition_changed": False,
-            "workflow_advanced": False,
-        },
-    }
+    manifest["status"] = "succeeded" if succeeded else "blocked"
     if not succeeded:
         detail = vet_step.get("detail") if vet_step is not None else "vet step was not attempted"
         manifest["failure"] = {"code": "vetting-not-complete", "message": str(detail)}
-    manifest_path = run_dir / "engine-run.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    else:
+        manifest.pop("failure", None)
+    checkpoint_manifest()
     return manifest_path

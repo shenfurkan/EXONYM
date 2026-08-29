@@ -1,10 +1,5 @@
 """Unit coverage for the sticky telemetry HUD and its plain-text fallback."""
 
-import io
-from unittest.mock import patch
-
-import pytest
-
 from exonym.telemetry import LiveTelemetry, _current_rss_bytes, _format_bytes, _format_elapsed
 
 

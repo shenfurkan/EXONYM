@@ -17,7 +17,7 @@ or validation semantics.
 from __future__ import annotations
 
 import sys
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 DETREND_METHODS: Tuple[Tuple[str, str], ...] = (
     ("running-median", "running-median (fast standard)"),

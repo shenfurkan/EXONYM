@@ -14,7 +14,6 @@ by the caller and never interprets them as convergence evidence.
 
 from __future__ import annotations
 
-import ctypes
 import sys
 import time
 from typing import Any, Dict, Optional

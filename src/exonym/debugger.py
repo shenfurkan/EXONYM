@@ -105,7 +105,7 @@ class DebugReport:
     @property
     def blockers(self) -> List[ToolResult]:
         """Return failed checks and source scans."""
-        return [result for result in self.results if result.status == "failed"]
+        return [result for result in self.results if result.status in {"failed", "error"}]
 
     @property
     def unavailable_required_tools(self) -> List[ToolResult]:
@@ -115,7 +115,8 @@ class DebugReport:
         return [
             result
             for result in self.results
-            if result.status == "skipped" and result.name in {"ruff", "bandit", "pytest-cov"}
+            if result.status == "skipped"
+            and result.name in {"ruff", "bandit", "pytest-cov", "semgrep"}
         ]
 
     @property
@@ -202,35 +203,42 @@ def run_debug(
         directory.mkdir(parents=True, exist_ok=False)
 
     started_at = _utc_now()
-    changed_paths = _select_source_paths(root, mode=mode, since=since)
+    changed_paths: List[Path] = []
     environment = _debug_environment(tmp_dir)
     results: List[ToolResult] = []
     preserve_tmp = True
+    interrupted: Optional[KeyboardInterrupt] = None
 
     try:
+        changed_paths = _select_source_paths(root, mode=mode, since=since)
         results.append(_run_static_contract_scan(root, changed_paths, tools_dir))
-        results.append(_run_debug_source_audit(root, tools_dir))
-        results.append(_run_in_memory_compile_scan(root, tools_dir))
-        results.append(_run_ruff(root, mode, changed_paths, environment, tools_dir))
-        for name, command in _tool_commands(root, mode, changed_paths, tmp_dir):
-            results.append(_run_tool(name, command, root, environment, tools_dir))
+        source_audit = _run_debug_source_audit(root, tools_dir)
+        results.append(source_audit)
+        if source_audit.status == "passed":
+            results.append(_run_in_memory_compile_scan(root, tools_dir))
+            results.append(_run_ruff(root, mode, changed_paths, environment, tools_dir))
+            for name, command in _tool_commands(root, mode, changed_paths, tmp_dir):
+                results.append(_run_tool(name, command, root, environment, tools_dir))
+            if mode == "full":
+                results.extend(_run_wheel_install_smoke(root, environment, tools_dir, tmp_dir))
         preserve_tmp = any(result.status in ("failed", "error") for result in results)
-    except Exception as exc:  # exonym: fail-closed - preserve sandbox on debugger faults.
-        failure_path = tools_dir / "debugger-internal-error.txt"
-        failure_path.write_text(
-            traceback.format_exc(), encoding="utf-8"
+    except KeyboardInterrupt as exc:
+        _record_debugger_failure(
+            results,
+            run_dir,
+            tools_dir,
+            "debugger-interrupted.txt",
+            "Debugger interrupted; report and temporary sandbox retained.",
         )
-        results.append(
-            ToolResult(
-                name="debugger",
-                status="failed",
-                command=[],
-                returncode=None,
-                output_path=_relative(run_dir, failure_path),
-                detail="Unexpected debugger infrastructure failure: {0}".format(
-                    type(exc).__name__
-                ),
-            )
+        preserve_tmp = True
+        interrupted = exc
+    except Exception as exc:  # exonym: fail-closed - preserve sandbox on debugger faults.
+        _record_debugger_failure(
+            results,
+            run_dir,
+            tools_dir,
+            "debugger-internal-error.txt",
+            "Unexpected debugger infrastructure failure: {0}".format(type(exc).__name__),
         )
         preserve_tmp = True
 
@@ -248,6 +256,8 @@ def run_debug(
     _write_reports(report)
     if not preserve_tmp:
         shutil.rmtree(tmp_dir)
+    if interrupted is not None:
+        raise interrupted
     return report
 
 
@@ -284,6 +294,28 @@ def _create_run_dir(root: Path) -> Path:
 def _utc_now() -> str:
     """Return a UTC timestamp with an explicit timezone offset."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _record_debugger_failure(
+    results: List[ToolResult],
+    run_dir: Path,
+    tools_dir: Path,
+    filename: str,
+    detail: str,
+) -> None:
+    """Retain a traceback for a debugger failure before emitting its report."""
+    failure_path = tools_dir / filename
+    failure_path.write_text(traceback.format_exc(), encoding="utf-8")
+    results.append(
+        ToolResult(
+            name="debugger",
+            status="failed",
+            command=[],
+            returncode=None,
+            output_path=_relative(run_dir, failure_path),
+            detail=detail,
+        )
+    )
 
 
 def _relative(root: Path, path: Path) -> str:
@@ -325,7 +357,7 @@ def _select_source_paths(root: Path, *, mode: str, since: Optional[str]) -> List
         commands.insert(1, ["git", "diff", "--name-only", "--diff-filter=ACMR", "HEAD"])
 
     paths = set()
-    for command in commands:
+    for index, command in enumerate(commands):
         try:
             completed = subprocess.run(
                 command,
@@ -335,8 +367,12 @@ def _select_source_paths(root: Path, *, mode: str, since: Optional[str]) -> List
                 text=True,
                 check=False,
             )
-        except OSError:
+        except OSError as exc:
+            if since and index == 0:
+                raise ValueError("could not resolve --since revision: {0}".format(since)) from exc
             continue
+        if since and index == 0 and completed.returncode != 0:
+            raise ValueError("invalid --since revision: {0}".format(since))
         if completed.returncode == 0:
             paths.update(
                 Path(line.strip()) for line in completed.stdout.splitlines() if line.strip()
@@ -351,6 +387,7 @@ def _debug_environment(tmp_dir: Path) -> Dict[str, str]:
         environment[key] = str(tmp_dir)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["EXONYM_REPO_ROOT"] = ""
+    environment["PIP_CACHE_DIR"] = str(tmp_dir / "pip-cache")
     return environment
 
 
@@ -378,6 +415,100 @@ def _tool_commands(
         else:
             yield "pytest", command
     yield "import-smoke", [sys.executable, "-c", "import exonym; print(exonym.__version__)"]
+
+
+def _run_wheel_install_smoke(
+    root: Path,
+    environment: Dict[str, str],
+    tools_dir: Path,
+    tmp_dir: Path,
+) -> List[ToolResult]:
+    """Build, install, and import a wheel without using the source checkout."""
+    wheel_dir = tmp_dir / "wheel"
+    install_dir = tmp_dir / "wheel-install"
+    source_dir = tmp_dir / "wheel-source"
+    source_dir.mkdir()
+    for filename in ("pyproject.toml", "LICENSE"):
+        shutil.copy2(root / filename, source_dir / filename)
+    shutil.copytree(root / "src", source_dir / "src")
+    build = _run_tool(
+        "wheel-build",
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "wheel",
+            "--no-deps",
+            "--no-build-isolation",
+            "--no-cache-dir",
+            "--wheel-dir",
+            str(wheel_dir),
+            ".",
+        ],
+        source_dir,
+        environment,
+        tools_dir,
+    )
+    results = [build]
+    if build.status != "passed":
+        return results
+
+    wheels = sorted(wheel_dir.glob("exonym-*.whl"))
+    if len(wheels) != 1:
+        output_path = tools_dir / "wheel-install.txt"
+        output_path.write_text("expected exactly one Exonym wheel\n", encoding="utf-8")
+        results.append(
+            ToolResult(
+                name="wheel-install",
+                status="failed",
+                command=[],
+                returncode=None,
+                output_path=_relative(tools_dir.parent, output_path),
+                detail="wheel build did not produce exactly one Exonym wheel",
+            )
+        )
+        return results
+
+    install = _run_tool(
+        "wheel-install",
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--no-deps",
+            "--no-cache-dir",
+            "--target",
+            str(install_dir),
+            str(wheels[0]),
+        ],
+        tmp_dir,
+        environment,
+        tools_dir,
+    )
+    results.append(install)
+    if install.status != "passed":
+        return results
+
+    smoke_code = (
+        "import sys\n"
+        "sys.path.insert(0, {0!r})\n"
+        "import exonym\n"
+        "from exonym.resources import _bundled_directory\n"
+        "assert exonym.__file__.startswith({0!r})\n"
+        "assert _bundled_directory('schemas').is_dir()\n"
+        "print(exonym.__version__)\n"
+    ).format(str(install_dir))
+    results.append(
+        _run_tool(
+            "wheel-import-smoke",
+            [sys.executable, "-I", "-c", smoke_code],
+            tmp_dir,
+            environment,
+            tools_dir,
+        )
+    )
+    return results
 
 
 def _run_debug_source_audit(root: Path, tools_dir: Path) -> ToolResult:
@@ -561,6 +692,8 @@ def _select_tests(root: Path, mode: str, changed_paths: Sequence[Path]) -> List[
 
     tests = set()
     for path in changed_paths:
+        if path.parts and path.parts[0] == "tests" and path.suffix == ".py":
+            tests.add(path.as_posix())
         if path.parts[:2] == ("src", "exonym") and path.suffix == ".py":
             if path.name == "__main__.py":
                 tests.add("tests/test_cli.py")

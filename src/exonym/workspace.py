@@ -891,6 +891,39 @@ def discover_candidates(repository_root: Path) -> List[CandidateWorkspace]:
     return candidates
 
 
+def discover_candidates_with_outcomes(
+    repository_root: Path,
+) -> Tuple[List[CandidateWorkspace], List[Dict[str, str]]]:
+    """Discover valid workspaces and retain invalid direct entries as outcomes.
+
+    Batch automation must not silently omit a direct workspace merely because
+    its metadata is incomplete or invalid. The normal discovery API keeps its
+    valid-workspace-only behavior; this companion supplies an operator-visible
+    incomplete outcome for batch callers.
+    """
+    candidate_root = repository_root.resolve() / CANDIDATE_DIRECTORY
+    if not candidate_root.is_dir():
+        return [], []
+    candidates: List[CandidateWorkspace] = []
+    incomplete: List[Dict[str, str]] = []
+    for path in sorted(candidate_root.iterdir(), key=lambda item: item.name):
+        if not path.is_dir() or path.name.startswith("_"):
+            continue
+        try:
+            candidate = load_candidate(repository_root, path.name)
+        except (OSError, FileNotFoundError, ValueError) as exc:
+            incomplete.append(
+                {
+                    "candidate_id": path.name,
+                    "status": "incomplete",
+                    "reason": "Candidate workspace could not be loaded: {0}".format(exc),
+                }
+            )
+        else:
+            candidates.append(candidate)
+    return candidates, incomplete
+
+
 def workspace_layout(candidate: CandidateWorkspace) -> Dict[str, Path]:
     """Return named standard paths for a candidate workspace.
 

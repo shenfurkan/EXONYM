@@ -6,7 +6,6 @@ import pytest
 
 from exonym.catalog_federation import (
     PROVIDERS,
-    CatalogRequest,
     TransportResponse,
     _request_for,
     catalog_report,

@@ -5,6 +5,7 @@ import pytest
 from exonym.workspace import (
     create_candidate,
     discover_candidates,
+    discover_candidates_with_outcomes,
     load_candidate,
     validate_candidate_id,
     validate_metadata,
@@ -41,6 +42,20 @@ def test_discover_and_load_candidates(tmp_path):
     ]
     loaded = load_candidate(tmp_path, "candidate-alpha")
     assert loaded.metadata["identifiers"]["toi"] is None
+
+
+def test_discover_candidates_with_outcomes_retains_invalid_workspace(tmp_path):
+    create_candidate(tmp_path, "candidate-valid")
+    broken = tmp_path / "candidate" / "candidate-broken"
+    broken.mkdir(parents=True)
+    broken.joinpath("candidate.json").write_text("{not-json}\n", encoding="utf-8")
+
+    candidates, outcomes = discover_candidates_with_outcomes(tmp_path)
+
+    assert [candidate.candidate_id for candidate in candidates] == ["candidate-valid"]
+    assert outcomes[0]["candidate_id"] == "candidate-broken"
+    assert outcomes[0]["status"] == "incomplete"
+    assert "could not be loaded" in outcomes[0]["reason"]
 
 
 def test_discovery_and_loading_reject_nested_candidate_workspaces(tmp_path):

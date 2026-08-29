@@ -1,12 +1,13 @@
 """Unit coverage for the workspace checkpoint engine."""
 
 import json
-from pathlib import Path
+import io
+import tarfile
 
 import pytest
 
 from exonym import checkpoints
-from exonym.workspace import create_candidate, load_candidate
+from exonym.workspace import create_candidate
 
 
 @pytest.fixture()
@@ -79,6 +80,46 @@ def test_checkpoint_rejects_unsafe_identifiers_and_unknown_ids(workspace):
         )
     with pytest.raises(ValueError):
         checkpoints.save_checkpoint(workspace, "Bad Label!")
+
+
+def _write_tar_member(archive_path, name):
+    payload = b"synthetic"
+    member = tarfile.TarInfo(name)
+    member.size = len(payload)
+    with tarfile.open(archive_path, "w:gz") as archive:
+        archive.addfile(member, io.BytesIO(payload))
+
+
+def test_checkpoint_extraction_rejects_sibling_prefix_escape(tmp_path):
+    staging = tmp_path / "restore"
+    staging.mkdir()
+    sibling = tmp_path / "restore-sibling" / "escaped.txt"
+    archive_path = tmp_path / "synthetic.tar.gz"
+    _write_tar_member(archive_path, sibling.as_posix())
+
+    with pytest.raises(RuntimeError, match="path traversal"):
+        checkpoints._extract_tar_safe(archive_path, staging)
+
+    assert not sibling.exists()
+
+
+def test_checkpoint_extraction_rejects_reparse_component(tmp_path, monkeypatch):
+    staging = tmp_path / "restore"
+    staging.mkdir()
+    reparse_component = staging / "linked"
+    reparse_component.mkdir()
+    monkeypatch.setattr(
+        checkpoints,
+        "is_reparse_point",
+        lambda path: path == reparse_component,
+    )
+    archive_path = tmp_path / "synthetic.tar.gz"
+    _write_tar_member(archive_path, "linked/escaped.txt")
+
+    with pytest.raises(RuntimeError, match="symlink or reparse point"):
+        checkpoints._extract_tar_safe(archive_path, staging)
+
+    assert not (reparse_component / "escaped.txt").exists()
 
 
 def test_cli_checkpoint_save_list_delete(tmp_path, capsys):

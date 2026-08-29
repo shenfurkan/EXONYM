@@ -48,6 +48,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+from .isolation import is_reparse_point
 from .resources import read_schema_text
 from .workspace import CandidateWorkspace
 
@@ -263,12 +264,33 @@ def _resolve_checkpoint_files(
     resolved_root = output_dir.resolve()
     archive_path = output_dir / (checkpoint_id + ARCHIVE_SUFFIX)
     manifest_path = output_dir / (checkpoint_id + MANIFEST_SUFFIX)
+    if output_dir.exists() and is_reparse_point(output_dir):
+        raise ValueError("checkpoint directory is a symlink or reparse point")
     for path in (archive_path, manifest_path):
         if not path.is_file():
             raise FileNotFoundError("unknown checkpoint id: {0}".format(checkpoint_id))
-        if not str(path.resolve()).startswith(str(resolved_root)):
+        if path.exists() and is_reparse_point(path):
+            raise ValueError("checkpoint path is a symlink or reparse point")
+        try:
+            path.resolve().relative_to(resolved_root)
+        except ValueError:
             raise ValueError("checkpoint path escapes the candidate checkpoints directory")
     return archive_path, manifest_path
+
+
+def _assert_no_reparse_components(path: Path, root: Path, member_name: str) -> None:
+    """Reject a member path when any component redirects extraction elsewhere."""
+    if root.exists() and is_reparse_point(root):
+        raise RuntimeError("checkpoint extraction target is a symlink or reparse point")
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        raise RuntimeError("path traversal detected in checkpoint archive: {0}".format(member_name))
+    current = root
+    for component in relative.parts:
+        current = current / component
+        if current.exists() and is_reparse_point(current):
+            raise RuntimeError("checkpoint archive targets a symlink or reparse point: {0}".format(member_name))
 
 
 def _extract_tar_safe(archive_path: Path, target_dir: Path) -> None:
@@ -282,10 +304,21 @@ def _extract_tar_safe(archive_path: Path, target_dir: Path) -> None:
                 raise RuntimeError("checkpoint archive contains non-regular members")
             name = member.name.replace("\\", "/")
             parts = name.split("/")
-            if name.startswith("/") or ".." in parts:
+            member_path = Path(name)
+            if (
+                name.startswith("/")
+                or member_path.is_absolute()
+                or bool(member_path.drive)
+                or re.match(r"^[A-Za-z]:($|/)", name)
+                or ".." in parts
+            ):
                 raise RuntimeError("path traversal detected in checkpoint archive: {0}".format(name))
-            destination = (target_dir / name).resolve()
-            if not str(destination).startswith(str(target_resolved)):
+            unresolved_destination = target_dir / name
+            _assert_no_reparse_components(unresolved_destination, target_dir, name)
+            destination = unresolved_destination.resolve()
+            try:
+                destination.relative_to(target_resolved)
+            except ValueError:
                 raise RuntimeError("path traversal detected in checkpoint archive: {0}".format(name))
             if member.isdir():
                 destination.mkdir(parents=True, exist_ok=True)

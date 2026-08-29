@@ -37,6 +37,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -49,6 +51,7 @@ from .tracking import candidate_telemetry, format_dashboard
 from .workspace import (
     create_candidate,
     discover_candidates,
+    discover_candidates_with_outcomes,
     load_candidate,
     workspace_layout,
 )
@@ -550,6 +553,17 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Per-signal transit config name (e.g. .01 -> config/signals/transit_config.01.json).",
     )
+    vet_parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=1,
+        help="Maximum Numba threads for vectorized TRICERATOPS likelihoods; 1 is serial.",
+    )
+    vet_parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Show truthful TRICERATOPS execution milestones on an interactive terminal.",
+    )
 
     asteroseismology_parser = commands.add_parser(
         "asteroseismology", help="Estimate stellar oscillation envelope and seismic M*/R*."
@@ -753,6 +767,22 @@ def _harvest_filters(args: argparse.Namespace):
     )
 
 
+def _is_autonomous_batch_command(args: argparse.Namespace) -> bool:
+    """Return whether a command needs a root-level autonomous incident record."""
+    return args.command == "survey" and args.survey_action in {"harvest", "auto-vet", "run-loop"}
+
+
+def _command_text(argv: Optional[Sequence[str]]) -> str:
+    """Render the invoked command for an incident record."""
+    import sys
+
+    return shlex.join(["exonym", *(argv if argv is not None else sys.argv[1:])])
+
+
+def _run_loop_timestamp() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Parse CLI arguments and dispatch one EXONYM operation.
 
@@ -876,22 +906,39 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
                 if bool(args.all) == (args.candidate_id is not None):
                     raise ValueError("provide exactly one candidate_id or --all")
-                candidates = (
-                    discover_candidates(repository_root)
-                    if args.all
-                    else [load_survey_candidate(repository_root, args.candidate_id)]
-                )
-                manifests = [
-                    auto_vet_candidate(
-                        candidate,
-                        sectors=args.sectors,
-                        n_draws=args.n_draws,
-                        fit_samples=args.fit_samples,
-                        download=not args.no_download,
-                    ).relative_to(repository_root).as_posix()
-                    for candidate in candidates
-                ]
-                _print_json(manifests)
+                if args.all:
+                    candidates, outcomes = discover_candidates_with_outcomes(repository_root)
+                else:
+                    candidates = [load_survey_candidate(repository_root, args.candidate_id)]
+                    outcomes = []
+                for candidate in candidates:
+                    try:
+                        manifest = auto_vet_candidate(
+                            candidate,
+                            sectors=args.sectors,
+                            n_draws=args.n_draws,
+                            fit_samples=args.fit_samples,
+                            download=not args.no_download,
+                        )
+                    except Exception as exc:
+                        outcomes.append(
+                            {
+                                "candidate_id": candidate.candidate_id,
+                                "status": "failed",
+                                "reason": "Auto-vet could not start: {0}: {1}".format(
+                                    type(exc).__name__, exc
+                                ),
+                            }
+                        )
+                    else:
+                        outcomes.append(
+                            {
+                                "candidate_id": candidate.candidate_id,
+                                "status": "completed",
+                                "manifest": manifest.relative_to(repository_root).as_posix(),
+                            }
+                        )
+                _print_json({"outcomes": outcomes, "claim_eligible": False})
                 return 0
             survey = load_survey(repository_root, args.survey_id)
             if args.survey_action == "add-target":
@@ -930,38 +977,126 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 _print_json(outcomes)
                 return 0
             if args.survey_action == "run-loop":
-                from .autonomous import auto_vet_candidate
+                from .autonomous import (
+                    auto_vet_candidate,
+                    auto_vet_started,
+                    create_run_loop_journal,
+                    write_run_loop_journal,
+                )
                 from .survey_harvest import harvest_tces
 
                 if args.max_cycles < 1:
                     raise ValueError("max_cycles must be at least one")
-                cycles = []
-                for _ in range(args.max_cycles):
-                    outcomes = harvest_tces(
-                        survey,
-                        args.source,
-                        _harvest_filters(args),
-                        args.max_candidates,
-                        novelty_timeout=args.timeout,
-                        freshness_hours=args.freshness_hours,
-                    )
-                    manifests = []
-                    for outcome in outcomes:
-                        candidate_id = outcome.get("candidate_id")
-                        if outcome.get("status") != "registered" or candidate_id is None:
-                            continue
-                        candidate = load_survey_candidate(repository_root, candidate_id)
-                        manifests.append(
-                            auto_vet_candidate(
-                                candidate,
-                                n_draws=args.n_draws,
-                                fit_samples=args.fit_samples,
-                            )
-                            .relative_to(repository_root)
-                            .as_posix()
+                journal_path, journal = create_run_loop_journal(
+                    survey,
+                    {
+                        "max_cycles": args.max_cycles,
+                        "max_candidates": args.max_candidates,
+                        "source": args.source,
+                        "n_draws": args.n_draws,
+                        "fit_samples": args.fit_samples,
+                    },
+                )
+                try:
+                    for index in range(args.max_cycles):
+                        cycle = {
+                            "cycle": index + 1,
+                            "status": "running",
+                            "started_at": _run_loop_timestamp(),
+                            "completed_at": None,
+                            "harvest": [],
+                            "auto_vet": [],
+                        }
+                        journal["cycles"].append(cycle)
+                        write_run_loop_journal(journal_path, journal)
+                        outcomes = harvest_tces(
+                            survey,
+                            args.source,
+                            _harvest_filters(args),
+                            args.max_candidates,
+                            novelty_timeout=args.timeout,
+                            freshness_hours=args.freshness_hours,
                         )
-                    cycles.append({"harvest": outcomes, "auto_vet_manifests": manifests})
-                _print_json({"cycles": cycles, "claim_eligible": False})
+                        cycle["harvest"] = outcomes
+                        write_run_loop_journal(journal_path, journal)
+                        for outcome in outcomes:
+                            candidate_id = outcome.get("candidate_id")
+                            status = outcome.get("status")
+                            if candidate_id is None or status not in {"registered", "already-provisioned"}:
+                                continue
+                            try:
+                                candidate = load_survey_candidate(repository_root, candidate_id)
+                            except (FileNotFoundError, ValueError) as exc:
+                                cycle["auto_vet"].append(
+                                    {
+                                        "candidate_id": candidate_id,
+                                        "status": "incomplete",
+                                        "reason": "Candidate workspace could not be loaded: {0}".format(exc),
+                                    }
+                                )
+                                write_run_loop_journal(journal_path, journal)
+                                continue
+                            if status == "already-provisioned" and auto_vet_started(candidate):
+                                cycle["auto_vet"].append(
+                                    {"candidate_id": candidate_id, "status": "already-started"}
+                                )
+                                write_run_loop_journal(journal_path, journal)
+                                continue
+                            try:
+                                manifest = auto_vet_candidate(
+                                    candidate,
+                                    n_draws=args.n_draws,
+                                    fit_samples=args.fit_samples,
+                                )
+                            except Exception as exc:
+                                cycle["auto_vet"].append(
+                                    {
+                                        "candidate_id": candidate_id,
+                                        "status": "failed",
+                                        "reason": "Auto-vet could not start: {0}: {1}".format(
+                                            type(exc).__name__, exc
+                                        ),
+                                    }
+                                )
+                            else:
+                                cycle["auto_vet"].append(
+                                    {
+                                        "candidate_id": candidate_id,
+                                        "status": "completed",
+                                        "manifest": manifest.relative_to(repository_root).as_posix(),
+                                    }
+                                )
+                            write_run_loop_journal(journal_path, journal)
+                        cycle["status"] = "completed"
+                        cycle["completed_at"] = _run_loop_timestamp()
+                        write_run_loop_journal(journal_path, journal)
+                except KeyboardInterrupt:
+                    if journal["cycles"] and journal["cycles"][-1]["status"] == "running":
+                        journal["cycles"][-1]["status"] = "interrupted"
+                        journal["cycles"][-1]["completed_at"] = _run_loop_timestamp()
+                    journal["status"] = "interrupted"
+                    journal["completed_at"] = _run_loop_timestamp()
+                    write_run_loop_journal(journal_path, journal)
+                    raise
+                except Exception as exc:
+                    if journal["cycles"] and journal["cycles"][-1]["status"] == "running":
+                        journal["cycles"][-1]["status"] = "failed"
+                        journal["cycles"][-1]["completed_at"] = _run_loop_timestamp()
+                    journal["status"] = "failed"
+                    journal["completed_at"] = _run_loop_timestamp()
+                    journal["failure"] = {"type": type(exc).__name__, "message": str(exc)}
+                    write_run_loop_journal(journal_path, journal)
+                    raise
+                journal["status"] = "completed"
+                journal["completed_at"] = _run_loop_timestamp()
+                write_run_loop_journal(journal_path, journal)
+                _print_json(
+                    {
+                        "cycles": journal["cycles"],
+                        "journal": journal_path.relative_to(repository_root).as_posix(),
+                        "claim_eligible": False,
+                    }
+                )
                 return 0
 
         if args.command == "engine":
@@ -1280,10 +1415,36 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.command == "vet":
             from .vetting.tricera_parse import run_triceratops_simulation
+            from contextlib import nullcontext
+            import sys
 
-            output = run_triceratops_simulation(
-                candidate, n_draws=args.n_draws, signal=args.signal
-            )
+            telemetry_context = nullcontext(None)
+            if args.progress and sys.stdout.isatty():
+                from .telemetry import LiveTelemetry
+
+                telemetry_context = LiveTelemetry(
+                    candidate.candidate_id,
+                    repository_root,
+                    step_name="TRICERATOPS Monte Carlo Vetting",
+                    total_steps=1,
+                    interactive=True,
+                )
+            with telemetry_context as telemetry:
+                def progress_callback(step, done=None, total=None):
+                    if telemetry is None:
+                        return
+                    telemetry.set_step(step, total=total)
+                    telemetry.note_text("The backend does not expose per-draw progress.")
+                    if done is not None and total is not None:
+                        telemetry.report_progress(done, total)
+
+                output = run_triceratops_simulation(
+                    candidate,
+                    n_draws=args.n_draws,
+                    signal=args.signal,
+                    n_jobs=args.n_jobs,
+                    progress_callback=progress_callback if telemetry is not None else None,
+                )
             print(output.relative_to(repository_root).as_posix())
             return 0
 
@@ -1455,8 +1616,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             from .wizard import run_wizard
 
             return run_wizard(repository_root, args.candidate_id)
+    except KeyboardInterrupt as exc:
+        if _is_autonomous_batch_command(args):
+            from .autonomous import record_autonomous_incident
+
+            try:
+                record_autonomous_incident(repository_root, _command_text(argv), exc)
+            except OSError:
+                pass
+        raise
     except (FileExistsError, FileNotFoundError, ValueError, GateError, RuntimeError) as exc:
+        if _is_autonomous_batch_command(args):
+            from .autonomous import record_autonomous_incident
+
+            try:
+                record_autonomous_incident(repository_root, _command_text(argv), exc)
+            except OSError:
+                pass
         parser.exit(2, "error: {0}\n".format(exc))
+    except Exception as exc:
+        if not _is_autonomous_batch_command(args):
+            raise
+        from .autonomous import record_autonomous_incident
+
+        try:
+            record_autonomous_incident(repository_root, _command_text(argv), exc)
+        except OSError:
+            pass
+        parser.exit(2, "error: unexpected failure: {0}\n".format(exc))
 
     parser.exit(2, "error: unknown command\n")
 

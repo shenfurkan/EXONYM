@@ -77,9 +77,9 @@ def _repo(tmp_path):
 
 def test_cli_full_lifecycle(tmp_path, capsys):
     repo = _repo(tmp_path)
+    root = ["--root", str(repo)]
     shutil.copy2("pyproject.toml", repo / "pyproject.toml")
     shutil.copytree("src", repo / "src")
-    root = ["--root", str(repo)]
 
     assert main(root + ["init", "candidate-alpha", "--toi", "1234.01", "--tic", "123456789"]) == 0
     assert main(root + ["list"]) == 0
@@ -221,8 +221,16 @@ def test_cli_vet_command(tmp_path, capsys, monkeypatch):
 
     calls = []
 
-    def fake_run_triceratops(candidate, n_draws=2000, signal=None):
-        calls.append({"candidate": candidate.candidate_id, "n_draws": n_draws, "signal": signal})
+    def fake_run_triceratops(candidate, n_draws=2000, signal=None, n_jobs=1, progress_callback=None):
+        calls.append(
+            {
+                "candidate": candidate.candidate_id,
+                "n_draws": n_draws,
+                "signal": signal,
+                "n_jobs": n_jobs,
+                "progress_callback": progress_callback,
+            }
+        )
         output = candidate.path / "outputs" / "triceratops_report.json"
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text('{"source": "test-stub"}\n', encoding="utf-8")
@@ -235,8 +243,16 @@ def test_cli_vet_command(tmp_path, capsys, monkeypatch):
         "exonym.statistical_vetting.require_vetting_readiness", lambda candidate, signal=None: candidate.path
     )
 
-    assert main(root + ["vet", "candidate-alpha", "--n-draws", "100"]) == 0
-    assert calls == [{"candidate": "candidate-alpha", "n_draws": 100, "signal": None}]
+    assert main(root + ["vet", "candidate-alpha", "--n-draws", "100", "--n-jobs", "3"]) == 0
+    assert calls == [
+        {
+            "candidate": "candidate-alpha",
+            "n_draws": 100,
+            "signal": None,
+            "n_jobs": 3,
+            "progress_callback": None,
+        }
+    ]
     output = capsys.readouterr().out
     assert "triceratops_report.json" in output
 
@@ -567,8 +583,7 @@ def test_cli_fit_passes_dynesty_sampler(tmp_path, capsys, mocker):
 
 def test_cli_fit_n_jobs_flag(tmp_path):
     """--n-jobs accepts integer and defaults to 1."""
-    repo = _repo(tmp_path)
-    root = ["--root", str(repo)]
+    _repo(tmp_path)
     parser = _build_parser()
     ns = parser.parse_args(["fit", "tic-123", "--n-jobs", "2"])
     assert ns.n_jobs == 2

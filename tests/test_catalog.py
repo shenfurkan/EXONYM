@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -282,8 +281,6 @@ def test_fetch_cleans_partial_staging_after_download_failure(tmp_path, monkeypat
 
 def test_fetch_tesscut_is_rejected_before_network_access(tmp_path, monkeypatch):
     import lightkurve as lk
-    from astropy.table import Table
-
     from exonym.ingest import fetch_tess_products
 
     create_candidate(tmp_path, "candidate-tesscut", tic="123456789")

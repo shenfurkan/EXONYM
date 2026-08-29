@@ -3,9 +3,6 @@
 import os
 from pathlib import Path
 
-import pytest
-
-
 def pytest_configure(config):
     """Automatically set EXONYM_REPO_ROOT to the repository root.
 

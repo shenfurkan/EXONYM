@@ -1,11 +1,11 @@
-"""Candidate-local acceleration cache for integrity verification.
+"""Candidate-local verification cache for integrity audits.
 
-The cache associates file size and nanosecond modification time with parsed
-JSON and SHA-256 results. It avoids repeated reads during one verification
-operation while keeping cache entries scoped to the owning candidate workspace.
-Persisted entries are additionally bound to the resolved repository/workspace
-location and filesystem identity, so a cache copied into another checkout is
-discarded before it can satisfy a fingerprint lookup.
+Persisted cache records retain file fingerprints and content digests for audit
+diagnostics, but they never replace reading and hashing the current file. This
+prevents a same-size rewrite with a restored modification time from satisfying
+security or gate evidence. Records remain scoped to the resolved
+repository/workspace location and filesystem identity, so a copied cache is
+discarded before it can be considered.
 
 Scientific boundary:
     A fingerprint cache is an optimisation, not provenance or a scientific
@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -26,7 +27,7 @@ from typing import Any, Callable, Dict, Iterator, Optional
 
 
 _CACHE_FILENAME = ".exonym-verify-cache.json"
-_CACHE_VERSION = 2
+_CACHE_VERSION = 3
 _ACTIVE_CACHE: ContextVar[Optional["CandidateVerificationCache"]] = ContextVar(
     "exonym_verification_cache", default=None
 )
@@ -130,69 +131,54 @@ class CandidateVerificationCache:
         return state, record if isinstance(record, dict) else None
 
     def sha256(self, path: Path) -> str:
-        """Return a cached SHA-256 only when size and mtime still match."""
+        """Hash current bytes and record whether they match prior audit evidence."""
         path = Path(path)
         if not self.enabled:
             self.hash_misses += 1
             return _sha256(path)
         state, record = self._record_for(path)
         fingerprint = _file_fingerprint(path)
-        if (
-            record is not None
-            and record.get("mtime_ns") == fingerprint["mtime_ns"]
-            and record.get("size") == fingerprint["size"]
-            and isinstance(record.get("sha256"), str)
-        ):
-            self.hash_hits += 1
-            return record["sha256"]
         digest = _sha256(path)
-        self.hash_misses += 1
+        if record is not None and record.get("sha256") == digest:
+            self.hash_hits += 1
+        else:
+            self.hash_misses += 1
         if state is not None:
             workspace = self._workspace_for(path)
             assert workspace is not None
             relative = path.resolve().relative_to(workspace.resolve()).as_posix()
-            state["files"][relative] = {**fingerprint, "sha256": digest}
-            self._dirty.add(workspace.resolve())
+            updated_record = {**fingerprint, "sha256": digest}
+            if record != updated_record:
+                state["files"][relative] = updated_record
+                self._dirty.add(workspace.resolve())
         return digest
 
     def read_candidate_json(self, path: Path, parser: Callable[[str], object]) -> object:
-        """Parse and cache a registered candidate metadata record by fingerprint."""
+        """Parse current candidate metadata without trusting cached parsed JSON."""
         path = Path(path)
         if path.name != "candidate.json" or not self.enabled:
             self.json_misses += 1
             return parser(path.read_text(encoding="utf-8"))
         state, record = self._record_for(path)
         fingerprint = _file_fingerprint(path)
-        if (
-            record is not None
-            and record.get("mtime_ns") == fingerprint["mtime_ns"]
-            and record.get("size") == fingerprint["size"]
-            and "json" in record
-        ):
+        content = path.read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
+        if record is not None and record.get("sha256") == digest:
             self.json_hits += 1
-            return record["json"]
-        value = parser(path.read_text(encoding="utf-8"))
-        self.json_misses += 1
+        else:
+            self.json_misses += 1
+        value = parser(content.decode("utf-8"))
         if state is not None:
             workspace = self._workspace_for(path)
             assert workspace is not None
             relative = path.resolve().relative_to(workspace.resolve()).as_posix()
-            existing_digest = (
-                record.get("sha256")
-                if (
-                    isinstance(record, dict)
-                    and record.get("mtime_ns") == fingerprint["mtime_ns"]
-                    and record.get("size") == fingerprint["size"]
-                    and isinstance(record.get("sha256"), str)
-                )
-                else None
-            )
-            state["files"][relative] = {
+            updated_record = {
                 **fingerprint,
-                "json": value,
-                **({"sha256": existing_digest} if existing_digest is not None else {}),
+                "sha256": digest,
             }
-            self._dirty.add(workspace.resolve())
+            if record != updated_record:
+                state["files"][relative] = updated_record
+                self._dirty.add(workspace.resolve())
         return value
 
     def save(self) -> None:
@@ -202,12 +188,20 @@ class CandidateVerificationCache:
         for workspace in sorted(self._dirty):
             cache_path = workspace / "outputs" / _CACHE_FILENAME
             cache_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = cache_path.with_name(cache_path.name + ".tmp")
-            temporary.write_text(
-                json.dumps(self._states[workspace], indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=cache_path.name + ".", suffix=".tmp", dir=str(cache_path.parent)
             )
-            os.replace(temporary, cache_path)
+            temporary = Path(temporary_name)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+                    json.dump(self._states[workspace], handle, indent=2, sort_keys=True)
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, cache_path)
+            finally:
+                if temporary.exists():
+                    temporary.unlink()
 
     def statistics(self) -> Dict[str, int]:
         return {

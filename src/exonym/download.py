@@ -49,6 +49,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -64,6 +66,8 @@ _CHUNK_SIZE = 64 * 1024          # 64 KB per read
 _DEFAULT_MAX_WORKERS = 4
 _DEFAULT_MAX_RETRIES = 5
 _INITIAL_BACKOFF_SECONDS = 1.0
+_MAX_RETRY_AFTER_SECONDS = 64.0
+_CONTENT_RANGE_PATTERN = re.compile(r"^bytes ([0-9]+)-([0-9]+)/([0-9]+)$")
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +147,32 @@ def _tmp_path(destination: Path) -> Path:
 def _is_tty() -> bool:
     """Return ``True`` when stdout is an interactive terminal."""
     return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+
+
+def _retry_after_seconds(value: Optional[str], fallback: float) -> float:
+    """Return a safe server-requested delay or the bounded retry fallback."""
+    if value is None:
+        return fallback
+    try:
+        delay = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if not math.isfinite(delay) or not 0.0 < delay <= _MAX_RETRY_AFTER_SECONDS:
+        return fallback
+    return delay
+
+
+def _validated_content_range(value: Optional[str], resume_offset: int) -> int:
+    """Validate a partial-response range and return its complete object size."""
+    if resume_offset <= 0:
+        raise DownloadError("HTTP 206 received without a resumable local offset")
+    match = _CONTENT_RANGE_PATTERN.fullmatch(value.strip()) if value is not None else None
+    if match is None:
+        raise DownloadError("HTTP 206 response is missing a valid Content-Range header")
+    start, end, total = (int(part) for part in match.groups())
+    if start != resume_offset or end < start or total <= end:
+        raise DownloadError("HTTP 206 Content-Range does not match the requested resume offset")
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +382,7 @@ class DownloadEngine:
                     # ---- rate limited: back off and retry -------------------
                     if status == 429:
                         retry_after = response.headers.get("Retry-After")
-                        wait = float(retry_after) if retry_after else backoff
+                        wait = _retry_after_seconds(retry_after, backoff)
                         msg = "[Rate Limit: {w:.0f}s bekleniyor...]".format(w=wait)
                         if progress is not None:
                             progress.log(  # type: ignore[union-attr]
@@ -392,7 +422,18 @@ class DownloadEngine:
 
                     content_length_str = response.headers.get("Content-Length")
                     expected_total: Optional[int] = None
-                    if content_length_str is not None:
+                    if status == 206:
+                        expected_total = _validated_content_range(
+                            response.headers.get("Content-Range"), resume_offset
+                        )
+                        if content_length_str is not None:
+                            try:
+                                content_length = int(content_length_str)
+                            except ValueError as exc:
+                                raise DownloadError("HTTP 206 has an invalid Content-Length header") from exc
+                            if content_length < 0 or content_length != expected_total - resume_offset:
+                                raise DownloadError("HTTP 206 Content-Length does not match Content-Range")
+                    elif content_length_str is not None:
                         try:
                             expected_total = int(content_length_str) + resume_offset
                         except ValueError:

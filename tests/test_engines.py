@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 
 from exonym.engines import (
@@ -77,6 +78,45 @@ def test_check_engine_unconfigured_dependency_has_direct_install_hint(monkeypatc
 
     assert ready is False
     assert "pip install dynesty" in message
+
+
+def test_check_engine_rejects_incompatible_installed_dependency(monkeypatch):
+    def fake_version(name):
+        return {"triceratops": "1.0.20", "pytransit": "2.6.11"}[name]
+
+    monkeypatch.setattr("exonym.engines.importlib.util.find_spec", lambda _name: object())
+    monkeypatch.setattr(
+        "exonym.engines.distribution",
+        lambda name: SimpleNamespace(requires=["pytransit == 2.2"]) if name == "triceratops" else None,
+    )
+    monkeypatch.setattr("exonym.engines.version", fake_version)
+
+    status = get_engine("triceratops")
+    ready, message = check_engine("triceratops")
+
+    assert status is not None
+    assert status.dependency_issues == ("requires pytransit==2.2, but pytransit 2.6.11 is installed",)
+    assert ready is False
+    assert "dependency/interface contract is incompatible" in message
+    assert "pytransit 2.6.11" in message
+
+
+def test_run_engine_blocks_an_incompatible_runtime_before_execution(tmp_path, monkeypatch):
+    workspace = create_candidate(tmp_path, "engine-incompatible-runtime")
+    incompatible = EngineStatus(
+        name="screen",
+        capability="screening",
+        optional_group="core",
+        module_name="numpy",
+        description="test",
+        installed=True,
+        version="1.0",
+        dependency_issues=("requires synthetic-dependency==1.0, but 2.0 is installed",),
+    )
+    monkeypatch.setattr("exonym.engines.get_engine", lambda _name: incompatible)
+
+    with pytest.raises(RuntimeError, match="dependency/interface contract is incompatible"):
+        run_engine(workspace, "screen")
 
 
 def test_cli_engine_list(capsys):

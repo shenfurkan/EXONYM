@@ -13,6 +13,7 @@ from exonym.autonomous import (
     _available_common_sectors,
     _select_download_sectors,
     auto_vet_candidate,
+    record_autonomous_incident,
 )
 from exonym.gatekeeper import _gate_novelty_audit
 from exonym.survey import create_survey, load_survey
@@ -401,6 +402,129 @@ def test_auto_vet_records_blocked_steps_without_state_or_claim_changes(tmp_path,
         "version_known": True,
         "executable": "exonym.autonomous",
     }
+
+
+def test_auto_vet_retains_atomic_incremental_manifest_on_interrupt(tmp_path, monkeypatch):
+    candidate = create_candidate(tmp_path, "automation-interrupt", tic="123456789", mission="tess")
+
+    def interrupt(*_args, **_kwargs):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr("exonym.screening.run_fixed_ephemeris_screen", interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        auto_vet_candidate(candidate, download=False)
+
+    manifests = list((candidate.path / "runs" / "auto-vet").glob("*/engine-run.json"))
+    assert len(manifests) == 1
+    manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert manifest["status"] == "blocked"
+    assert manifest["failure"]["code"] == "auto-vet-incomplete"
+    assert [step["name"] for step in manifest["automation"]["steps"]] == ["ingest", "search"]
+    assert not list(manifests[0].parent.glob("*.tmp"))
+
+
+def test_auto_vet_all_reports_invalid_workspace_as_incomplete(tmp_path, monkeypatch, capsys):
+    from exonym.__main__ import main
+
+    candidate = create_candidate(tmp_path, "automation-valid", tic="123456789", mission="tess")
+    (tmp_path / "candidate" / "automation-broken").mkdir()
+    manifest = candidate.path / "runs" / "auto-vet" / "synthetic" / "engine-run.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr("exonym.autonomous.auto_vet_candidate", lambda *_args, **_kwargs: manifest)
+
+    assert main(["--root", str(tmp_path), "survey", "auto-vet", "--all", "--no-download"]) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    assert {entry["status"] for entry in report["outcomes"]} == {"completed", "incomplete"}
+    assert report["claim_eligible"] is False
+
+
+def test_run_loop_resumes_already_provisioned_candidate_without_auto_vet_run(
+    tmp_path, monkeypatch, capsys
+):
+    from exonym.__main__ import main
+
+    survey = create_survey(tmp_path, "loop-test", "tess", [17])
+    candidate = create_candidate(tmp_path, "loop-target", tic="123456789", mission="tess")
+    manifest = candidate.path / "runs" / "auto-vet" / "resumed" / "engine-run.json"
+    calls = []
+
+    monkeypatch.setattr(
+        "exonym.survey_harvest.harvest_tces",
+        lambda *_args, **_kwargs: [{"candidate_id": candidate.candidate_id, "status": "already-provisioned"}],
+    )
+
+    def run_auto_vet(workspace, **_kwargs):
+        calls.append(workspace.candidate_id)
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text("{}\n", encoding="utf-8")
+        return manifest
+
+    monkeypatch.setattr("exonym.autonomous.auto_vet_candidate", run_auto_vet)
+
+    assert main(
+        [
+            "--root",
+            str(tmp_path),
+            "survey",
+            "run-loop",
+            survey.survey_id,
+            "--source",
+            "https://example.invalid/tces.csv",
+        ]
+    ) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    journal = json.loads((tmp_path / report["journal"]).read_text(encoding="utf-8"))
+    assert calls == [candidate.candidate_id]
+    assert journal["status"] == "completed"
+    assert journal["cycles"][0]["auto_vet"] == [
+        {
+            "candidate_id": candidate.candidate_id,
+            "status": "completed",
+            "manifest": manifest.relative_to(tmp_path).as_posix(),
+        }
+    ]
+    assert journal["claim_eligible"] is False
+
+
+def test_autonomous_cli_failure_records_atomic_incident(tmp_path, monkeypatch):
+    from exonym.__main__ import main
+
+    candidate = create_candidate(tmp_path, "incident-target", tic="123456789", mission="tess")
+    monkeypatch.setattr(
+        "exonym.survey.load_survey_candidate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("synthetic failure")),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--root", str(tmp_path), "survey", "auto-vet", candidate.candidate_id, "--no-download"])
+
+    assert exc_info.value.code == 2
+    incidents = list((tmp_path / "log").glob("issue-*.md"))
+    assert len(incidents) == 1
+    incident = incidents[0].read_text(encoding="utf-8")
+    assert "Exonym Version" in incident
+    assert "Full Python Traceback" in incident
+    assert "synthetic failure" in incident
+    assert not list((tmp_path / "log").glob("*.tmp"))
+
+
+def test_incident_recorder_writes_required_sections_atomically(tmp_path):
+    try:
+        raise RuntimeError("synthetic incident")
+    except RuntimeError as exc:
+        path = record_autonomous_incident(tmp_path, "exonym survey run-loop loop-test", exc)
+
+    content = path.read_text(encoding="utf-8")
+    assert "UTC Timestamp" in content
+    assert "Expected Behavior" in content
+    assert "Observed Behavior" in content
+    assert "Root Cause And Affected Modules" in content
+    assert "Actionable Remediation" in content
+    assert not list(path.parent.glob("*.tmp"))
 
 
 def test_auto_vet_intersects_requested_sectors_with_common_archive_products():

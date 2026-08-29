@@ -1,6 +1,8 @@
 ﻿import json
 import hashlib
 import sys
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -10,6 +12,15 @@ import pytest
 from exonym.vetting.centroid import centroid_gate, centroid_offset_z
 from exonym.vetting.oddeven import odd_even_gate, odd_even_z
 from exonym.vetting.tricera_parse import fpp_gate, load_fpp_report
+
+
+@pytest.fixture(autouse=True)
+def _compatible_triceratops_runtime(monkeypatch):
+    """Keep synthetic backend tests independent of the developer environment."""
+    monkeypatch.setattr(
+        "exonym.engines.check_engine",
+        lambda _name: (True, "synthetic TRICERATOPS runtime is compatible"),
+    )
 
 
 def test_legacy_numpy_scalar_compatibility_only_fills_missing_aliases():
@@ -118,6 +129,28 @@ def test_fpp_report_rejects_non_object_json(tmp_path):
         load_fpp_report(path)
 
 
+@pytest.mark.parametrize(
+    "contents",
+    (
+        '{"FPP": 0.1, "FPP": 0.2, "NFPP": 0.0}',
+        '{"FPP": NaN, "NFPP": 0.0}',
+        '{"FPP": 1e999, "NFPP": 0.0}',
+    ),
+)
+def test_fpp_report_rejects_ambiguous_or_nonfinite_json(tmp_path, contents):
+    path = tmp_path / "triceratops.json"
+    path.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="strict finite JSON"):
+        load_fpp_report(path)
+
+
+@pytest.mark.parametrize("report", ({"FPP": True, "NFPP": 0.0}, {"FPP": 1.1, "NFPP": 0.0}))
+def test_fpp_gate_rejects_non_numeric_or_out_of_range_probabilities(report):
+    with pytest.raises(ValueError, match="FPP must be"):
+        fpp_gate(report)
+
+
 def test_observed_sector_parser_prefers_products_then_uses_holdings_fallback(tmp_path):
     from exonym.vetting.tricera_parse import _observed_sectors
 
@@ -147,7 +180,6 @@ def _vet_workspace_stub(tmp_path, candidate_id="vet-stub", tic=None):
     import types
 
     outputs = tmp_path / "outputs"
-    claims = tmp_path / "claims"
     outputs.mkdir(parents=True, exist_ok=True)
     stub = types.SimpleNamespace(
         path=tmp_path,
@@ -254,6 +286,54 @@ def test_prepare_observed_transit_input_uses_measured_candidate_photometry(tmp_p
         "epoch_btjd": "candidate-config",
         "duration_days": "candidate-config",
     }
+
+
+def test_prepare_observed_transit_input_resolves_low_duty_cycle_transit(tmp_path, monkeypatch):
+    from exonym.vetting.tricera_parse import _prepare_observed_transit_input
+
+    workspace, _ = _vet_workspace_stub(tmp_path, tic="123456789")
+    input_path = tmp_path / "data" / "raw" / "s0001_lc.fits"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_bytes(b"observed-photometry")
+    period_days = 12.75
+    duration_days = 3.0 / 24.0
+    epoch_btjd = 1000.0
+    time = np.arange(950.0, 1050.0, 0.005)
+    phase = np.remainder(time - epoch_btjd + 0.5 * period_days, period_days) - 0.5 * period_days
+    flux = np.ones_like(time)
+    flux[np.abs(phase) <= 0.5 * duration_days] -= 0.0015
+    table = {
+        "time": time,
+        "flux": flux,
+        "flux_err": np.full_like(time, 0.0002),
+        "flux_err_sources": ["reported"],
+        "sector": np.ones(time.size, dtype=int),
+        "input_files": [input_path],
+    }
+    ephemeris = {
+        "period_days": period_days,
+        "epoch_btjd": epoch_btjd,
+        "duration_days": duration_days,
+        "time_system": "BTJD_TDB",
+        "source": "candidate-config",
+        "field_sources": {
+            "period_days": "candidate-config",
+            "epoch_btjd": "candidate-config",
+            "duration_days": "candidate-config",
+        },
+    }
+    monkeypatch.setattr("exonym.inputs.load_light_curve_table", lambda *_args, **_kwargs: table)
+    monkeypatch.setattr("exonym.inputs.load_transit_ephemeris", lambda *_args, **_kwargs: ephemeris)
+
+    prepared = _prepare_observed_transit_input(workspace, signal=None)
+
+    in_transit = np.abs(prepared["time_days"]) <= 0.5 * duration_days
+    assert np.count_nonzero(in_transit) == 5
+    assert prepared["depth_ppm"] == pytest.approx(1500.0, rel=0.05)
+    phase_binning = prepared["provenance"]["phase_binning"]
+    assert phase_binning["method"] == "transit-centered-nonuniform"
+    assert phase_binning["transit_bin_count"] == 5
+    assert phase_binning["transit_bin_width_days"] == pytest.approx(duration_days / 5.0)
 
 
 def test_prepare_observed_transit_input_rejects_estimated_errors(tmp_path, monkeypatch):
@@ -468,6 +548,14 @@ def test_run_triceratops_does_not_monkeypatch_tls_client(tmp_path, monkeypatch):
     assert requests.Session().verify is True
     assert report["random_seed"] == 1729
     assert report["backend"]["package"] == "triceratops"
+    assert report["backend"]["execution"] == {
+        "requested_n_jobs": 1,
+        "effective_n_jobs": 1,
+        "calc_probs_parallel": False,
+        "parallel_backend": "serial",
+        "fallback_reason": None,
+    }
+    assert captured["parallel"] is False
     rng_state_after = np.random.get_state()
     assert rng_state_after[0] == rng_state_before[0]
     assert np.array_equal(rng_state_after[1], rng_state_before[1])
@@ -478,12 +566,129 @@ def test_run_triceratops_does_not_monkeypatch_tls_client(tmp_path, monkeypatch):
     assert captured["exptime"] == observed_input["exposure_days"]
     assert report["input_provenance"] == {
         **observed_input["provenance"],
+        "bound_artifacts": observed_input["provenance"]["input_files"],
         "scene_artifacts": [],
     }
+    assert report["audit_status"] == "valid"
+    assert report["audit_invalid_reason"] is None
     assert report["claim_eligible"] is False
     assert "provenance-bound observed photometry" in report["claim_block_reason"]
     claim_path = tmp_path / "claims" / "fpp_claim.json"
     assert not claim_path.exists()
+
+
+def test_triceratops_native_thread_dispatcher_falls_back_to_serial_without_numba(monkeypatch):
+    from exonym.vetting.tricera_parse import _parallel_calc_probs_dispatcher
+
+    captured = {}
+    progress = []
+
+    class Target:
+        def calc_probs(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setitem(sys.modules, "numba", None)
+    execution = _parallel_calc_probs_dispatcher(
+        Target(),
+        {
+            "time_days": np.array([0.0]),
+            "flux": np.array([1.0]),
+            "flux_err": np.array([0.01]),
+            "exposure_days": 0.01,
+        },
+        period=2.5,
+        n_draws=10,
+        n_jobs=4,
+        progress_callback=lambda step, done, total: progress.append((step, done, total)),
+    )
+
+    assert captured["parallel"] is False
+    assert execution["effective_n_jobs"] == 1
+    assert execution["parallel_backend"] == "serial"
+    assert execution["fallback_reason"].startswith("native thread control unavailable:")
+    assert progress == [
+        ("TRICERATOPS Monte Carlo Vetting", 0, 1),
+        ("TRICERATOPS Monte Carlo Vetting", 1, 1),
+    ]
+
+
+def test_run_triceratops_records_incompatible_runtime_without_execution(tmp_path, monkeypatch):
+    from exonym.vetting.tricera_parse import run_triceratops_simulation
+
+    workspace, _ = _vet_workspace_stub(tmp_path, tic="123456789")
+    monkeypatch.setattr(
+        "exonym.statistical_vetting.require_vetting_readiness",
+        lambda *_args, **_kwargs: tmp_path / "outputs" / "statistical_vetting_evidence.json",
+    )
+    monkeypatch.setattr(
+        "exonym.vetting.tricera_parse._prepare_observed_transit_input",
+        lambda *_args, **_kwargs: _observed_input_stub(tmp_path),
+    )
+    monkeypatch.setattr(
+        "exonym.engines.check_engine",
+        lambda _name: (False, "requires pytransit==2.2, but pytransit 2.6.11 is installed"),
+    )
+
+    report_path = run_triceratops_simulation(workspace, allow_fallback=True)
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    decision = json.loads(
+        (tmp_path / "decisions" / "triceratops_vetting_decision.json").read_text(encoding="utf-8")
+    )
+    assert report["source"] == "triceratops-failed-UNVALIDATED"
+    assert report["FPP"] is None
+    assert decision["execution_status"] == "unavailable"
+    assert decision["result_status"] == "unresolved"
+    assert decision["error"]["code"] == "triceratops-runtime-incompatible"
+
+
+def test_run_triceratops_records_tls_verification_failure(tmp_path, monkeypatch):
+    import ssl
+    import types
+
+    from exonym.vetting.tricera_parse import run_triceratops_simulation
+
+    stub, _ = _vet_workspace_stub(tmp_path, tic="123456789")
+    monkeypatch.setattr(
+        "exonym.statistical_vetting.require_vetting_readiness",
+        lambda *_args, **_kwargs: tmp_path / "outputs" / "statistical_vetting_evidence.json",
+    )
+    monkeypatch.setattr(
+        "exonym.vetting.tricera_parse._prepare_observed_transit_input",
+        lambda *_args, **_kwargs: _observed_input_stub(tmp_path),
+    )
+    package = types.ModuleType("triceratops")
+    package.__path__ = []
+    module = types.ModuleType("triceratops.triceratops")
+
+    class FakeTarget:
+        def __init__(self, **_kwargs):
+            return None
+
+        def calc_depths(self, _depth):
+            return None
+
+        def calc_probs(self, **_kwargs):
+            raise ssl.SSLCertVerificationError(1, "certificate verify failed")
+
+    module.target = FakeTarget
+    monkeypatch.setitem(sys.modules, "triceratops", package)
+    monkeypatch.setitem(sys.modules, "triceratops.triceratops", module)
+
+    report_path = run_triceratops_simulation(stub, allow_fallback=True)
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    decision = json.loads(
+        (tmp_path / "decisions" / "triceratops_vetting_decision.json").read_text(encoding="utf-8")
+    )
+    assert report["source"] == "triceratops-failed-UNVALIDATED"
+    assert report["FPP"] is None
+    assert decision["execution_status"] == "failed"
+    assert decision["result_status"] == "unresolved"
+    assert decision["error"]["code"] == "triceratops-tls-verification-failed"
+    assert decision["audit_status"] == "invalid"
+    assert decision["audit_invalid_reason"]
+    assert decision["claim_eligible"] is False
 
 
 def test_run_triceratops_requires_readiness_inside_public_function(tmp_path, monkeypatch):
@@ -557,6 +762,8 @@ def test_run_triceratops_allow_fallback_writes_null_fpp_without_claim(tmp_path):
     assert report["FPP"] is None, "FPP must be null, not a hardcoded passing value"
     assert report["source"] in ("not-run",), f"unexpected source: {report['source']}"
     assert report["triceratops_error"] is None  # no error â€” just no TIC
+    assert report["audit_status"] == "invalid"
+    assert report["audit_invalid_reason"]
 
     claim_path = tmp_path / "claims" / "fpp_claim.json"
     assert not claim_path.exists()
@@ -591,6 +798,149 @@ def test_run_triceratops_config_parse_error_emits_warning(tmp_path):
     assert any("transit_config.01.json" in str(w.message) for w in caught), (
         "expected a warning mentioning the config filename"
     )
+
+
+def test_triceratops_signal_decisions_are_isolated_and_atomic(tmp_path, monkeypatch):
+    from exonym.statistical_vetting import (
+        _write_json_atomic,
+        triceratops_vetting_decision_path,
+        write_triceratops_vetting_decision,
+    )
+
+    workspace, _ = _vet_workspace_stub(tmp_path)
+    first = write_triceratops_vetting_decision(
+        workspace,
+        signal=".01",
+        execution_status="unavailable",
+        triage_status="not-run",
+        error={"code": "test", "message": "Synthetic unavailable engine."},
+    )
+    second = write_triceratops_vetting_decision(
+        workspace,
+        signal=".02",
+        execution_status="failed",
+        triage_status="review-required",
+        error={"code": "test", "message": "Synthetic failed engine."},
+    )
+
+    assert first == triceratops_vetting_decision_path(workspace, ".01")
+    assert second == triceratops_vetting_decision_path(workspace, ".02")
+    assert json.loads(first.read_text(encoding="utf-8"))["signal"] == ".01"
+    assert json.loads(second.read_text(encoding="utf-8"))["signal"] == ".02"
+
+    original = tmp_path / "decisions" / "atomic.json"
+    original.write_text('{"old": true}\n', encoding="utf-8")
+    monkeypatch.setattr(
+        "exonym.statistical_vetting.os.replace",
+        lambda *_args: (_ for _ in ()).throw(OSError("synthetic replace failure")),
+    )
+    with pytest.raises(OSError, match="synthetic replace failure"):
+        _write_json_atomic(original, {"new": True})
+    assert json.loads(original.read_text(encoding="utf-8")) == {"old": True}
+    assert not list(original.parent.glob("atomic.json.*.tmp"))
+
+
+def test_triceratops_detects_input_changes_during_execution(tmp_path, monkeypatch):
+    import types
+
+    from exonym.vetting.tricera_parse import run_triceratops_simulation
+
+    workspace, _ = _vet_workspace_stub(tmp_path, tic="123456789")
+    observed_input = _observed_input_stub(tmp_path)
+    raw_path = tmp_path / observed_input["provenance"]["input_files"][0]["path"]
+    monkeypatch.setattr(
+        "exonym.statistical_vetting.require_vetting_readiness",
+        lambda *_args, **_kwargs: tmp_path / "outputs" / "statistical_vetting_evidence.json",
+    )
+    monkeypatch.setattr(
+        "exonym.vetting.tricera_parse._prepare_observed_transit_input",
+        lambda *_args, **_kwargs: observed_input,
+    )
+    package = types.ModuleType("triceratops")
+    package.__path__ = []
+    module = types.ModuleType("triceratops.triceratops")
+
+    class FakeTarget:
+        FPP = 0.001
+        NFPP = 0.0
+
+        def __init__(self, **_kwargs):
+            return None
+
+        def calc_depths(self, _depth):
+            return None
+
+        def calc_probs(self, **_kwargs):
+            raw_path.write_bytes(b"changed-during-engine-run")
+
+    module.target = FakeTarget
+    monkeypatch.setitem(sys.modules, "triceratops", package)
+    monkeypatch.setitem(sys.modules, "triceratops.triceratops", module)
+
+    with pytest.warns(UserWarning, match="Monte Carlo failed"):
+        report_path = run_triceratops_simulation(workspace, allow_fallback=True)
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    decision = json.loads(
+        (tmp_path / "decisions" / "triceratops_vetting_decision.json").read_text(encoding="utf-8")
+    )
+    assert report["source"] == "triceratops-failed-UNVALIDATED"
+    assert report["audit_status"] == "invalid"
+    assert decision["execution_status"] == "failed"
+    assert decision["audit_status"] == "invalid"
+    assert decision["input_artifacts"][0]["sha256"] != hashlib.sha256(raw_path.read_bytes()).hexdigest()
+    assert decision["claim_eligible"] is False
+
+
+def test_triceratops_serializes_process_global_engine_state(tmp_path, monkeypatch):
+    import concurrent.futures
+    import types
+
+    from exonym.vetting.tricera_parse import run_triceratops_simulation
+
+    workspaces = [_vet_workspace_stub(tmp_path / name, candidate_id=name, tic="123456789")[0] for name in ("one", "two")]
+    observed_inputs = {workspace.candidate_id: _observed_input_stub(workspace.path) for workspace in workspaces}
+    monkeypatch.setattr(
+        "exonym.statistical_vetting.require_vetting_readiness",
+        lambda *_args, **_kwargs: tmp_path / "outputs" / "statistical_vetting_evidence.json",
+    )
+    monkeypatch.setattr(
+        "exonym.vetting.tricera_parse._prepare_observed_transit_input",
+        lambda workspace, *_args, **_kwargs: observed_inputs[workspace.candidate_id],
+    )
+    package = types.ModuleType("triceratops")
+    package.__path__ = []
+    module = types.ModuleType("triceratops.triceratops")
+    state = {"active": 0, "maximum": 0}
+    state_lock = threading.Lock()
+
+    class FakeTarget:
+        FPP = 0.001
+        NFPP = 0.0
+
+        def __init__(self, **_kwargs):
+            return None
+
+        def calc_depths(self, _depth):
+            return None
+
+        def calc_probs(self, **_kwargs):
+            with state_lock:
+                state["active"] += 1
+                state["maximum"] = max(state["maximum"], state["active"])
+            time.sleep(0.03)
+            with state_lock:
+                state["active"] -= 1
+
+    module.target = FakeTarget
+    monkeypatch.setitem(sys.modules, "triceratops", package)
+    monkeypatch.setitem(sys.modules, "triceratops.triceratops", module)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        reports = list(executor.map(lambda workspace: run_triceratops_simulation(workspace), workspaces))
+
+    assert state == {"active": 0, "maximum": 1}
+    assert all(json.loads(path.read_text(encoding="utf-8"))["audit_status"] == "valid" for path in reports)
 
 
 def test_load_transit_ephemeris_signal_takes_precedence(tmp_path):

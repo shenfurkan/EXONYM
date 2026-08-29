@@ -13,9 +13,6 @@ import math
 import sys
 from unittest.mock import patch
 
-import pytest
-
-
 def _import_banner():
     """Import (or re-use cached) exonym.banner."""
     return importlib.import_module("exonym.banner")

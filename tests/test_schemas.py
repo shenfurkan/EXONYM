@@ -112,6 +112,38 @@ def test_triceratops_vetting_decision_is_schema_valid_and_candidate_local(tmp_pa
                 "error": {"code": "missing-engine", "message": "Synthetic unavailable engine."},
                 "input_artifacts": [],
                 "triceratops_report": None,
+                "audit_status": "invalid",
+                "audit_invalid_reason": "Synthetic unavailable engine.",
+                "claim_eligible": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _audit(repo).ok
+
+
+def test_signal_triceratops_vetting_decision_is_schema_valid_and_scoped(tmp_path):
+    repo = _make_repo(tmp_path)
+    decision_path = repo / "candidate" / "candidate-alpha" / "decisions" / "triceratops_vetting_decision.01.json"
+    decision_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "candidate_id": "candidate-alpha",
+                "generated_at": "2026-01-01T00:00:00+00:00",
+                "signal": ".01",
+                "execution_status": "unavailable",
+                "triage_status": "not-run",
+                "result_status": "unresolved",
+                "FPP": None,
+                "NFPP": None,
+                "blocking_reasons": [],
+                "error": {"code": "missing-engine", "message": "Synthetic unavailable engine."},
+                "input_artifacts": [],
+                "triceratops_report": None,
+                "audit_status": "invalid",
+                "audit_invalid_reason": "Synthetic unavailable engine.",
                 "claim_eligible": False,
             }
         ),
@@ -297,12 +329,27 @@ def _write_observed_triceratops_report(repo, claim_eligible=False):
     photometry_path = workspace / "data" / "raw" / "observed.fits"
     photometry_path.parent.mkdir(parents=True, exist_ok=True)
     photometry_path.write_bytes(b"observed photometry")
+    ephemeris_path = workspace / "config" / "transit_config.json"
+    ephemeris_path.write_text('{"transit": {"period_days": 2.0}}\n', encoding="utf-8")
+    photometry_artifact = {
+        "path": "data/raw/observed.fits",
+        "sha256": _sha256(photometry_path),
+    }
+    ephemeris_artifact = {
+        "path": "config/transit_config.json",
+        "sha256": _sha256(ephemeris_path),
+    }
     report_path = workspace / "outputs" / "triceratops_report.json"
     report_path.write_text(
         json.dumps(
             {
                 "candidate_id": "candidate-alpha",
                 "random_seed": 17,
+                "source": "triceratops-monte-carlo",
+                "FPP": 0.001,
+                "NFPP": 0.0,
+                "audit_status": "valid",
+                "audit_invalid_reason": None,
                 "claim_eligible": claim_eligible,
                 "input_provenance": {
                     "representation": "phase-folded observed candidate photometry",
@@ -312,12 +359,10 @@ def _write_observed_triceratops_report(repo, claim_eligible=False):
                     "flux_error_scalar": 0.001,
                     "exposure_days": 0.001,
                     "observed_depth_ppm": 100.0,
-                    "input_files": [
-                        {
-                            "path": "data/raw/observed.fits",
-                            "sha256": _sha256(photometry_path),
-                        }
-                    ],
+                    "input_files": [photometry_artifact],
+                    "ephemeris_artifacts": [ephemeris_artifact],
+                    "bound_artifacts": [photometry_artifact, ephemeris_artifact],
+                    "scene_artifacts": [],
                     "ephemeris_field_sources": {
                         "period_days": "candidate-config",
                         "epoch_btjd": "candidate-config",

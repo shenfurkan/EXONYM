@@ -920,7 +920,6 @@ def test_quality_flag_masking_excludes_bad_cadences(tmp_path):
     quality mask the dip is absent and BLS must NOT recover a period near
     the spacing of the bad-cadence cluster (which would be ~1 day here).
     """
-    import lightkurve as lk
     from astropy.io import fits as fitsio
     from astropy.table import Table
 
