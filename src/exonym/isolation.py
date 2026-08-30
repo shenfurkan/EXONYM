@@ -669,12 +669,23 @@ def _scan_candidate_reparse_points(
 
     scan_root = candidate_root / candidate_id if candidate_id is not None else candidate_root
     if candidate_id is not None and not scan_root.is_dir():
-        report.add(
-            scan_root,
-            "candidate-workspace-missing",
-            "selected candidate workspace does not exist",
-        )
-        return
+        # The workspace may live inside a lifecycle-group directory.
+        from .workspace import LIFECYCLE_STATES
+        found = None
+        for group in LIFECYCLE_STATES:
+            grp_path = candidate_root / group / candidate_id
+            if grp_path.is_dir():
+                found = grp_path
+                break
+        if found is not None:
+            scan_root = found
+        else:
+            report.add(
+                scan_root,
+                "candidate-workspace-missing",
+                "selected candidate workspace does not exist",
+            )
+            return
 
     for current, directory_names, file_names in os.walk(
         str(scan_root), topdown=True, followlinks=False
