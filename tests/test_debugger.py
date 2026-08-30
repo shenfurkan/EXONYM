@@ -325,7 +325,7 @@ def test_full_wheel_smoke_builds_installs_and_imports_isolated_wheel(
         if name == "wheel-build":
             wheel_dir = Path(command[command.index("--wheel-dir") + 1])
             wheel_dir.mkdir()
-            (wheel_dir / "exonym-1.5.0-py3-none-any.whl").write_bytes(b"synthetic")
+            (wheel_dir / "exonym-2.0.0-py3-none-any.whl").write_bytes(b"synthetic")
         return debugger.ToolResult(name, "passed", command, 0, "tools/{0}.txt".format(name))
 
     monkeypatch.setattr(debugger, "_run_tool", fake_run_tool)
