@@ -71,6 +71,7 @@ PHASE_CURVE_SCHEMA = "phase-curve.schema.json"
 DETRENDING_MANIFEST_SCHEMA = "detrending-manifest.schema.json"
 LDTK_QUADRATIC_LIMB_DARKENING_PRIOR_SCHEMA = "ldtk-quadratic-limb-darkening-prior.schema.json"
 EXOFOP_PRIOR_RETRIEVAL_SCHEMA = "exofop-prior-retrieval.schema.json"
+CHECKPOINT_SCHEMA = "checkpoint-manifest.schema.json"
 LEGACY_SUBTREE = "legacy-project"
 
 
@@ -686,6 +687,7 @@ def _load_schemas(root: Path, report: IsolationReport) -> Dict[str, object]:
         DETRENDING_MANIFEST_SCHEMA,
         LDTK_QUADRATIC_LIMB_DARKENING_PRIOR_SCHEMA,
         EXOFOP_PRIOR_RETRIEVAL_SCHEMA,
+        CHECKPOINT_SCHEMA,
     ):
         path = root / SCHEMA_DIRECTORY / name
         try:
@@ -1089,6 +1091,7 @@ def validate_schemas(
     detrending_manifest_schema = schemas.get(DETRENDING_MANIFEST_SCHEMA)
     ldtk_prior_schema = schemas.get(LDTK_QUADRATIC_LIMB_DARKENING_PRIOR_SCHEMA)
     exofop_prior_schema = schemas.get(EXOFOP_PRIOR_RETRIEVAL_SCHEMA)
+    checkpoint_schema = schemas.get(CHECKPOINT_SCHEMA)
     surveys_root = candidate_root / "_surveys"
     if candidate_id is None:
         workspace_dirs = sorted(candidate_root.iterdir())
@@ -1113,6 +1116,35 @@ def validate_schemas(
                 report.add(metadata_path, "schema-violation", "invalid JSON: {0}".format(exc))
             else:
                 _validate(report, metadata_path, instance, schemas[CANDIDATE_SCHEMA], validate_func)
+
+        if checkpoint_schema is not None:
+            checkpoints_dir = workspace_dir / "checkpoints"
+            for manifest_path in sorted(checkpoints_dir.glob("*.manifest.json")):
+                try:
+                    instance = _read_json(manifest_path)
+                except (OSError, UnicodeError, ValueError) as exc:
+                    report.add(manifest_path, "schema-violation", "invalid JSON: {0}".format(exc))
+                    continue
+                _validate(report, manifest_path, instance, checkpoint_schema, validate_func)
+                if not isinstance(instance, dict):
+                    continue
+                checkpoint_id = manifest_path.name[: -len(".manifest.json")]
+                if instance.get("candidate_id") != workspace_dir.name:
+                    report.add(manifest_path, "schema-violation", "checkpoint manifest candidate_id does not match its workspace")
+                if instance.get("checkpoint_id") != checkpoint_id:
+                    report.add(manifest_path, "schema-violation", "checkpoint manifest checkpoint_id does not match its filename")
+                archive = instance.get("archive")
+                if not isinstance(archive, dict) or archive.get("filename") != checkpoint_id + ".tar.gz":
+                    report.add(manifest_path, "schema-violation", "checkpoint manifest archive does not match its checkpoint_id")
+                    continue
+                archive_path = checkpoints_dir / archive["filename"]
+                if not archive_path.is_file():
+                    report.add(manifest_path, "checkpoint-archive-missing", "checkpoint manifest references a missing archive")
+                elif (
+                    archive.get("bytes") != archive_path.stat().st_size
+                    or archive.get("sha256") != _file_sha256(archive_path)
+                ):
+                    report.add(manifest_path, "checkpoint-archive-mismatch", "checkpoint archive bytes or SHA-256 do not match its manifest")
 
         releases_dir = workspace_dir / "releases"
         if releases_dir.is_dir():

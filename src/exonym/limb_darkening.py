@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
+from .lightcurve import quadratic_to_kipping_limb_darkening
 from .workspace import CandidateWorkspace
 
 
@@ -112,12 +113,18 @@ def _quadratic_rows(
             u1_err, u2_err = uncertainties[index]
         except (IndexError, TypeError, ValueError) as exc:
             raise ValueError("LDTk returned malformed quadratic coefficients") from exc
+        u1_value = _finite_float(u1, "u1")
+        u2_value = _finite_float(u2, "u2")
+        try:
+            quadratic_to_kipping_limb_darkening(u1_value, u2_value)
+        except ValueError as exc:
+            raise ValueError("LDTk returned physically invalid quadratic coefficients") from exc
         rows.append(
             {
                 "filter": _filter_label(filter_definition, index),
-                "u1": _finite_float(u1, "u1"),
+                "u1": u1_value,
                 "u1_err": _finite_float(u1_err, "u1 uncertainty", positive=True),
-                "u2": _finite_float(u2, "u2"),
+                "u2": u2_value,
                 "u2_err": _finite_float(u2_err, "u2 uncertainty", positive=True),
                 "unit": "dimensionless",
             }

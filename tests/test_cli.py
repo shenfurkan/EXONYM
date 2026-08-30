@@ -67,6 +67,7 @@ def _repo(tmp_path):
         "detrending-manifest.schema.json",
         "ldtk-quadratic-limb-darkening-prior.schema.json",
         "exofop-prior-retrieval.schema.json",
+        "checkpoint-manifest.schema.json",
     ):
         shutil.copy2("schemas/{0}".format(name), tmp_path / "schemas" / name)
     (tmp_path / "requirements-lock.txt").write_text(

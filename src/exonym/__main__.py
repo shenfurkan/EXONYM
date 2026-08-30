@@ -902,7 +902,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 _print_json(survey.metadata)
                 return 0
             if args.survey_action == "auto-vet":
-                from .autonomous import auto_vet_candidate
+                from .autonomous import auto_vet_candidate, record_autonomous_incident
 
                 if bool(args.all) == (args.candidate_id is not None):
                     raise ValueError("provide exactly one candidate_id or --all")
@@ -919,6 +919,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             n_draws=args.n_draws,
                             fit_samples=args.fit_samples,
                             download=not args.no_download,
+                            incident_command=_command_text(argv),
                         )
                     except Exception as exc:
                         outcomes.append(
@@ -930,6 +931,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                 ),
                             }
                         )
+                        record_autonomous_incident(repository_root, _command_text(argv), exc)
                     else:
                         outcomes.append(
                             {
@@ -981,6 +983,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     auto_vet_candidate,
                     auto_vet_started,
                     create_run_loop_journal,
+                    record_autonomous_incident,
                     write_run_loop_journal,
                 )
                 from .survey_harvest import harvest_tces
@@ -1047,6 +1050,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                     candidate,
                                     n_draws=args.n_draws,
                                     fit_samples=args.fit_samples,
+                                    incident_command=_command_text(argv),
                                 )
                             except Exception as exc:
                                 cycle["auto_vet"].append(
@@ -1058,6 +1062,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                         ),
                                     }
                                 )
+                                write_run_loop_journal(journal_path, journal)
+                                record_autonomous_incident(repository_root, _command_text(argv), exc)
+                                continue
                             else:
                                 cycle["auto_vet"].append(
                                     {
@@ -1422,22 +1429,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             import sys
 
             telemetry_context = nullcontext(None)
-            if args.progress and sys.stdout.isatty():
+            if args.progress:
                 from .telemetry import LiveTelemetry
 
                 telemetry_context = LiveTelemetry(
                     candidate.candidate_id,
                     repository_root,
                     step_name="TRICERATOPS Monte Carlo Vetting",
-                    interactive=True,
+                    interactive=sys.stdout.isatty(),
                 )
             with telemetry_context as telemetry:
                 def progress_callback(step, done=None, total=None):
                     if telemetry is None:
                         return
-                    telemetry.set_step(step)
-                    telemetry.note_text(
-                        "TRICERATOPS does not expose completed-draw counts; percentage is unavailable."
+                    telemetry.set_step(
+                        step,
+                        note="TRICERATOPS does not expose completed-draw counts; percentage is unavailable.",
                     )
 
                 output = run_triceratops_simulation(
@@ -1475,6 +1482,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.command == "fit":
             import sys as _fit_sys
+            from contextlib import nullcontext
 
             from .transit_fit import run_mcmc_transit_fit
 
@@ -1489,25 +1497,39 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 n_jobs=args.n_jobs,
                 resume=args.resume,
             )
-            if args.progress and _fit_sys.stdout.isatty():
-                # Sticky HUD replaces emcee's scrolling per-step progress on
-                # interactive terminals; sampler iterations drive the bar via
-                # the callback hook. Non-TTY runs keep the plain flag.
+            telemetry_context = nullcontext(None)
+            if args.progress:
                 from .telemetry import LiveTelemetry
 
-                with LiveTelemetry(
+                telemetry_context = LiveTelemetry(
                     candidate.candidate_id,
                     repository_root=repository_root,
                     step_name="MCMC transit fit",
-                ) as hud:
+                    interactive=_fit_sys.stdout.isatty(),
+                )
+            with telemetry_context as hud:
+                if hud is not None:
+                    def progress_callback(done, total=None, **metadata):
+                        if total is None:
+                            hud.report_evidence(done, **metadata)
+                        else:
+                            burn_in = int(metadata.pop("burn_in", 0))
+                            production = int(metadata.pop("production", total))
+                            hud.report_mcmc(
+                                done,
+                                total,
+                                burn_in=burn_in,
+                                production=production,
+                                **metadata,
+                            )
                     output = run_mcmc_transit_fit(
                         candidate,
                         progress=False,
-                        progress_callback=hud.report_progress,
+                        progress_callback=progress_callback,
                         **fit_kwargs,
                     )
-            else:
-                output = run_mcmc_transit_fit(candidate, progress=args.progress, **fit_kwargs)
+                else:
+                    output = run_mcmc_transit_fit(candidate, progress=args.progress, **fit_kwargs)
             print(output.relative_to(repository_root).as_posix())
             return 0
 

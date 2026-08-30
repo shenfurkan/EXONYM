@@ -116,6 +116,15 @@ def _validate_observation_record(workspace: CandidateWorkspace, record: object) 
         if key in seen:
             raise ValueError("RV observations must not duplicate an instrument and time")
         seen.add(key)
+    activity_records = [item.get("activity_indicator") for item in observations]
+    if any(item is not None for item in activity_records) and not all(
+        item is not None for item in activity_records
+    ):
+        raise ValueError("RV activity indicators must be supplied for every observation or none")
+    if activity_records and activity_records[0] is not None:
+        activity_units = {str(item["unit"]) for item in activity_records}
+        if len(activity_units) != 1:
+            raise ValueError("RV activity indicators must use one common unit")
     return record
 
 

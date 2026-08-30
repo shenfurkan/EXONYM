@@ -368,7 +368,10 @@ def test_auto_vet_records_blocked_steps_without_state_or_claim_changes(tmp_path,
 
         return operation
 
-    monkeypatch.setattr("exonym.screening.run_fixed_ephemeris_screen", write_output("screen.json"))
+    def unexpected_screen_failure(*_args, **_kwargs):
+        raise TypeError("synthetic unexpected screen failure")
+
+    monkeypatch.setattr("exonym.screening.run_fixed_ephemeris_screen", unexpected_screen_failure)
     monkeypatch.setattr("exonym.archive.run_archival_vetting", write_output("archive.json"))
     monkeypatch.setattr("exonym.localization.run_prf_localization", write_output("localization.json"))
     monkeypatch.setattr("exonym.activity.run_stellar_activity", write_output("activity.json"))
@@ -396,6 +399,13 @@ def test_auto_vet_records_blocked_steps_without_state_or_claim_changes(tmp_path,
     assert candidate.metadata["workflow"]["phase"] == "intake"
     assert candidate.metadata["scientific_disposition"] == "unknown"
     assert fit_samples == [2500]
+    assert next(step for step in manifest["automation"]["steps"] if step["name"] == "screen")["status"] == "blocked"
+    incidents = list((tmp_path / "log").glob("issue-*.md"))
+    assert len(incidents) == 1
+    incident = incidents[0].read_text(encoding="utf-8")
+    assert "Full Python Traceback" in incident
+    assert "synthetic unexpected screen failure" in incident
+    assert "exonym survey auto-vet {0}".format(candidate.candidate_id) in incident
     assert manifest["runtime"] == {
         "kind": "direct",
         "version": __version__,
@@ -439,6 +449,25 @@ def test_auto_vet_all_reports_invalid_workspace_as_incomplete(tmp_path, monkeypa
     report = json.loads(capsys.readouterr().out)
     assert {entry["status"] for entry in report["outcomes"]} == {"completed", "incomplete"}
     assert report["claim_eligible"] is False
+
+
+def test_auto_vet_cli_records_incident_when_candidate_run_cannot_start(tmp_path, monkeypatch, capsys):
+    from exonym.__main__ import main
+
+    candidate = create_candidate(tmp_path, "automation-start-failure", tic="123456789", mission="tess")
+
+    def fail_auto_vet(*_args, **_kwargs):
+        raise RuntimeError("synthetic startup failure")
+
+    monkeypatch.setattr("exonym.autonomous.auto_vet_candidate", fail_auto_vet)
+
+    assert main(["--root", str(tmp_path), "survey", "auto-vet", candidate.candidate_id]) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["outcomes"][0]["status"] == "failed"
+    incidents = list((tmp_path / "log").glob("issue-*.md"))
+    assert len(incidents) == 1
+    assert "synthetic startup failure" in incidents[0].read_text(encoding="utf-8")
 
 
 def test_run_loop_resumes_already_provisioned_candidate_without_auto_vet_run(

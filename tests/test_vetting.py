@@ -3,6 +3,7 @@ import hashlib
 import sys
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -2055,6 +2056,73 @@ def test_transit_fit_emcee_chain_is_reproducible_for_a_fixed_seed(tmp_path, monk
     assert np.array_equal(second_chain, first_chain)
 
 
+def test_transit_fit_emcee_progress_callback_uses_global_phase_counts(tmp_path, monkeypatch):
+    from exonym.transit_fit import run_mcmc_transit_fit
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "fit-emcee-progress")
+    _mock_candidate_fit_inputs(monkeypatch)
+    events = []
+
+    run_mcmc_transit_fit(
+        workspace,
+        n_samples=4,
+        n_walkers=16,
+        burn_in=2,
+        seed=23,
+        sampler="emcee",
+        progress_callback=lambda done, total, **metadata: events.append((done, total, metadata)),
+    )
+
+    assert events[0][:2] == (1, 6)
+    assert events[0][2]["burn_in"] == 2
+    assert events[0][2]["production"] == 4
+    assert events[-1][:2] == (6, 6)
+    assert events[-1][2]["resumed"] is False
+
+
+def test_transit_fit_emcee_resume_reports_saved_global_offset(tmp_path, monkeypatch):
+    from exonym.transit_fit import run_mcmc_transit_fit
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "fit-emcee-resume-progress")
+    _mock_candidate_fit_inputs(monkeypatch)
+    original_unlink = Path.unlink
+
+    def preserve_checkpoint(path, *args, **kwargs):
+        if path.name.endswith(".checkpoint.npz"):
+            return None
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", preserve_checkpoint)
+    run_mcmc_transit_fit(
+        workspace,
+        n_samples=4,
+        n_walkers=16,
+        burn_in=2,
+        seed=29,
+        sampler="emcee",
+        checkpoint_interval=1,
+    )
+    checkpoint = workspace.path / "outputs" / "mcmc_transit_fit_chain.checkpoint.npz"
+    events = []
+
+    run_mcmc_transit_fit(
+        workspace,
+        n_samples=8,
+        n_walkers=16,
+        burn_in=2,
+        seed=29,
+        sampler="emcee",
+        resume=str(checkpoint),
+        progress_callback=lambda done, total, **metadata: events.append((done, total, metadata)),
+    )
+
+    assert events[0][:2] == (7, 10)
+    assert events[-1][:2] == (10, 10)
+    assert all(event[2]["resumed"] is True for event in events)
+
+
 def test_dynesty_fit_writes_evidence_and_reproducible_compatibility_chain(tmp_path, monkeypatch):
     from exonym.transit_fit import run_mcmc_transit_fit
     from exonym.workspace import create_candidate
@@ -2076,7 +2144,8 @@ def test_dynesty_fit_writes_evidence_and_reproducible_compatibility_chain(tmp_pa
             )
 
         def run_nested(self, **kwargs):
-            assert kwargs["print_progress"] is False
+            if kwargs["print_progress"]:
+                kwargs["print_func"](self.results, 4, 12)
             assert kwargs["nlive_init"] > 0
             assert kwargs["dlogz_init"] == pytest.approx(0.25)
             assert "dlogz" not in kwargs
@@ -2085,6 +2154,7 @@ def test_dynesty_fit_writes_evidence_and_reproducible_compatibility_chain(tmp_pa
     workspace = create_candidate(tmp_path, "fit-dynesty-test")
     _mock_candidate_fit_inputs(monkeypatch)
     fake_dynesty = SimpleNamespace(DynamicNestedSampler=FakeDynamicNestedSampler, __version__="test")
+    progress_events = []
 
     with patch.dict(sys.modules, {"dynesty": fake_dynesty}):
         output = run_mcmc_transit_fit(
@@ -2093,6 +2163,9 @@ def test_dynesty_fit_writes_evidence_and_reproducible_compatibility_chain(tmp_pa
             sampler="dynesty",
             seed=5,
             dlogz_tolerance=0.25,
+            progress_callback=lambda done, total, **metadata: progress_events.append(
+                (done, total, metadata)
+            ),
         )
         first_chain = np.load(workspace.path / "outputs" / "mcmc_transit_fit_chain.npy")
         run_mcmc_transit_fit(
@@ -2140,6 +2213,18 @@ def test_dynesty_fit_writes_evidence_and_reproducible_compatibility_chain(tmp_pa
     assert payload["diagnostics"]["sampler_stop_criterion_status"] == (
         "not-reported-by-dynesty-results"
     )
+    assert progress_events == [
+        (
+            4,
+            None,
+            {
+                "sub_phase": "nested sampling",
+                "log_z": 0.0,
+                "log_z_error": 0.1,
+                "likelihood_calls": 12,
+            },
+        )
+    ]
     assert chain.shape == (4, 7)
     assert np.array_equal(chain, first_chain)
 

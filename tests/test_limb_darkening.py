@@ -5,7 +5,7 @@ import types
 
 import pytest
 
-from exonym.limb_darkening import OUTPUT_FILENAME, generate_ldtk_quadratic_prior
+from exonym.limb_darkening import OUTPUT_FILENAME, _quadratic_rows, generate_ldtk_quadratic_prior
 from exonym.transit_fit import _load_ldtk_prior
 from exonym.workspace import create_candidate
 
@@ -111,6 +111,11 @@ def test_generate_ldtk_prior_rejects_nonfinite_stellar_parameters_without_writin
     with pytest.raises(ValueError, match="logg_cgs must be a finite number"):
         generate_ldtk_quadratic_prior(workspace, [_Filter("synthetic-band")])
     assert not (tmp_path / "outputs" / OUTPUT_FILENAME).exists()
+
+
+def test_ldtk_quadratic_rows_reject_physically_invalid_coefficients():
+    with pytest.raises(ValueError, match="physically invalid"):
+        _quadratic_rows([_Filter("synthetic-band")], [[1.0, -1.0]], [[0.01, 0.02]])
 
 
 def test_generate_ldtk_prior_raises_when_dependency_is_unavailable(tmp_path, monkeypatch):

@@ -122,7 +122,7 @@ _ENGINE_CATALOG: Tuple[EngineDescriptor, ...] = (
     EngineDescriptor(
         name="dynesty",
         capability="sampler",
-        optional_group="optional",
+        optional_group="inference",
         module_name="dynesty",
         description="Dynamic nested sampling for Bayesian model comparison.",
     ),
@@ -150,7 +150,7 @@ _ENGINE_CATALOG: Tuple[EngineDescriptor, ...] = (
     EngineDescriptor(
         name="wotan",
         capability="detrending",
-        optional_group="optional",
+        optional_group="detrending",
         module_name="wotan",
         description="Comprehensive light curve detrending algorithms.",
     ),
@@ -388,9 +388,17 @@ def check_engine(name: str) -> Tuple[bool, str]:
         return False, f"Unknown engine '{name}'. Supported engines: {valid_names}"
 
     if not status.installed:
+        if status.optional_group not in {"core", "specialized"}:
+            install_hint = 'pip install -e ".[{0}]"'.format(status.optional_group)
+        elif status.optional_group == "specialized":
+            install_hint = "pip install {0}".format(status.module_name)
+        else:
+            install_hint = 'pip install -e "."'
         return (
             False,
-            f"Engine '{status.name}' ({status.module_name}) is not installed. Install with: pip install {status.module_name}",
+            "Engine '{0}' ({1}) is not installed. Install with: {2}".format(
+                status.name, status.module_name, install_hint
+            ),
         )
 
     if status.dependency_issues:

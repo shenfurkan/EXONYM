@@ -21,6 +21,7 @@ def _observation_record(
     uncertainty=0.5,
     instruments=None,
     activity_values=None,
+    activity_units=None,
 ):
     observations = []
     for index, (time_value, velocity_value) in enumerate(zip(time_values, velocity_values)):
@@ -38,7 +39,7 @@ def _observation_record(
         if activity_values is not None:
             observation["activity_indicator"] = {
                 "value": float(activity_values[index]),
-                "unit": "relative-index",
+                "unit": activity_units[index] if activity_units is not None else "relative-index",
             }
         observations.append(observation)
     return {"schema_version": 1, "candidate_id": candidate_id, "observations": observations}
@@ -201,7 +202,7 @@ def test_rv_fit_jointly_models_instrument_jitter_linear_trend_and_activity(tmp_p
     assert report["diagnostics"]["noise_model"].startswith("quoted per-observation")
 
 
-def test_rv_fit_rejects_partial_activity_indicator_series(tmp_path):
+def test_rv_ingestion_rejects_partial_activity_indicator_series(tmp_path):
     workspace = create_candidate(tmp_path, "rv-partial-activity")
     source = tmp_path / "partial-activity.json"
     record = _observation_record(
@@ -212,10 +213,27 @@ def test_rv_fit_rejects_partial_activity_indicator_series(tmp_path):
     )
     del record["observations"][0]["activity_indicator"]
     source.write_text(json.dumps(record), encoding="utf-8")
-    ingest_radial_velocity_observations(workspace, source)
-
     with pytest.raises(ValueError, match="every observation or none"):
-        fit_radial_velocity(workspace, 3.0)
+        ingest_radial_velocity_observations(workspace, source)
+    assert not (workspace.path / "data" / "external" / "radial_velocity_observations.json").exists()
+
+
+def test_rv_ingestion_rejects_mixed_activity_indicator_units(tmp_path):
+    workspace = create_candidate(tmp_path, "rv-mixed-activity-units")
+    source = tmp_path / "mixed-activity-units.json"
+    count = 16
+    record = _observation_record(
+        workspace.candidate_id,
+        np.linspace(1.0, 20.0, count),
+        np.zeros(count),
+        activity_values=np.linspace(-1.0, 1.0, count),
+        activity_units=["relative-index"] * (count - 1) + ["m/s"],
+    )
+    source.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="one common unit"):
+        ingest_radial_velocity_observations(workspace, source)
+    assert not (workspace.path / "data" / "external" / "radial_velocity_observations.json").exists()
 
 
 def test_kepler_solver_reaches_declared_residual_at_high_eccentricity():

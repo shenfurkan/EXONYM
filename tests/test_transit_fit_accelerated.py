@@ -166,6 +166,25 @@ def test_emcee_checkpoint_rejects_legacy_pickle_payload(tmp_path):
         _load_emcee_checkpoint(path, expected_walkers=4, expected_dimensions=3, expected_burn_in=1)
 
 
+def test_emcee_checkpoint_rejects_corrupt_and_unrecognized_archives(tmp_path):
+    path = tmp_path / "checkpoint.npz"
+    chain = np.ones((2, 4, 3))
+    random_state = np.random.RandomState(9).get_state()
+    _write_emcee_checkpoint(path, chain, iteration=2, burn_in=1, random_state=random_state)
+
+    with np.load(path, allow_pickle=False) as archive:
+        fields = {name: archive[name] for name in archive.files}
+    fields["unexpected"] = np.asarray(1, dtype=np.int64)
+    np.savez_compressed(path, **fields)
+
+    with pytest.raises(RuntimeError, match="invalid or unsafe"):
+        _load_emcee_checkpoint(path, expected_walkers=4, expected_dimensions=3, expected_burn_in=1)
+
+    path.write_bytes(b"not a valid npz archive")
+    with pytest.raises(RuntimeError, match="invalid or unsafe"):
+        _load_emcee_checkpoint(path, expected_walkers=4, expected_dimensions=3, expected_burn_in=1)
+
+
 def test_worker_pool_terminates_after_failure_and_closes_after_success():
     class FakePool:
         def __init__(self):

@@ -28,6 +28,8 @@ from . import __version__
 from .inputs import _read_json, MINIMUM_BLS_CANDIDATE_SNR, is_manifest_bound_bls_result
 from .workspace import CandidateWorkspace
 
+_EXPECTED_AUTOMATION_FAILURES = (FileNotFoundError, ImportError, ValueError, RuntimeError)
+
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -271,6 +273,7 @@ def auto_vet_candidate(
     n_draws: int = 500,
     fit_samples: int = 2500,
     download: bool = True,
+    incident_command: Optional[str] = None,
 ) -> Path:
     """Run a bounded evidence chain and write an engine-run manifest.
 
@@ -292,6 +295,7 @@ def auto_vet_candidate(
     started_at = _timestamp()
     artifacts: List[Dict[str, str]] = []
     steps: List[Dict[str, str]] = []
+    incident_recorded = False
     manifest_path = run_dir / "engine-run.json"
     manifest: Dict[str, Any] = {
         "schema_version": 1,
@@ -338,6 +342,7 @@ def auto_vet_candidate(
     checkpoint_manifest()
 
     def execute(name: str, operation: Callable[[], Any]) -> Optional[Any]:
+        nonlocal incident_recorded
         try:
             result = operation()
             paths = result if isinstance(result, (list, tuple)) else [result]
@@ -350,6 +355,13 @@ def auto_vet_candidate(
         except Exception as exc:  # Preserve later independent diagnostic attempts.
             steps.append({"name": name, "status": "blocked", "detail": "{0}: {1}".format(type(exc).__name__, exc)})
             checkpoint_manifest()
+            if not incident_recorded and not isinstance(exc, _EXPECTED_AUTOMATION_FAILURES):
+                record_autonomous_incident(
+                    candidate.repository_root,
+                    incident_command or "exonym survey auto-vet {0}".format(candidate.candidate_id),
+                    exc,
+                )
+                incident_recorded = True
             return None
 
     if download and not _has_raw_fits(candidate):

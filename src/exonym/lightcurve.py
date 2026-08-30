@@ -599,9 +599,19 @@ def quadratic_to_kipping_limb_darkening(u1: float, u2: float) -> Tuple[float, fl
     q2 : float
         Kipping hyper-cube parameter *q*₂.
     """
-    q1 = (u1 + u2) ** 2
-    # NUMERICAL_GUARD: uniform-disk limit u₁ = u₂ = 0 → denominator zero.
-    if q1 == 0:
+    try:
+        u1 = float(u1)
+        u2 = float(u2)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("quadratic limb-darkening coefficients must be finite numbers") from exc
+    if not (math.isfinite(u1) and math.isfinite(u2)):
+        raise ValueError("quadratic limb-darkening coefficients must be finite numbers")
+    # NUMERICAL_GUARD: only the physical uniform disk has a zero denominator.
+    if u1 == 0.0 and u2 == 0.0:
         return 0.0, 0.0
-    q2 = u1 / (2.0 * (u1 + u2))
+    coefficient_sum = u1 + u2
+    if coefficient_sum <= 0.0 or u1 < 0.0 or u1 + 2.0 * u2 < 0.0 or coefficient_sum > 1.0:
+        raise ValueError("quadratic limb-darkening coefficients are outside the physical region")
+    q1 = coefficient_sum**2
+    q2 = u1 / (2.0 * coefficient_sum)
     return q1, q2

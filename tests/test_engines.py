@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -27,6 +29,16 @@ def test_iter_engines_returns_all_catalog_entries():
     assert "emcee" in names
     assert "triceratops" in names
     assert "pysyd" in names
+
+
+def test_engine_optional_groups_match_declared_project_extras():
+    pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    extras_section = pyproject.split("[project.optional-dependencies]", 1)[1].split("\n[", 1)[0]
+    extras = set(re.findall(r"^(\w[\w-]*)\s*=\s*\[", extras_section, flags=re.MULTILINE))
+    allowed_groups = extras | {"core", "specialized"}
+
+    assert extras
+    assert {engine.optional_group for engine in iter_engines()} <= allowed_groups
 
 
 def test_get_engine_existing_core():
@@ -62,11 +74,11 @@ def test_check_engine_unknown():
     assert "Unknown engine" in msg
 
 
-def test_check_engine_unconfigured_dependency_has_direct_install_hint(monkeypatch):
+def test_check_engine_unconfigured_dependency_has_extra_install_hint(monkeypatch):
     missing = EngineStatus(
         name="dynesty",
         capability="sampler",
-        optional_group="optional",
+        optional_group="inference",
         module_name="dynesty",
         description="test",
         installed=False,
@@ -77,7 +89,7 @@ def test_check_engine_unconfigured_dependency_has_direct_install_hint(monkeypatc
     ready, message = check_engine("dynesty")
 
     assert ready is False
-    assert "pip install dynesty" in message
+    assert 'pip install -e ".[inference]"' in message
 
 
 def test_check_engine_rejects_incompatible_installed_dependency(monkeypatch):

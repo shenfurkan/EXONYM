@@ -99,6 +99,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import multiprocessing
 import os
 import tempfile
+import zipfile
 
 import numpy as np
 
@@ -2883,6 +2884,23 @@ def _mcmc_convergence_diagnostics(
     return diagnostics
 
 
+def _notify_fit_progress(
+    callback: Optional[Callable[..., None]], done: int, total: Optional[int], **metadata: Any
+) -> None:
+    """Notify newer and legacy fit-progress callbacks without affecting a fit."""
+    if callback is None:
+        return
+    try:
+        callback(done, total, **metadata)
+    except TypeError:
+        try:
+            callback(done, total)
+        except Exception:  # noqa: BLE001 - telemetry is presentation only.
+            pass
+    except Exception:  # noqa: BLE001 - telemetry is presentation only.
+        pass
+
+
 def run_mcmc_transit_fit(
     workspace: CandidateWorkspace,
     n_samples: int = CPU_EMCEE_PRODUCTION,
@@ -2903,7 +2921,7 @@ def run_mcmc_transit_fit(
     gpu_num_warmup: int = GPU_NUTS_WARMUP,
     gpu_num_samples: int = GPU_NUTS_SAMPLES,
     gpu_target_accept_prob: float = GPU_NUTS_TARGET_ACCEPT_PROB,
-    progress_callback: Optional[Callable[[int, int], None]] = None,
+    progress_callback: Optional[Callable[..., None]] = None,
 ) -> Path:
     """Fit candidate photometry with automatic CUDA NUTS or CPU fallback.
 
@@ -2931,6 +2949,8 @@ def run_mcmc_transit_fit(
         or not 0.0 < float(gpu_target_accept_prob) < 1.0
     ):
         raise ValueError("GPU NUTS controls must be positive with target acceptance in (0, 1)")
+    if not isinstance(dlogz_tolerance, (float, int)) or not math.isfinite(float(dlogz_tolerance)) or float(dlogz_tolerance) <= 0.0:
+        raise ValueError("dlogz_tolerance must be a finite positive number")
 
     signal = validate_signal_suffix(signal)
     if sampler == "dynesty":
@@ -2943,6 +2963,7 @@ def run_mcmc_transit_fit(
             use_ldtk_prior=use_ldtk_prior,
             detrending_method=detrending_method,
             dlogz_tolerance=dlogz_tolerance,
+            progress_callback=progress_callback,
         )
     if sampler == "emcee" or device == "cpu":
         return _fit_emcee_candidate_transit_fit(
@@ -3111,8 +3132,9 @@ def _load_emcee_checkpoint(
     }
     try:
         with np.load(str(path), allow_pickle=False) as archive:
-            if not required_fields.issubset(set(archive.files)):
-                raise ValueError("checkpoint is missing required safe-format fields")
+            archive_fields = set(archive.files)
+            if len(archive.files) != len(archive_fields) or archive_fields != required_fields:
+                raise ValueError("checkpoint fields do not match the current safe format")
             if _checkpoint_scalar(archive, "checkpoint_schema_version") != _CHECKPOINT_SCHEMA_VERSION:
                 raise ValueError("checkpoint schema version is unsupported")
             chain = np.asarray(archive["chain"], dtype=float)
@@ -3137,7 +3159,7 @@ def _load_emcee_checkpoint(
             raise ValueError("checkpoint chain shape or values do not match this fit")
         if iteration != chain.shape[0] or burn_in != int(expected_burn_in) or burn_in < 0:
             raise ValueError("checkpoint iteration or burn-in does not match this fit")
-    except (OSError, KeyError, TypeError, ValueError) as exc:
+    except (OSError, EOFError, KeyError, TypeError, ValueError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
         raise RuntimeError(
             "resume checkpoint is invalid or unsafe; only current Exonym no-pickle checkpoints are accepted"
         ) from exc
@@ -3174,7 +3196,7 @@ def _fit_emcee_candidate_transit_fit(
     progress: bool = False,
     resume: Optional[str] = None,
     checkpoint_interval: int = 250,
-    progress_callback: Optional[Callable[[int, int], None]] = None,
+    progress_callback: Optional[Callable[..., None]] = None,
     backend_fallback_reason: Optional[str] = None,
 ) -> Path:
     """Run the candidate-local batman/emcee transit fit.
@@ -3337,6 +3359,8 @@ def _fit_emcee_candidate_transit_fit(
 
     if resume is None:
         _resume_done = False
+        saved_chain: Optional[np.ndarray] = None
+        saved_iter = 0
 
         def valid_walker_start(candidate_theta: np.ndarray) -> bool:
             return math.isfinite(
@@ -3465,6 +3489,7 @@ def _fit_emcee_candidate_transit_fit(
     )
     sampler.random_state = saved_rstate
     total_steps = remaining_steps
+    configured_total_steps = burn_in + n_samples
     checkpoint_path = outputs_dir / f"mcmc_transit_fit_chain{suffix}.checkpoint.npz"
     old_tau: Optional[float] = float("inf")
     early_stop = False
@@ -3474,20 +3499,19 @@ def _fit_emcee_candidate_transit_fit(
         if not _resume_done:
             for _state in sampler.sample(p0, iterations=total_steps, progress=progress):
                 iteration: int = getattr(sampler, "iteration", 0)
-                # Telemetry hook: report (iteration, total) to an external HUD.
-                if progress_callback is not None:
-                    try:
-                        progress_callback(int(iteration), int(total_steps))
-                    except Exception:  # noqa: BLE001
-                        pass
+                global_iteration = saved_iter + int(iteration)
+                autocorr_tau: Optional[float] = None
+                should_stop = False
                 # Periodic checkpoint save (best-effort).
                 if checkpoint_interval > 0 and iteration % checkpoint_interval == 0 and iteration > 0:
                     try:
                         raw_snap = sampler.get_chain(flat=False)
+                        if saved_chain is not None:
+                            raw_snap = np.concatenate((saved_chain, raw_snap), axis=0)
                         _write_emcee_checkpoint(
                             checkpoint_path,
                             raw_snap,
-                            iteration=iteration,
+                            iteration=global_iteration,
                             burn_in=burn_in,
                             random_state=sampler.random_state,
                         )
@@ -3495,19 +3519,32 @@ def _fit_emcee_candidate_transit_fit(
                         pass
 
                 # Autocorrelation-based early convergence (every 100 steps).
-                if iteration % 100 == 0 and iteration >= burn_in + 100:
+                if saved_iter == 0 and iteration % 100 == 0 and iteration >= burn_in + 100:
                     try:
                         tau_values = sampler.get_autocorr_time(tol=0)
                         tau_mean = float(np.mean(tau_values))
                         if np.isfinite(tau_mean) and tau_mean > 0:
+                            autocorr_tau = tau_mean
                             prod_steps = int(iteration) - int(burn_in)
                             if old_tau is not None and prod_steps >= max(100 * tau_mean, 500):
                                 if abs(old_tau - tau_mean) / tau_mean < 0.01:
-                                    early_stop = True
-                                    break
+                                    should_stop = True
                             old_tau = tau_mean
                     except Exception:
                         pass
+                _notify_fit_progress(
+                    progress_callback,
+                    global_iteration,
+                    configured_total_steps,
+                    burn_in=burn_in,
+                    production=n_samples,
+                    acceptance_fraction=float(np.mean(sampler.acceptance_fraction)),
+                    autocorr_tau=autocorr_tau,
+                    resumed=saved_iter > 0,
+                )
+                if should_stop:
+                    early_stop = True
+                    break
     except BaseException:
         if pool is not None:
             _shutdown_worker_pool(pool, failed=True)
@@ -3517,7 +3554,10 @@ def _fit_emcee_candidate_transit_fit(
             _shutdown_worker_pool(pool, failed=False)
 
     if not _resume_done:
-        raw_chain = sampler.get_chain(discard=burn_in, flat=False)
+        raw_chain = sampler.get_chain(flat=False)
+        if saved_chain is not None:
+            raw_chain = np.concatenate((saved_chain, raw_chain), axis=0)
+        raw_chain = raw_chain[burn_in:]
         chain = raw_chain.reshape((-1, raw_chain.shape[-1]))
     # Clean up checkpoint on successful completion.
     if checkpoint_path.exists():
@@ -4117,6 +4157,7 @@ def _run_dynesty_transit_fit(
     use_ldtk_prior: bool,
     detrending_method: Optional[str],
     dlogz_tolerance: float = 0.5,
+    progress_callback: Optional[Callable[..., None]] = None,
 ) -> Path:
     """Run optional dynamic nested sampling with an explicit normalized prior transform.
 
@@ -4185,6 +4226,8 @@ def _run_dynesty_transit_fit(
         ) from exc
     if n_samples <= 0:
         raise ValueError("n_samples must be positive for dynesty")
+    if not math.isfinite(float(dlogz_tolerance)) or float(dlogz_tolerance) <= 0.0:
+        raise ValueError("dlogz_tolerance must be a finite positive number")
     _require_batman()
 
     ephemeris = load_transit_ephemeris(workspace, signal=signal)
@@ -4277,11 +4320,34 @@ def _run_dynesty_transit_fit(
         ndim,
         rstate=np.random.default_rng(seed),
     )
-    run_nested_kwargs = {
+    def dynesty_progress(results: Any, niter: int, ncall: int, **_kwargs: Any) -> None:
+        log_z = getattr(results, "logz", None)
+        log_z_error = getattr(results, "logzerr", None)
+        try:
+            latest_log_z = float(np.asarray(log_z, dtype=float)[-1])
+        except (IndexError, TypeError, ValueError):
+            latest_log_z = None
+        try:
+            latest_log_z_error = float(np.asarray(log_z_error, dtype=float)[-1])
+        except (IndexError, TypeError, ValueError):
+            latest_log_z_error = None
+        _notify_fit_progress(
+            progress_callback,
+            int(niter),
+            None,
+            sub_phase="nested sampling",
+            log_z=latest_log_z,
+            log_z_error=latest_log_z_error,
+            likelihood_calls=ncall,
+        )
+
+    run_nested_kwargs: Dict[str, Any] = {
         "nlive_init": initial_live_points,
         "dlogz_init": dlogz_tolerance,
-        "print_progress": False,
+        "print_progress": progress_callback is not None,
     }
+    if progress_callback is not None:
+        run_nested_kwargs["print_func"] = dynesty_progress
     nested_sampler.run_nested(**run_nested_kwargs)
     results = nested_sampler.results
     samples = np.asarray(results.samples, dtype=float)

@@ -13,6 +13,17 @@ import pytest
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "gold_standards"
 _FIXTURE_REQUIRED_FIELDS = frozenset(("schema_version", "fixture_status", "reference", "provenance"))
 _FIXTURE_PROVENANCE_FIELDS = frozenset(("source_kind", "independence", "limitations"))
+_GOLD_STANDARD_FIXTURES = frozenset(
+    {
+        "claret_limb_darkening_sample.json",
+        "kepler_rv_eccentric_benchmarks.json",
+        "mandel_agol_quadrature_benchmarks.json",
+        "mist_synthetic_stellar_nodes.json",
+        "phasecurve_circular_harmonic_benchmarks.json",
+        "seismic_scaling_standard_stars.json",
+        "ttv_first_order_mmr_benchmarks.json",
+    }
+)
 _TAU = 2.0 * math.pi
 _SPEED_OF_LIGHT_M_S = 299_792_458.0
 _PLANCK_CONSTANT_J_S = 6.62607015e-34
@@ -27,6 +38,10 @@ def _reject_duplicate_fixture_keys(pairs):
             raise ValueError("duplicate JSON key: {0}".format(key))
         result[key] = value
     return result
+
+
+def test_gold_standard_fixture_inventory_is_explicit_and_complete():
+    assert {path.name for path in FIXTURE_ROOT.glob("*.json")} == _GOLD_STANDARD_FIXTURES
 
 
 def _reject_nonfinite_fixture_constant(value):
@@ -345,6 +360,38 @@ def test_kipping_and_claret_limb_darkening_coordinate_transforms():
         d_intensity_d_mu = u1 + 2.0 * u2 * (1.0 - mu)
         assert np.min(intensity) >= -1e-14
         assert np.min(d_intensity_d_mu) >= -1e-14
+
+
+@pytest.mark.parametrize("q1, q2", ((0.0, 0.0), (0.0, 1.0), (1.0, 0.0), (1.0, 1.0)))
+def test_kipping_limb_darkening_cube_boundaries_are_finite_and_reversible(q1, q2):
+    from exonym.lightcurve import (
+        kipping_to_quadratic_limb_darkening,
+        quadratic_to_kipping_limb_darkening,
+    )
+
+    u1, u2 = kipping_to_quadratic_limb_darkening(q1, q2)
+    assert np.isfinite((u1, u2)).all()
+    expected = (0.0, 0.0) if q1 == 0.0 else (q1, q2)
+    assert quadratic_to_kipping_limb_darkening(u1, u2) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    "q1, q2",
+    ((-1e-16, 0.5), (1.0 + 2e-16, 0.5), (float("nan"), 0.5), (0.5, float("inf"))),
+)
+def test_kipping_limb_darkening_rejects_out_of_cube_values(q1, q2):
+    from exonym.lightcurve import kipping_to_quadratic_limb_darkening
+
+    with pytest.raises(ValueError, match="must be in"):
+        kipping_to_quadratic_limb_darkening(q1, q2)
+
+
+@pytest.mark.parametrize("u1, u2", ((1.0, -1.0), (float("nan"), 0.0), (0.0, float("inf"))))
+def test_quadratic_limb_darkening_rejects_invalid_inverse_coefficients(u1, u2):
+    from exonym.lightcurve import quadratic_to_kipping_limb_darkening
+
+    with pytest.raises(ValueError, match="coefficients"):
+        quadratic_to_kipping_limb_darkening(u1, u2)
 
 
 def test_mandel_agol_analytic_flux_against_quadrature_benchmarks():
@@ -962,4 +1009,3 @@ def test_harvey_convective_granulation_background_recovery():
     assert res["numax_uhz"] == pytest.approx(numax_true, rel=0.15)
     assert res["reduced_chi2"] >= 0.0
     assert len(res["whitened_power"]) == len(nu)
-

@@ -63,6 +63,7 @@ def _make_repo(tmp_path, with_templates=True):
         "detrending-manifest.schema.json",
         "ldtk-quadratic-limb-darkening-prior.schema.json",
         "exofop-prior-retrieval.schema.json",
+        "checkpoint-manifest.schema.json",
     ):
         shutil.copy2(
             "schemas/{0}".format(name), tmp_path / "schemas" / name
@@ -161,6 +162,27 @@ def test_schema_definition_validation_rejects_invalid_shared_schema(tmp_path):
     validate_schema_definitions(repo, report)
 
     assert any(violation.rule == "schema-definition-invalid" for violation in report.violations)
+
+
+def test_checkpoint_manifest_is_schema_validated_and_hash_bound(tmp_path):
+    repo = _make_repo(tmp_path)
+    from exonym.checkpoints import save_checkpoint
+
+    workspace = load_candidate(repo, "candidate-alpha")
+    manifest_path = save_checkpoint(workspace, "schema-test")
+
+    assert _audit(repo).ok
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["label"] = "not a valid checkpoint label"
+    invalid_manifest_path = manifest_path.with_name("20990101T000000Z_invalid.manifest.json")
+    invalid_manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    report = _audit(repo)
+    assert any(
+        violation.path == invalid_manifest_path.as_posix() and violation.rule == "schema-violation"
+        for violation in report.violations
+    )
 
 
 def test_release_snapshot_is_checked_for_inventory_and_hash_integrity(tmp_path):
