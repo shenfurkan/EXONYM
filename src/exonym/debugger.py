@@ -330,8 +330,19 @@ def _is_source_path(relative: Path) -> bool:
     return relative.name in _SOURCE_FILES or relative.parts[0] in _SOURCE_ROOTS
 
 
+def _normalize_since(since: Optional[str]) -> Optional[str]:
+    """Normalize and discard empty, whitespace, or Git null-SHA revisions."""
+    if since is None:
+        return None
+    cleaned = str(since).strip()
+    if not cleaned or (len(cleaned) in (40, 64) and set(cleaned) == {"0"}):
+        return None
+    return cleaned
+
+
 def _select_source_paths(root: Path, *, mode: str, since: Optional[str]) -> List[Path]:
     """Select target-neutral paths without traversing candidate workspaces."""
+    since = _normalize_since(since)
     if mode == "full":
         paths: List[Path] = []
         for name in _SOURCE_ROOTS:

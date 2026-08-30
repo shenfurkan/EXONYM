@@ -66,6 +66,24 @@ def test_changed_source_selection_includes_untracked_code_but_excludes_candidate
     ]
 
 
+@pytest.mark.parametrize(
+    "raw_since, expected",
+    [
+        (None, None),
+        ("", None),
+        ("   ", None),
+        ("0" * 40, None),
+        ("0" * 64, None),
+        ("origin/main", "origin/main"),
+        ("  HEAD~1  ", "HEAD~1"),
+    ],
+)
+def test_normalize_since_discards_empty_whitespace_and_null_revisions(
+    raw_since: str | None, expected: str | None
+) -> None:
+    assert debugger._normalize_since(raw_since) == expected
+
+
 def test_invalid_since_writes_a_failed_report(tmp_path: Path, monkeypatch) -> None:
     """An unusable baseline cannot silently produce an incomplete changed audit."""
     monkeypatch.setattr(
