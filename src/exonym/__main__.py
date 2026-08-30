@@ -2,7 +2,7 @@
 
 Commands:
   init     Provision a candidate workspace from global templates
-  list     List registered candidates (--phase, --tag filters)
+  list     List registered candidates (--phase, --tag, and classification filters)
   status   Show one candidate identity record
   track    Render the QVG progress telemetry dashboard
   advance  Validate the current gate and promote the workflow phase
@@ -15,6 +15,24 @@ Commands:
   fetch-priors Fetch catalog parameters from ExoFOP and save to transit config
   verify   Audit source or candidate integrity with scoped cache-aware checks
   debug    Run candidate-free source diagnostics and synthetic regressions
+   set-state      Set the lifecycle state without hand-editing candidate.json
+  review         Record an evidence-backed classification review
+   classify       Propose or apply conservative classification to candidates
+  storage        Produce a read-only candidate storage inventory
+  reject         Permanently block vetting with a validated decisive rejection
+  analysis-status  Record analysis-stage coverage
+
+Workflow automation:
+  survey   Manage survey denominator, harvest, auto-vet, run-loop, and sensitivity
+  engine   Inspect, validate, and execute analytical and vetting engines
+  wizard   Interactive guided setup across the pipeline stages
+  checkpoint  Snapshot, list, restore, or delete candidate analysis state
+  catalog  Capture candidate-local evidence from reviewed catalog providers
+
+Acquisition and data preparation:
+  ingest   Download SPOC products and record provenance
+  detrend  Write an opt-in candidate-local detrended light-curve artifact
+  ds9-regions  Export validated archival Gaia sources as DS9 region file
 
 Scientific analysis commands:
   asteroseismology  Oscillation envelope, Delta-nu, and seismic M*/R*
@@ -25,8 +43,19 @@ Scientific analysis commands:
   ttv               Transit timing variation (O-C) analysis
   activity          Stellar rotation periodogram analysis
   dilution          Aperture robustness and dilution sensitivity
-  archive           Query Gaia EDR3 and NASA ExoFOP for archival vetting
+  archive           Query Gaia DR3 and NASA ExoFOP for archival vetting
   rv                Ingest candidate-local RV data and fit a Keplerian model
+  vet               Run TRICERATOPS Monte Carlo FPP simulation
+  triage            Run automated pre-vetting diagnostic evidence aggregation
+
+Optional specialized-model adapters:
+  planetsynth    Run opt-in giant-planet cooling interpretation
+  pyppluss       Test a declared anomalous-transit hypothesis
+  catwoman       Test a declared terminator-asymmetry hypothesis (Catwoman)
+  squishyplanet  Test a declared terminator-asymmetry hypothesis (SquishyPlanet)
+
+Paper export:
+  export-paper    Export candidate evidence into a manuscript macro bundle
 
 This module is intentionally a thin dispatcher. Candidate-specific inputs and
 outputs are delegated to candidate-owning modules; this entry point does not
@@ -49,6 +78,12 @@ from .isolation import add_verify_arguments, format_report, run_verify_command
 from .tagging import add_tags, filter_candidates
 from .tracking import candidate_telemetry, format_dashboard
 from .workspace import (
+    LIFECYCLE_STATES,
+    PUBLICATION_STATES,
+    RETENTION_CLASSES,
+    REVIEW_STATUSES,
+    SCIENTIFIC_DISPOSITIONS,
+    WORKFLOW_PHASES,
     create_candidate,
     discover_candidates,
     discover_candidates_with_outcomes,
@@ -127,12 +162,64 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     list_parser = commands.add_parser("list", help="List registered candidates.")
-    list_parser.add_argument("--phase", help="Filter by workflow phase.")
+    list_parser.add_argument(
+        "--phase", choices=WORKFLOW_PHASES, help="Filter by workflow phase."
+    )
     list_parser.add_argument("--tag", help="Filter by metadata tag.")
     list_parser.add_argument(
         "--mission",
         choices=["tess", "kepler", "k2", "plato", "cheops"],
         help="Filter by originating mission.",
+    )
+    list_parser.add_argument(
+        "--disposition",
+        choices=SCIENTIFIC_DISPOSITIONS,
+        help="Filter by scientific disposition.",
+    )
+    list_parser.add_argument(
+        "--publication",
+        choices=PUBLICATION_STATES,
+        help="Filter by publication state.",
+    )
+    list_parser.add_argument(
+        "--lifecycle",
+        choices=LIFECYCLE_STATES,
+        help="Filter by lifecycle state.",
+    )
+    list_parser.add_argument(
+        "--review-status",
+        choices=REVIEW_STATUSES,
+        help="Filter by human-review status.",
+    )
+    list_parser.add_argument(
+        "--retention-class",
+        choices=RETENTION_CLASSES,
+        help="Filter by operational retention class.",
+    )
+
+    storage_parser = commands.add_parser(
+        "storage", help="Produce a read-only filesystem inventory."
+    )
+    storage_commands = storage_parser.add_subparsers(dest="storage_action", required=True)
+    storage_report_parser = storage_commands.add_parser(
+        "report", help="Measure regular-file counts and bytes without reading contents."
+    )
+    storage_report_parser.add_argument(
+        "candidate_id", nargs="?", help="Limit the report to one candidate workspace."
+    )
+
+    classify_parser = commands.add_parser(
+        "classify", help="Propose or apply conservative administrative classification."
+    )
+    classify_parser.add_argument(
+        "--candidate", dest="candidate_id", help="Limit classification to one candidate."
+    )
+    classify_mode = classify_parser.add_mutually_exclusive_group()
+    classify_mode.add_argument(
+        "--apply", action="store_true", help="Write the proposed classification reviews."
+    )
+    classify_mode.add_argument(
+        "--verify", action="store_true", help="Verify classification review evidence hashes only."
     )
 
     survey_parser = commands.add_parser(
@@ -383,6 +470,39 @@ def _build_parser() -> argparse.ArgumentParser:
     setstate_parser.add_argument("--state", required=True, help="New lifecycle state.")
     setstate_parser.add_argument("--reason", default=None, help="Reason for the state change.")
 
+    review_parser = commands.add_parser(
+        "review", help="Record an evidence-backed classification review."
+    )
+    review_parser.add_argument("candidate_id")
+    review_parser.add_argument("--reviewer", required=True, help="Human reviewer identifier.")
+    review_parser.add_argument("--reason", required=True, help="Reason for the classification decision.")
+    review_parser.add_argument(
+        "--evidence",
+        action="append",
+        required=True,
+        help="Candidate-local evidence path; repeat for multiple files.",
+    )
+    review_parser.add_argument(
+        "--disposition",
+        choices=SCIENTIFIC_DISPOSITIONS,
+        help="Set the scientific disposition.",
+    )
+    review_parser.add_argument(
+        "--publication",
+        choices=PUBLICATION_STATES,
+        help="Set the publication state.",
+    )
+    review_parser.add_argument(
+        "--review-status",
+        choices=REVIEW_STATUSES,
+        help="Set the human-review status.",
+    )
+    review_parser.add_argument(
+        "--retention-class",
+        choices=RETENTION_CLASSES,
+        help="Set the operational retention class.",
+    )
+
     tag_parser = commands.add_parser("tag", help="Attach tags to a candidate.")
     tag_parser.add_argument("candidate_id")
     tag_parser.add_argument("tags", nargs="+", help="Tags to attach.")
@@ -434,6 +554,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     detrend_parser.add_argument(
         "--window-days", type=float, required=True, help="Positive detrending timescale in days."
+    )
+    detrend_parser.add_argument(
+        "--no-transit-mask",
+        action="store_true",
+        help=(
+            "Do not protect a known transit window. Use for blind discovery so a "
+            "previous BLS ephemeris cannot suppress a different search peak."
+        ),
     )
 
     ds9_parser = commands.add_parser(
@@ -556,13 +684,15 @@ def _build_parser() -> argparse.ArgumentParser:
     vet_parser.add_argument(
         "--n-jobs",
         type=int,
-        default=1,
-        help="Maximum Numba threads for vectorized TRICERATOPS likelihoods; 1 is serial.",
+        default=4,
+        help="Maximum Numba threads for vectorized TRICERATOPS likelihoods (default: 4).",
     )
     vet_parser.add_argument(
-        "--progress",
-        action="store_true",
-        help="Show truthful TRICERATOPS execution milestones on an interactive terminal.",
+        "--no-progress",
+        action="store_false",
+        dest="progress",
+        default=True,
+        help="Suppress the interactive telemetry HUD during long-running vetting.",
     )
 
     asteroseismology_parser = commands.add_parser(
@@ -638,9 +768,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Number of parallel worker processes for ensemble likelihood evaluation (default 1).",
     )
     fit_parser.add_argument(
-        "--progress",
-        action="store_true",
-        help="Report per-step sampling progress on stderr.",
+        "--no-progress",
+        action="store_false",
+        dest="progress",
+        default=True,
+        help="Suppress the interactive telemetry HUD during long-running fitting.",
     )
     fit_parser.add_argument(
         "--resume",
@@ -679,7 +811,7 @@ def _build_parser() -> argparse.ArgumentParser:
     dilution_parser.add_argument("candidate_id")
 
     archive_parser = commands.add_parser(
-        "archive", help="Query Gaia EDR3 and NASA ExoFOP for candidate archival vetting."
+        "archive", help="Query Gaia DR3 and NASA ExoFOP for candidate archival vetting."
     )
     archive_parser.add_argument("candidate_id")
     archive_parser.add_argument(
@@ -879,8 +1011,39 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 tag=args.tag,
                 phase=args.phase,
                 mission=args.mission,
+                disposition=args.disposition,
+                publication=args.publication,
+                lifecycle=args.lifecycle,
+                review_status=args.review_status,
+                retention_class=args.retention_class,
             )
             _print_json([candidate.metadata for candidate in candidates])
+            return 0
+
+        if args.command == "storage":
+            from .storage import build_storage_report
+
+            if args.storage_action == "report":
+                _print_json(build_storage_report(repository_root, args.candidate_id))
+                return 0
+            raise ValueError("unsupported storage action")
+
+        if args.command == "classify":
+            from .classification import batch_classify, verify_classification_records
+
+            if args.verify:
+                result = verify_classification_records(
+                    repository_root, candidate_id=args.candidate_id
+                )
+                _print_json(result)
+                return 0 if result["status"] == "pass" else 1
+            _print_json(
+                batch_classify(
+                    repository_root,
+                    candidate_id=args.candidate_id,
+                    apply=args.apply,
+                )
+            )
             return 0
 
         if args.command == "survey":
@@ -1280,6 +1443,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             _print_json(set_lifecycle_state(candidate, args.state, reason=args.reason))
             return 0
 
+        if args.command == "review":
+            from .review import apply_classification_review
+
+            output = apply_classification_review(
+                candidate,
+                reviewer=args.reviewer,
+                reason=args.reason,
+                evidence_paths=args.evidence,
+                scientific_disposition=args.disposition,
+                publication=args.publication,
+                review_status=args.review_status,
+                retention_class=args.retention_class,
+            )
+            print(output.relative_to(repository_root).as_posix())
+            return 0
+
         if args.command == "tag":
             _print_json(add_tags(candidate, args.tags))
             return 0
@@ -1348,8 +1527,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 raise ValueError("detrending requires readable candidate-local light-curve data")
             if table.get("time_system") != BTJD_TIME_SYSTEM:
                 raise ValueError("detrending requires BTJD_TDB candidate photometry")
-            ephemeris = load_transit_ephemeris(candidate)
-            transit_mask = transit_mask_from_ephemeris(table["time"], ephemeris)
+            ephemeris = None
+            transit_mask = None
+            if not args.no_transit_mask:
+                ephemeris = load_transit_ephemeris(candidate)
+                transit_mask = transit_mask_from_ephemeris(table["time"], ephemeris)
             artifact = detrend_candidate(
                 candidate,
                 table["time"],
@@ -1391,7 +1573,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 0
 
         if args.command == "search":
-            from .search import run_bls_on_candidate
+            from .search import run_bls_on_candidate, write_bls_transit_config
 
             output = run_bls_on_candidate(
                 candidate,
@@ -1402,6 +1584,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 duration_grid_hours=args.duration_grid_hours,
                 detrending_method=args.detrending_method,
             )
+            if args.engine == "bls" and args.signal is None:
+                write_bls_transit_config(candidate, output)
             print(output.relative_to(repository_root).as_posix())
             return 0
 
@@ -1429,23 +1613,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             import sys
 
             telemetry_context = nullcontext(None)
-            if args.progress:
+            if args.progress and sys.stdout.isatty():
                 from .telemetry import LiveTelemetry
 
                 telemetry_context = LiveTelemetry(
                     candidate.candidate_id,
                     repository_root,
                     step_name="TRICERATOPS Monte Carlo Vetting",
-                    interactive=sys.stdout.isatty(),
                 )
             with telemetry_context as telemetry:
                 def progress_callback(step, done=None, total=None):
                     if telemetry is None:
                         return
-                    telemetry.set_step(
-                        step,
-                        note="TRICERATOPS does not expose completed-draw counts; percentage is unavailable.",
-                    )
+                    if done is not None and total is not None:
+                        telemetry.report_progress(done, total)
+                    elif done is None and total is None:
+                        # Status update or error surfaced from TRICERATOPS output.
+                        telemetry.note_text(step)
+                    else:
+                        telemetry.set_step(step)
 
                 output = run_triceratops_simulation(
                     candidate,
@@ -1498,14 +1684,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 resume=args.resume,
             )
             telemetry_context = nullcontext(None)
-            if args.progress:
+            if args.progress and _fit_sys.stdout.isatty():
                 from .telemetry import LiveTelemetry
 
                 telemetry_context = LiveTelemetry(
                     candidate.candidate_id,
                     repository_root=repository_root,
                     step_name="MCMC transit fit",
-                    interactive=_fit_sys.stdout.isatty(),
                 )
             with telemetry_context as hud:
                 if hud is not None:

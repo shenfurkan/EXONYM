@@ -48,9 +48,10 @@ def _repo(tmp_path):
         "mist-main-sequence-input.schema.json",
         "sed-fit-results.schema.json",
         "ttv-analysis.schema.json",
-        "statistical-vetting-evidence.schema.json",
-        "decisive-rejection.schema.json",
-        "triceratops-vetting-decision.schema.json",
+         "statistical-vetting-evidence.schema.json",
+         "decisive-rejection.schema.json",
+         "classification-review.schema.json",
+         "triceratops-vetting-decision.schema.json",
         "catalog-query-manifest.schema.json",
         "catalog-raw-response-metadata.schema.json",
         "catalog-snapshot.schema.json",
@@ -426,6 +427,47 @@ def test_cli_detrend_derives_and_forwards_candidate_ephemeris_mask(tmp_path, cap
     assert "detrended-running-median.npz" in capsys.readouterr().out
 
 
+def test_cli_detrend_no_transit_mask_skips_ephemeris_loading(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    root = ["--root", str(repo)]
+    assert main(root + ["init", "candidate-alpha"]) == 0
+    candidate_path = repo / "candidate" / "candidate-alpha"
+    table = {
+        "time": np.array([0.75, 1.0, 1.25, 2.0, 3.0]),
+        "flux": np.ones(5),
+        "flux_err": np.full(5, 0.0001),
+        "sector": np.ones(5, dtype=int),
+        "input_files": [candidate_path / "data" / "raw" / "source.fits"],
+        "input_sha256s": ["a" * 64],
+        "time_system": "BTJD_TDB",
+    }
+    captured = {}
+
+    monkeypatch.setattr(
+        "exonym.inputs.load_light_curve_table", lambda *_args, **_kwargs: table
+    )
+    monkeypatch.setattr(
+        "exonym.inputs.load_transit_ephemeris",
+        lambda *_args, **_kwargs: pytest.fail("ephemeris should not be loaded"),
+    )
+    monkeypatch.setattr(
+        "exonym.detrending.detrend_candidate",
+        lambda *_args, **kwargs: (
+            captured.update(kwargs)
+            or SimpleNamespace(
+                artifact_path=candidate_path / "data" / "processed" / "detrended-running-median.npz",
+                manifest_path=candidate_path / "outputs" / "detrending_manifest.running-median.json",
+            )
+        ),
+    )
+
+    assert main(
+        root + ["detrend", "candidate-alpha", "--window-days", "0.5", "--no-transit-mask"]
+    ) == 0
+    assert captured["transit_mask"] is None
+    assert captured["transit_mask_ephemeris"] is None
+
+
 def test_cli_detrend_rejects_a_synthetic_ephemeris_before_writing_output(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     root = ["--root", str(repo)]
@@ -600,11 +642,11 @@ def test_cli_fit_device_flag_defaults_to_auto_and_accepts_cpu(tmp_path):
     assert parser.parse_args(["fit", "candidate-x", "--device", "cpu"]).device == "cpu"
 
 
-def test_cli_fit_progress_flag(tmp_path):
-    """--progress is a boolean store_true."""
+def test_cli_fit_no_progress_flag(tmp_path):
+    """--no-progress is a boolean store_false defaulting to True."""
     parser = _build_parser()
-    ns = parser.parse_args(["fit", "tic-123", "--progress"])
-    assert ns.progress is True
+    ns = parser.parse_args(["fit", "tic-123", "--no-progress"])
+    assert ns.progress is False
 
 
 def test_cli_parser_registers_checkpoint_group():

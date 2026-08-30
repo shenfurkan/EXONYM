@@ -888,6 +888,33 @@ def test_run_bls_on_candidate_with_real_data(tmp_path):
         "version": "6.0.1",
     }
 
+    from exonym.detrending import detrend_candidate
+    from exonym.inputs import is_manifest_bound_bls_result, load_light_curve_table
+    from exonym.search import write_bls_transit_config
+
+    table = load_light_curve_table(workspace, max_points=None, require_raw_provenance=True)
+    assert table is not None
+    detrend_candidate(
+        workspace,
+        table["time"],
+        table["flux"],
+        flux_err=table["flux_err"],
+        window_days=0.5,
+        sector=table["sector"],
+        input_products=[
+            {"path": path.relative_to(workspace.path).as_posix(), "sha256": digest}
+            for path, digest in zip(table["input_files"], table["input_sha256s"])
+        ],
+    )
+    out = run_bls_on_candidate(workspace, detrending_method="running-median")
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert is_manifest_bound_bls_result(workspace, out, payload, None)
+
+    config_path = write_bls_transit_config(workspace, out)
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["transit"]["period_days"] == payload["best_period"]
+    assert config["bls_provenance"]["result"]["sha256"] == hashlib.sha256(out.read_bytes()).hexdigest()
+
 
 def test_light_curve_loader_rejects_non_tdb_time_system(tmp_path):
     from astropy.io import fits

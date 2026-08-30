@@ -489,7 +489,7 @@ def test_run_triceratops_no_tic_raises_without_allow_fallback(tmp_path):
         run_triceratops_simulation(stub, allow_fallback=False)
 
 
-def test_run_triceratops_does_not_monkeypatch_tls_client(tmp_path, monkeypatch):
+def test_run_triceratops_does_not_monkeypatch_tls_client(tmp_path, monkeypatch, capsys):
     # Arrange
     import sys
     import types
@@ -516,6 +516,7 @@ def test_run_triceratops_does_not_monkeypatch_tls_client(tmp_path, monkeypatch):
 
     class FakeTarget:
         def __init__(self, **kwargs):
+            print("Getting TessCut for test sector")
             self.FPP = 0.02
             self.NFPP = 0.0
 
@@ -523,6 +524,7 @@ def test_run_triceratops_does_not_monkeypatch_tls_client(tmp_path, monkeypatch):
             return None
 
         def calc_probs(self, **kwargs):
+            print("Calculating test scenario")
             captured.update(kwargs)
             return None
 
@@ -565,6 +567,9 @@ def test_run_triceratops_does_not_monkeypatch_tls_client(tmp_path, monkeypatch):
     assert np.array_equal(captured["flux_0"], observed_input["flux"])
     assert captured["flux_err_0"] == observed_input["flux_err"]
     assert captured["exptime"] == observed_input["exposure_days"]
+    stdout = capsys.readouterr().out
+    assert "Getting TessCut" not in stdout
+    assert "Calculating test scenario" not in stdout
     assert report["input_provenance"] == {
         **observed_input["provenance"],
         "bound_artifacts": observed_input["provenance"]["input_files"],
@@ -741,7 +746,10 @@ def test_run_triceratops_rejects_nonfinite_monte_carlo_fpp(tmp_path, monkeypatch
     monkeypatch.setitem(sys.modules, "triceratops", package)
     monkeypatch.setitem(sys.modules, "triceratops.triceratops", module)
 
-    with pytest.raises(RuntimeError, match="TRICERATOPS Monte Carlo did not run"):
+    with pytest.raises(
+        RuntimeError,
+        match="TRICERATOPS returned an invalid FPP",
+    ):
         run_triceratops_simulation(stub, allow_fallback=False)
 
     assert not (tmp_path / "claims" / "fpp_claim.json").exists()

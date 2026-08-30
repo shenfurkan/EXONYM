@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import __version__
-from .inputs import _read_json, MINIMUM_BLS_CANDIDATE_SNR, is_manifest_bound_bls_result
 from .workspace import CandidateWorkspace
 
 _EXPECTED_AUTOMATION_FAILURES = (FileNotFoundError, ImportError, ValueError, RuntimeError)
@@ -159,50 +158,12 @@ def _artifact(candidate: CandidateWorkspace, path: Path, role: str) -> Dict[str,
 
 def _write_bls_transit_config(candidate: CandidateWorkspace, result_path: Path) -> Path:
     """Persist only measured BLS values as a candidate-local downstream input."""
-    try:
-        result = _read_json(result_path)
-        if not isinstance(result, dict) or not is_manifest_bound_bls_result(
-            candidate, result_path, result, None
-        ):
-            raise ValueError("BLS result is not bound to raw provenance and its manifest")
-        if result.get("detection_status") != "detected":
-            raise ValueError("BLS result is not a detected transit signal")
-        if result.get("time_system") != "BTJD_TDB":
-            raise ValueError("BLS result does not declare a BTJD_TDB epoch")
-        period = float(result["best_period"])
-        epoch = float(result["best_epoch"])
-        duration_hours = float(result["best_duration_hours"])
-        depth = float(result["best_depth_ppm"])
-        snr = float(result["snr"])
-        event_count = int(result["n_distinct_transit_events"])
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise RuntimeError("BLS output cannot provide a candidate-local transit configuration") from exc
-    if not all(math.isfinite(value) for value in (period, epoch, duration_hours, depth, snr)):
-        raise RuntimeError("BLS output contains non-finite transit measurements")
-    if period <= 0.0 or duration_hours <= 0.0 or duration_hours / 24.0 >= period or depth <= 0.0:
-        raise RuntimeError("BLS output contains unusable transit measurements")
-    if snr < MINIMUM_BLS_CANDIDATE_SNR:
-        raise RuntimeError("BLS output does not meet the candidate-selection threshold")
-    if event_count < 2:
-        raise RuntimeError("BLS output does not contain two distinct transit events")
-    manifest_path = candidate.path / "outputs" / "bls_search_manifest.json"
-    payload = {
-        "source": "candidate-data-bls",
-        "bls_provenance": {
-            "result": _artifact(candidate, result_path, "bls-result"),
-            "manifest": _artifact(candidate, manifest_path, "bls-manifest"),
-        },
-        "transit": {
-            "period_days": period,
-            "epoch_btjd": epoch,
-            "epoch_time_system": "BTJD_TDB",
-            "duration_days": duration_hours / 24.0,
-            "depth_ppm": depth,
-        },
-    }
-    path = candidate.path / "config" / "transit_config.json"
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return path
+    from .search import write_bls_transit_config
+
+    config_path = write_bls_transit_config(candidate, result_path)
+    if config_path is None:
+        raise RuntimeError("BLS output is not a detected transit signal")
+    return config_path
 
 
 def _has_raw_fits(candidate: CandidateWorkspace) -> bool:

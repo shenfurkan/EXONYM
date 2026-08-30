@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/classification-review-1.0.json",
+  "title": "Candidate Classification Review",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_id",
+    "recorded_at",
+    "reviewer",
+    "reason",
+    "evidence",
+    "previous",
+    "current"
+  ],
+  "$defs": {
+    "classification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scientific_disposition",
+        "publication",
+        "review_status",
+        "retention_class"
+      ],
+      "properties": {
+        "scientific_disposition": {
+          "enum": [
+            "unknown",
+            "candidate",
+            "unvalidated_candidate",
+            "false_positive",
+            "validated",
+            "confirmed",
+            "inconclusive"
+          ]
+        },
+        "publication": {
+          "enum": ["none", "draft", "submitted", "published"]
+        },
+        "review_status": {
+          "enum": ["unreviewed", "triaged", "reviewed", "adjudicated"]
+        },
+        "retention_class": {
+          "enum": ["hot", "warm", "cold", "hold"]
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    }
+  },
+  "properties": {
+    "schema_version": {"const": 1},
+    "candidate_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "recorded_at": {"type": "string", "format": "date-time"},
+    "reviewer": {"type": "string", "minLength": 1},
+    "reason": {"type": "string", "minLength": 1},
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/evidence"}
+    },
+    "previous": {"$ref": "#/$defs/classification"},
+    "current": {"$ref": "#/$defs/classification"}
+  }
+}

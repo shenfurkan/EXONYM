@@ -136,7 +136,9 @@ class LiveTelemetry:
         self._task_id: Any = None
         self._progress: Any = None
         if interactive is None:
-            interactive = sys.stdout.isatty()
+            # Rich Live does not reliably redraw in every Windows terminal
+            # host. Use the bounded plain-text reporter there by default.
+            interactive = sys.stdout.isatty() and sys.platform != "win32"
         self.plain = not interactive
 
     def _resolve_phase_for(self, repository_root: Any) -> str:
@@ -215,10 +217,10 @@ class LiveTelemetry:
             self._refresh_renderer = _render  # type: ignore[attr-defined]
             self._live = Live(
                 _render(),
-                refresh_per_second=6,
+                auto_refresh=False,
                 transient=True,
-                redirect_stdout=True,
-                redirect_stderr=True,
+                redirect_stdout=False,
+                redirect_stderr=False,
                 vertical_overflow="crop",
                 get_renderable=_render,
             )
@@ -257,7 +259,7 @@ class LiveTelemetry:
             update = getattr(self._live, "update", None)
             renderer = getattr(self, "_refresh_renderer", None)
             if update is not None and renderer is not None:
-                update(renderer(), refresh=False)
+                update(renderer(), refresh=True)
         except Exception:  # noqa: BLE001
             pass
 

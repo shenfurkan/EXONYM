@@ -107,7 +107,12 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .inputs import MINIMUM_BLS_CANDIDATE_SNR, PIPELINE_NORMALIZATION
+from .inputs import (
+    MINIMUM_BLS_CANDIDATE_SNR,
+    PIPELINE_NORMALIZATION,
+    _read_json,
+    is_manifest_bound_bls_result,
+)
 from .lightcurve import phase_hours
 from .workspace import CandidateWorkspace, validate_signal_suffix
 
@@ -989,6 +994,73 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def write_bls_transit_config(
+    workspace: CandidateWorkspace, result_path: Path
+) -> Optional[Path]:
+    """Write the current detected primary BLS ephemeris as downstream input.
+
+    A blind primary search owns its canonical ephemeris only after both its
+    result and manifest pass the normal raw-provenance binding check. Searches
+    without a detection leave the existing configuration untouched.
+    """
+    expected_result = workspace.path / "outputs" / "bls_search_results.json"
+    expected_manifest = workspace.path / "outputs" / "bls_search_manifest.json"
+    try:
+        if result_path.resolve() != expected_result.resolve():
+            raise ValueError("only the primary BLS result can update the transit configuration")
+        result = _read_json(result_path)
+        if result is None or result.get("detection_status") != "detected":
+            return None
+        if not is_manifest_bound_bls_result(workspace, result_path, result, None):
+            raise ValueError("BLS result is not bound to raw provenance and its manifest")
+        period = float(result["best_period"])
+        epoch = float(result["best_epoch"])
+        duration_hours = float(result["best_duration_hours"])
+        depth = float(result["best_depth_ppm"])
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("BLS output cannot provide a candidate-local transit configuration") from exc
+    if (
+        not all(math.isfinite(value) for value in (period, epoch, duration_hours, depth))
+        or period <= 0.0
+        or duration_hours <= 0.0
+        or duration_hours / 24.0 >= period
+        or depth <= 0.0
+    ):
+        raise RuntimeError("BLS output contains unusable transit measurements")
+
+    config_path = workspace.path / "config" / "transit_config.json"
+    payload = {
+        "source": "candidate-data-bls",
+        "bls_provenance": {
+            "result": {
+                "path": expected_result.relative_to(workspace.path).as_posix(),
+                "sha256": _sha256(expected_result),
+                "role": "bls-result",
+            },
+            "manifest": {
+                "path": expected_manifest.relative_to(workspace.path).as_posix(),
+                "sha256": _sha256(expected_manifest),
+                "role": "bls-manifest",
+            },
+        },
+        "transit": {
+            "period_days": period,
+            "epoch_btjd": epoch,
+            "epoch_time_system": "BTJD_TDB",
+            "duration_days": duration_hours / 24.0,
+            "depth_ppm": depth,
+        },
+    }
+    temporary_path = config_path.with_name(".{0}.tmp".format(config_path.name))
+    try:
+        temporary_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temporary_path.replace(config_path)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+    return config_path
+
+
 def _bls_runtime_provenance() -> Dict[str, str]:
     """Return the exact core BLS implementation and installed package version."""
     try:
@@ -1270,6 +1342,7 @@ def run_bls_on_candidate(
             sectors=sectors,
             require_raw_provenance=True,
             detrending_method=detrending_method,
+            require_transit_mask=signal is not None,
         )
         loaded = None
         if native_table is not None:
@@ -1299,6 +1372,7 @@ def run_bls_on_candidate(
             raw_only=detrending_method is None,
             require_raw_provenance=True,
             detrending_method=detrending_method,
+            require_transit_mask=signal is not None,
         )
         loaded = None
         if bls_table is not None:

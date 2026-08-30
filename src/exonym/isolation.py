@@ -187,15 +187,20 @@ def _text_payload(path: Path) -> Optional[str]:
 
 
 def _alias_tokens(candidate_root: Path) -> Dict[str, str]:
-    """Return {escaped-token: owning candidate_id} for every registered alias."""
+    """Return {literal-token: owning candidate_id} for every registered alias."""
     tokens: Dict[str, str] = {}
     for workspace in discover_candidates(candidate_root.parent):
         for alias in workspace.metadata.get("identifiers", {}).get("aliases", []):
             compact = re.sub(r"[^0-9A-Za-z]", "", str(alias))
             if compact and len(compact) >= 4:
-                tokens[re.escape(str(alias))] = workspace.candidate_id
-                tokens[re.escape(compact)] = workspace.candidate_id
+                tokens[str(alias)] = workspace.candidate_id
+                tokens[compact] = workspace.candidate_id
     return tokens
+
+
+def _compile_alias_matcher(alias_tokens: Dict[str, str]) -> Tuple[Tuple[str, str], ...]:
+    """Prepare case-folded literals for one fast pass per source line."""
+    return tuple((token.casefold(), owner) for token, owner in alias_tokens.items())
 
 
 def _python_comment_and_docstring_lines(source: str) -> Set[int]:
@@ -227,6 +232,7 @@ def _scan_text_for_ids(
     alias_tokens: Dict[str, str],
     scan_catalog_patterns: bool = True,
     skip_lines: Optional[Set[int]] = None,
+    alias_matcher: Optional[Tuple[Tuple[str, str], ...]] = None,
 ) -> None:
     for line_number, line in enumerate(content.splitlines(), start=1):
         if skip_lines is not None and line_number in skip_lines:
@@ -240,14 +246,25 @@ def _scan_text_for_ids(
                 f"catalog identifier found: {line.strip()[:120]}",
                 line_number,
             )
-        for token, owner in alias_tokens.items():
-            if re.search(token, line, flags=re.IGNORECASE):
-                report.add(
-                    path,
-                    "registered-alias-leak",
-                    f"alias owned by {owner}: {line.strip()[:120]}",
-                    line_number,
-                )
+        if alias_matcher is not None:
+            folded_line = line.casefold()
+            for token, owner in alias_matcher:
+                if token in folded_line:
+                    report.add(
+                        path,
+                        "registered-alias-leak",
+                        f"alias owned by {owner}: {line.strip()[:120]}",
+                        line_number,
+                    )
+        else:
+            for token, owner in alias_tokens.items():
+                if re.search(re.escape(token), line, flags=re.IGNORECASE):
+                    report.add(
+                        path,
+                        "registered-alias-leak",
+                        f"alias owned by {owner}: {line.strip()[:120]}",
+                        line_number,
+                    )
                 break
 
 
@@ -701,6 +718,7 @@ def _check_repository(
     # Source-only audits must not access candidate metadata.  Full repository
     # verification supplies registered aliases to enforce their isolation.
     alias_tokens = _alias_tokens(root / CANDIDATE_DIRECTORY) if include_candidate_aliases else {}
+    alias_matcher = _compile_alias_matcher(alias_tokens)
 
     if not debug_source_only:
         archive_root = root / "archive"
@@ -765,6 +783,7 @@ def _check_repository(
             alias_tokens,
             scan_catalog_patterns=not (relative.parts and relative.parts[0] == "tests"),
             skip_lines=comment_skip,
+            alias_matcher=alias_matcher,
         )
         if is_python and relative.parts and relative.parts[0] == "src":
             _scan_ast(report, path, relative)

@@ -211,6 +211,11 @@ def test_detrended_loader_rejects_unbound_and_legacy_manifests(tmp_path):
 
     with pytest.raises(ValueError, match="regenerate with `exonym detrend`"):
         load_light_curve_table(workspace, detrending_method="running-median")
+    assert load_light_curve_table(
+        workspace,
+        detrending_method="running-median",
+        require_transit_mask=False,
+    ) is not None
 
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
     manifest["schema_version"] = 1

@@ -20,6 +20,7 @@ import json
 import math
 import os
 import ssl
+import sys
 import tempfile
 import threading
 import uuid
@@ -316,9 +317,47 @@ def _parallel_calc_probs_dispatcher(
             numba_module = None
             previous_threads = None
 
-    # The optional backend does not expose a completed-draw count. These are
-    # lifecycle milestones, not a synthetic one-step percentage.
-    _notify_progress(progress_callback, "TRICERATOPS Monte Carlo Vetting")
+    # TRICERATOPS prints scenario-start lines and warnings with verbose=1.
+    # Convert those lines into bounded status updates; forwarding them would
+    # force Rich to redraw the HUD for every third-party print.
+    n_stars = len(target.stars[target.stars["tdepth"] > 0]) if hasattr(target, "stars") else 0
+    total_scenarios = n_stars * 8 if n_stars > 0 else None
+    _notify_progress(progress_callback, "TRICERATOPS Monte Carlo Vetting",
+                     done=0 if total_scenarios else None,
+                     total=total_scenarios)
+
+    class _MCProgressStream:
+        """Suppress writes while counting scenario starts and surfacing errors."""
+        def __init__(self, real, cb, total):
+            self._real = real; self._cb = cb; self._total = total
+            self._done = 0; self._partial = ""
+
+        def write(self, text):
+            self._partial += text
+            while "\n" in self._partial:
+                line, self._partial = self._partial.split("\n", 1)
+                s = line.strip()
+                if not s:
+                    continue
+                if "Calculating" in s and "scenario" in s:
+                    self._done += 1
+                    if (self._total is None or self._done <= self._total) and self._cb is not None:
+                        self._cb("TRICERATOPS Monte Carlo Vetting",
+                                 done=self._done, total=self._total)
+                elif any(k in s for k in ("Error", "Exception", "Traceback",
+                                            "WARNING", "raised exception")):
+                    if self._cb is not None:
+                        self._cb(s[:80], done=None, total=None)
+            return len(text)
+
+        def flush(self):
+            return None
+
+        def isatty(self):
+            return getattr(self._real, "isatty", lambda: False)()
+
+    _saved_stdout = sys.stdout
+    sys.stdout = _MCProgressStream(_saved_stdout, progress_callback, total_scenarios)
     try:
         target.calc_probs(
             time=observed_input["time_days"],
@@ -327,13 +366,12 @@ def _parallel_calc_probs_dispatcher(
             P_orb=period,
             N=n_draws,
             parallel=bool(execution["calc_probs_parallel"]),
-            # TRICERATOPS only prints scenario-start messages. It does not
-            # expose draw counters, so verbose output cannot provide progress.
-            verbose=0,
+            verbose=1,
             exptime=observed_input["exposure_days"],
             nsamples=5,
         )
     finally:
+        sys.stdout = _saved_stdout
         if numba_module is not None and previous_threads is not None:
             numba_module.set_num_threads(previous_threads)
     _notify_progress(progress_callback, "TRICERATOPS Monte Carlo completed")
@@ -825,24 +863,63 @@ def run_triceratops_simulation(
                     _verify_snapshot(workspace, input_snapshot)
                     os.chdir(scene_dir)
                     np.random.seed(random_seed)
-                    _notify_progress(progress_callback, "Constructing TRICERATOPS scene")
-                    with _triceratops_tls_environment() as certificate_source:
-                        backend["tls_certificate_source"] = certificate_source
-                        targ = target_cls(
-                            ID=tic_id,
-                            sectors=np.array(sectors, dtype=int),
-                            search_radius=search_radius,
-                            mission="TESS",
-                        )
-                        targ.calc_depths(depth_ppm * 1e-6)
-                        backend["execution"] = _parallel_calc_probs_dispatcher(
-                            targ,
-                            observed_input,
-                            period,
-                            n_draws,
-                            n_jobs,
-                            progress_callback,
-                        )
+                    _notify_progress(progress_callback, "Constructing TRICERATOPS scene",
+                                     done=0, total=len(sectors))
+                    n_sectors = len(sectors)
+
+                    class _NetworkStream:
+                        """Suppress writes; count TessCut downloads and surface errors."""
+                        def __init__(self, real, cb, total):
+                            self._real = real; self._cb = cb; self._total = total
+                            self._done = 0; self._partial = ""
+
+                        def write(self, text):
+                            self._partial += text
+                            while "\n" in self._partial:
+                                line, self._partial = self._partial.split("\n", 1)
+                                s = line.strip()
+                                if not s:
+                                    continue
+                                if "Getting TessCut" in s:
+                                    self._done += 1
+                                    if self._done <= self._total and self._cb is not None:
+                                        self._cb("Constructing TRICERATOPS scene",
+                                                 done=self._done, total=self._total)
+                                elif any(k in s for k in ("Error", "Exception",
+                                                           "Traceback", "WARNING",
+                                                           "raised exception")):
+                                    if self._cb is not None:
+                                        self._cb(s[:80], done=None, total=None)
+                            return len(text)
+
+                        def flush(self):
+                            return None
+
+                        def isatty(self):
+                            return getattr(self._real, "isatty", lambda: False)()
+
+                    _ns_stdout = sys.stdout
+                    sys.stdout = _NetworkStream(_ns_stdout, progress_callback, n_sectors)
+                    try:
+                        with _triceratops_tls_environment() as certificate_source:
+                            backend["tls_certificate_source"] = certificate_source
+                            targ = target_cls(
+                                ID=tic_id,
+                                sectors=np.array(sectors, dtype=int),
+                                search_radius=search_radius,
+                                mission="TESS",
+                            )
+                            targ.calc_depths(depth_ppm * 1e-6)
+                            backend["execution"] = _parallel_calc_probs_dispatcher(
+                                targ,
+                                observed_input,
+                                period,
+                                n_draws,
+                                n_jobs,
+                                progress_callback,
+                            )
+                    finally:
+                        sys.stdout = _ns_stdout
                     _verify_snapshot(workspace, input_snapshot)
 
                     fpp = float(targ.FPP)
@@ -910,10 +987,15 @@ def run_triceratops_simulation(
     # Raise before writing any files when the Monte Carlo was not run and the
     # caller has not explicitly opted in to an unvalidated fallback.
     if not allow_fallback and (source in ("not-run", "triceratops-failed-UNVALIDATED")):
+        remediation = (
+            "Install the 'triceratops' package or pass allow_fallback=True "
+            "to write an unvalidated placeholder report."
+            if unavailable
+            else "The underlying failure was: {0}".format(failure)
+        )
         raise RuntimeError(
             "TRICERATOPS Monte Carlo did not run (source={0!r}). "
-            "Install the 'triceratops' package or pass allow_fallback=True "
-            "to write an unvalidated placeholder report.".format(source)
+            "{1}".format(source, remediation)
         )
 
     fpp_rounded: Optional[float] = round(fpp, 6) if math.isfinite(fpp) else None

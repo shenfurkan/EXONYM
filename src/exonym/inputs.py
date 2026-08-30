@@ -169,8 +169,10 @@ def _is_candidate_photometry_input(
     return has_valid_raw_product_provenance(workspace, product_path)
 
 
-def _is_bound_preprocessing(workspace: CandidateWorkspace, record: object) -> bool:
-    """Confirm a preprocessing record names a current, mask-bound derived product."""
+def _is_bound_preprocessing(
+    workspace: CandidateWorkspace, record: object, require_transit_mask: bool = True
+) -> bool:
+    """Confirm a preprocessing record names a current derived product."""
     if record == PIPELINE_NORMALIZATION:
         return True
     if not isinstance(record, dict) or record.get("kind") != "candidate-detrending":
@@ -199,7 +201,8 @@ def _is_bound_preprocessing(workspace: CandidateWorkspace, record: object) -> bo
     artifact = manifest.get("artifact") if isinstance(manifest, dict) else None
     configuration = manifest.get("configuration") if isinstance(manifest, dict) else None
     # SCIENTIFIC_BOUNDARY: A preprocessing label alone is not evidence; the
-    # artifact, raw inputs, and protected-transit provenance must still bind.
+    # artifact and raw inputs must still bind. Targeted consumers also require
+    # an ephemeris-bound protected-transit mask.
     if not (
         isinstance(artifact, dict)
         and isinstance(configuration, dict)
@@ -209,16 +212,22 @@ def _is_bound_preprocessing(workspace: CandidateWorkspace, record: object) -> bo
         and artifact.get("path") == expected_artifact_path
         and artifact.get("sha256") == artifact_record.get("sha256")
         and artifact.get("data_sha256") == artifact_record.get("data_sha256")
-        and configuration.get("transit_mask_applied") is True
-        and isinstance(configuration.get("transit_mask_provenance"), dict)
     ):
+        return False
+    transit_mask_applied = configuration.get("transit_mask_applied")
+    transit_mask_provenance = configuration.get("transit_mask_provenance")
+    if not isinstance(transit_mask_applied, bool):
+        return False
+    if not transit_mask_applied:
+        return not require_transit_mask and transit_mask_provenance is None
+    if not isinstance(transit_mask_provenance, dict):
         return False
     try:
         with np.load(artifact_path, allow_pickle=False) as archive:
             time = np.asarray(archive["time_btjd"], dtype=float)
         from .detrending import validate_transit_mask_provenance
 
-        provenance = configuration["transit_mask_provenance"]
+        provenance = transit_mask_provenance
         validate_transit_mask_provenance(time, provenance, provenance.get("ephemeris"))
     except (KeyError, OSError, TypeError, ValueError):
         return False
@@ -299,7 +308,9 @@ def is_manifest_bound_bls_result(
     result_preprocessing = payload.get("preprocessing", PIPELINE_NORMALIZATION)
     if (
         manifest_preprocessing != result_preprocessing
-        or not _is_bound_preprocessing(workspace, manifest_preprocessing)
+        or not _is_bound_preprocessing(
+            workspace, manifest_preprocessing, require_transit_mask=signal is not None
+        )
     ):
         return False
     inputs = manifest.get("inputs")
@@ -821,6 +832,7 @@ def _load_detrended_light_curve_table(
     max_points: Optional[int],
     sectors: Optional[Sequence[int]],
     require_raw_provenance: bool,
+    require_transit_mask: bool,
 ) -> Optional[Dict[str, Any]]:
     """Load one hash-bound candidate detrending product without FITS conversion."""
     normalized_method = method.strip().lower()
@@ -854,7 +866,13 @@ def _load_detrended_light_curve_table(
         raise ValueError(
             "detrended input lacks a mask-bound configuration; regenerate with `exonym detrend`"
         )
-    if not transit_mask_applied or not isinstance(transit_mask_provenance, dict):
+    if transit_mask_applied and not isinstance(transit_mask_provenance, dict):
+        raise ValueError(
+            "detrended input has no transit mask provenance; regenerate with `exonym detrend`"
+        )
+    if not transit_mask_applied and transit_mask_provenance is not None:
+        raise ValueError("unmasked detrended input must not declare transit mask provenance")
+    if require_transit_mask and not transit_mask_applied:
         raise ValueError(
             "detrended input is not transit-mask-bound; regenerate with `exonym detrend`"
         )
@@ -928,29 +946,30 @@ def _load_detrended_light_curve_table(
         raise ValueError("detrended artifact arrays have incompatible shapes or invalid sectors")
     if flux_err is not None and (flux_err.ndim != 1 or flux_err.shape != flux.shape):
         raise ValueError("detrended artifact uncertainty array does not match its flux")
-    from .detrending import validate_transit_mask_provenance
+    if transit_mask_applied:
+        from .detrending import validate_transit_mask_provenance
 
-    try:
-        # The processed artifact carries the exact canonical ephemeris used to
-        # protect its transit mask. A stale BLS-derived config temporarily
-        # resolves to synthetic-demo after the artifact is regenerated, before
-        # a fresh blind BLS search can rebind it. In that narrow case validate
-        # the immutable mask provenance against its recorded ephemeris. A
-        # readable current candidate ephemeris still has to match exactly.
-        mask_ephemeris = transit_mask_provenance.get("ephemeris")
-        current_ephemeris = load_transit_ephemeris(workspace)
-        ephemeris_for_validation = (
-            mask_ephemeris
-            if current_ephemeris.get("source") == "synthetic-demo"
-            else current_ephemeris
-        )
-        validate_transit_mask_provenance(
-            time, transit_mask_provenance, ephemeris_for_validation
-        )
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "detrended input transit mask provenance is stale or mismatched"
-        ) from exc
+        try:
+            # The processed artifact carries the exact canonical ephemeris used to
+            # protect its transit mask. A stale BLS-derived config temporarily
+            # resolves to synthetic-demo after the artifact is regenerated, before
+            # a fresh blind BLS search can rebind it. In that narrow case validate
+            # the immutable mask provenance against its recorded ephemeris. A
+            # readable current candidate ephemeris still has to match exactly.
+            mask_ephemeris = transit_mask_provenance.get("ephemeris")
+            current_ephemeris = load_transit_ephemeris(workspace)
+            ephemeris_for_validation = (
+                mask_ephemeris
+                if current_ephemeris.get("source") == "synthetic-demo"
+                else current_ephemeris
+            )
+            validate_transit_mask_provenance(
+                time, transit_mask_provenance, ephemeris_for_validation
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "detrended input transit mask provenance is stale or mismatched"
+            ) from exc
     valid = np.isfinite(time) & np.isfinite(flux)
     if flux_err is not None:
         valid &= np.isfinite(flux_err) & (flux_err > 0)
@@ -1016,13 +1035,14 @@ def load_light_curve_table(
     raw_only: bool = False,
     require_raw_provenance: bool = False,
     detrending_method: Optional[str] = None,
+    require_transit_mask: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """Load normalized candidate light curves with sector and input provenance.
 
     Processed FITS products take precedence over same-named raw products unless
     raw_only is requested. A named detrending method instead loads a
-    hash-bound processed array and validates its raw-input and transit-mask
-    provenance before returning it.
+        hash-bound processed array and validates its raw-input provenance before
+        returning it. Transit-mask provenance is required by default.
 
     Args:
         workspace: Candidate workspace that owns FITS or detrended inputs.
@@ -1035,6 +1055,9 @@ def load_light_curve_table(
             raw products.
         detrending_method: Optional named mask-bound detrending product to
             consume instead of FITS data.
+        require_transit_mask: Require a transit mask bound to the current
+            ephemeris. Blind searches may explicitly disable this to avoid
+            masking a previous candidate signal.
 
     Returns:
         A mapping with BTJD_TDB time, normalized flux, uncertainties, per-
@@ -1053,7 +1076,12 @@ def load_light_curve_table(
         if raw_only:
             raise ValueError("raw_only cannot be combined with a detrending_method")
         return _load_detrended_light_curve_table(
-            workspace, detrending_method, max_points, sectors, require_raw_provenance
+            workspace,
+            detrending_method,
+            max_points,
+            sectors,
+            require_raw_provenance,
+            require_transit_mask,
         )
     if require_raw_provenance:
         raw_only = True

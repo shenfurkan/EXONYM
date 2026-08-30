@@ -205,6 +205,8 @@ def format_dashboard(workspace: CandidateWorkspace, telemetry: Dict[str, Documen
             )
         ),
         row("Scientific Disp.   : {0}".format(metadata["scientific_disposition"].upper())),
+        row("Review Status      : {0}".format(metadata.get("review_status", "unreviewed").upper())),
+        row("Retention Class    : {0}".format(metadata.get("retention_class", "hot").upper())),
         row(
             "Progress           : {0} {1:5.1f}%".format(
                 _progress_bar(fraction, 26), fraction * 100.0

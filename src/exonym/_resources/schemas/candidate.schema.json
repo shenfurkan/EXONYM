@@ -100,6 +100,12 @@
     "publication": {
       "enum": ["none", "draft", "submitted", "published"]
     },
+    "review_status": {
+      "enum": ["unreviewed", "triaged", "reviewed", "adjudicated"]
+    },
+    "retention_class": {
+      "enum": ["hot", "warm", "cold", "hold"]
+    },
     "created_at": {
       "type": "string",
       "format": "date-time"

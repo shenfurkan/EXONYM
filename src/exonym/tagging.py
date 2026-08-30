@@ -70,6 +70,11 @@ def filter_candidates(
     tag: Optional[str] = None,
     phase: Optional[str] = None,
     mission: Optional[str] = None,
+    disposition: Optional[str] = None,
+    publication: Optional[str] = None,
+    lifecycle: Optional[str] = None,
+    review_status: Optional[str] = None,
+    retention_class: Optional[str] = None,
 ) -> List[CandidateWorkspace]:
     """Filter candidate workspaces by optional metadata fields.
 
@@ -81,6 +86,11 @@ def filter_candidates(
         tag: Optional exact metadata tag.
         phase: Optional workflow phase.
         mission: Optional originating mission identifier.
+        disposition: Optional scientific disposition.
+        publication: Optional publication state.
+        lifecycle: Optional lifecycle state.
+        review_status: Optional human-review status.
+        retention_class: Optional operational storage label.
 
     Returns:
         Candidate workspaces that satisfy all supplied criteria, preserving
@@ -93,6 +103,16 @@ def filter_candidates(
         if phase is not None and candidate.metadata["workflow"]["phase"] != phase:
             continue
         if mission is not None and candidate.metadata.get("identifiers", {}).get("mission") != mission:
+            continue
+        if disposition is not None and candidate.metadata.get("scientific_disposition") != disposition:
+            continue
+        if publication is not None and candidate.metadata.get("publication") != publication:
+            continue
+        if lifecycle is not None and candidate.metadata.get("lifecycle", {}).get("state") != lifecycle:
+            continue
+        if review_status is not None and candidate.metadata.get("review_status", "unreviewed") != review_status:
+            continue
+        if retention_class is not None and candidate.metadata.get("retention_class", "hot") != retention_class:
             continue
         filtered.append(candidate)
     return filtered

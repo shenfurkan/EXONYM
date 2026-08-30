@@ -53,6 +53,7 @@ SED_FIT_SCHEMA = "sed-fit-results.schema.json"
 TTV_ANALYSIS_SCHEMA = "ttv-analysis.schema.json"
 STATISTICAL_VETTING_EVIDENCE_SCHEMA = "statistical-vetting-evidence.schema.json"
 DECISIVE_REJECTION_SCHEMA = "decisive-rejection.schema.json"
+CLASSIFICATION_REVIEW_SCHEMA = "classification-review.schema.json"
 TRICERATOPS_VETTING_DECISION_SCHEMA = "triceratops-vetting-decision.schema.json"
 ANALYSIS_COMPLETION_SCHEMA = "analysis-completion.schema.json"
 CATALOG_QUERY_MANIFEST_SCHEMA = "catalog-query-manifest.schema.json"
@@ -669,6 +670,7 @@ def _load_schemas(root: Path, report: IsolationReport) -> Dict[str, object]:
         TTV_ANALYSIS_SCHEMA,
         STATISTICAL_VETTING_EVIDENCE_SCHEMA,
         DECISIVE_REJECTION_SCHEMA,
+        CLASSIFICATION_REVIEW_SCHEMA,
         TRICERATOPS_VETTING_DECISION_SCHEMA,
         ANALYSIS_COMPLETION_SCHEMA,
         CATALOG_QUERY_MANIFEST_SCHEMA,
@@ -1071,6 +1073,7 @@ def validate_schemas(
     ttv_analysis_schema = schemas.get(TTV_ANALYSIS_SCHEMA)
     statistical_vetting_schema = schemas.get(STATISTICAL_VETTING_EVIDENCE_SCHEMA)
     decisive_rejection_schema = schemas.get(DECISIVE_REJECTION_SCHEMA)
+    classification_review_schema = schemas.get(CLASSIFICATION_REVIEW_SCHEMA)
     triceratops_vetting_decision_schema = schemas.get(TRICERATOPS_VETTING_DECISION_SCHEMA)
     analysis_completion_schema = schemas.get(ANALYSIS_COMPLETION_SCHEMA)
     catalog_query_schema = schemas.get(CATALOG_QUERY_MANIFEST_SCHEMA)
@@ -1153,6 +1156,39 @@ def validate_schemas(
             for release_dir in sorted(releases_dir.iterdir()):
                 if release_dir.is_dir() and not release_dir.name.startswith("."):
                     _validate_release_bundle(report, release_dir, workspace_dir.name)
+
+        if classification_review_schema is not None:
+            reviews_dir = workspace_dir / "decisions" / "reviews"
+            for review_path in sorted(reviews_dir.glob("*.json")):
+                try:
+                    instance = _read_json(review_path)
+                except (OSError, UnicodeError, ValueError) as exc:
+                    report.add(review_path, "schema-violation", "invalid JSON: {0}".format(exc))
+                    continue
+                _validate(report, review_path, instance, classification_review_schema, validate_func)
+                if isinstance(instance, dict) and instance.get("candidate_id") != workspace_dir.name:
+                    report.add(
+                        review_path,
+                        "schema-violation",
+                        "classification review candidate_id does not match its workspace",
+                    )
+                if isinstance(instance, dict) and isinstance(instance.get("evidence"), list):
+                    for evidence in instance["evidence"]:
+                        if not isinstance(evidence, dict):
+                            continue
+                        evidence_path = _candidate_artifact_path(workspace_dir, evidence.get("path"))
+                        if evidence_path is None or not evidence_path.is_file():
+                            report.add(
+                                review_path,
+                                "review-evidence-invalid",
+                                "classification review evidence does not exist in the candidate workspace",
+                            )
+                        elif evidence.get("sha256") != _file_sha256(evidence_path):
+                            report.add(
+                                review_path,
+                                "review-evidence-hash-mismatch",
+                                "classification review evidence SHA-256 does not match its current bytes",
+                            )
 
         for path in workspace_dir.rglob("*.provenance.json"):
             if LEGACY_SUBTREE in path.parts or "releases" in path.relative_to(workspace_dir).parts:

@@ -31,7 +31,7 @@ def test_candidate_cache_reuses_unchanged_hash_and_metadata(tmp_path):
     }
 
 
-def test_hash_cache_hit_still_reads_and_rehashes_the_artifact(tmp_path, monkeypatch):
+def test_hash_cache_hit_reuses_digest_without_reading_the_artifact(tmp_path, monkeypatch):
     workspace = create_candidate(tmp_path, "cache-rehash-contract")
     artifact = workspace.path / "outputs" / "artifact.json"
     artifact.write_text('{"result": "synthetic"}\n', encoding="utf-8")
@@ -50,7 +50,7 @@ def test_hash_cache_hit_still_reads_and_rehashes_the_artifact(tmp_path, monkeypa
     monkeypatch.setattr(verification_cache, "_sha256", recording_sha256)
     second = CandidateVerificationCache(tmp_path)
     assert second.sha256(artifact) == expected_digest
-    assert calls == [artifact]
+    assert calls == []
     assert second.statistics()["hash_cache_hits"] == 1
 
 
@@ -91,7 +91,7 @@ def test_changed_candidate_json_drops_stale_digest_before_hashing(tmp_path):
     assert third.statistics()["hash_cache_hits"] == 1
 
 
-def test_cache_rehashes_and_reparses_same_size_mtime_rewrites(tmp_path):
+def test_default_cache_uses_fingerprint_but_fresh_mode_rehashes_same_size_mtime_rewrites(tmp_path):
     workspace = create_candidate(tmp_path, "cache-synthetic")
     artifact = workspace.path / "outputs" / "artifact.json"
     artifact.write_text("original", encoding="utf-8")
@@ -117,14 +117,19 @@ def test_cache_rehashes_and_reparses_same_size_mtime_rewrites(tmp_path):
     assert metadata_path.stat().st_mtime_ns == metadata_stat.st_mtime_ns
 
     second = CandidateVerificationCache(tmp_path)
-    assert second.sha256(artifact) == hashlib.sha256(b"rewrote!").hexdigest()
+    assert second.sha256(artifact) != hashlib.sha256(b"rewrote!").hexdigest()
     assert second.read_candidate_json(metadata_path, json.loads)["candidate_id"] == "cache-rewritten"
     assert second.statistics() == {
-        "hash_cache_hits": 0,
-        "hash_cache_misses": 1,
+        "hash_cache_hits": 1,
+        "hash_cache_misses": 0,
         "candidate_json_cache_hits": 0,
         "candidate_json_cache_misses": 1,
     }
+
+    fresh = CandidateVerificationCache(tmp_path, enabled=False)
+    assert fresh.sha256(artifact) == hashlib.sha256(b"rewrote!").hexdigest()
+    assert fresh.statistics()["hash_cache_hits"] == 0
+    assert fresh.statistics()["hash_cache_misses"] == 1
 
 
 def test_copied_cache_is_not_trusted_in_another_workspace(tmp_path):

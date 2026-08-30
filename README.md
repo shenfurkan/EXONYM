@@ -338,12 +338,15 @@ They affect CLI presentation only and never alter an artifact or gate.
 | Command | Key options | Result |
 | --- | --- | --- |
 | `init <candidate-id>` | `--toi`, `--tic`, `--mission {tess,kepler,k2,plato,cheops}`, repeatable `--tag` | Provisions a workspace, clones templates, validates metadata, and prints candidate JSON. The identifier alone is accepted, although catalog identity is needed by some downstream operations. |
-| `list` | `--phase`, `--tag`, `--mission` | Prints metadata records matching the filters. |
+| `list` | `--phase`, `--tag`, `--mission`, `--disposition`, `--publication`, `--lifecycle`, `--review-status`, `--retention-class` | Prints metadata records matching all supplied filters. |
 | `status <candidate-id>` | None | Prints candidate metadata and candidate-relative workspace paths. |
 | `tag <candidate-id> <tag> [<tag> ...]` | Positional tags | Adds tags and prints the resulting tag list. |
 | `track <candidate-id>` | None | Renders an ANSI/ASCII progress dashboard from candidate-local checklists. |
 | `advance <candidate-id>` | None | Validates the current gate, writes a gate record and lifecycle event, then promotes the workflow when allowed. |
 | `set-state <candidate-id>` | Required `--state`; optional `--reason` | Performs an audit-logged lifecycle transition. A reason is required when leaving `stopped`, `published`, or `archived`. |
+| `review <candidate-id>` | Required `--reviewer`, `--reason`, `--evidence`; optional classification fields | Writes a versioned, evidence-hash-bound classification review under `decisions/reviews/` and updates the current metadata summary atomically. |
+| `classify` | Optional `--candidate`; `--apply` to write; `--verify` for review hashes | Applies the conservative administrative policy `active -> hot`, `paused/stopped -> warm`, `published/archived -> hold`; scientific disposition remains unchanged. Without `--apply`, it is a dry-run. `--verify` checks classification records without traversing raw data. |
+| `storage report [<candidate-id>]` | Optional candidate ID | Produces a read-only regular-file count and byte inventory; it does not read, hash, move, or delete artifact contents. |
 | `freeze <candidate-id>` | `--version` | Creates a candidate-local reproducibility bundle and prints its path. |
 | `verify-release <candidate-id>` | `--version` | Verifies a prior freeze and replays frozen source/workspace loading offline; it does not rerun science engines or network services. |
 | `checkpoint save <candidate-id>` | Required `--name <label>` | Creates a compressed, hash-bound operational snapshot of mutable workspace state; raw FITS and provenance are excluded. |
@@ -381,10 +384,10 @@ They affect CLI presentation only and never alter an artifact or gate.
 | `fetch-priors <candidate-id>` | None | Retrieves available catalog transit priors into `config/signals/transit_config.NN.json`. It can legitimately return an empty list. |
 | `catalog record-ephemeris <candidate-id>` | Source kind, HTTPS URI, raw artifact, BJD_TDB period/epoch/duration, retrieval and expiry times | Adds reviewed EB, variable-star, ExoFOP, or literature ephemeris evidence only when its raw local source artifact can be hash-bound. |
 | `catalog match-ephemeris <candidate-id>` | `--signal` | Writes a hash-bound comparison with fresh NEA planetary-system and TOI rows plus supported recorded evidence. A match requires human review; no match is not a novelty decision. |
-| `detrend <candidate-id>` | `--method {running-median,wotan,celerite}`, `--window-days` | Writes a hash-bound processed array with detrended flux, propagated errors, sector labels, and raw-input provenance. |
-| `search <candidate-id>` | `--engine {bls,tls}`, `--period-min`, `--period-max`, `--signal`, `--detrending-method` | Writes engine-specific search results and a content-addressed input manifest. The default blind period interval is 0.5 to 15.0 days. TLS requires the `discovery` extra. |
+| `detrend <candidate-id>` | `--method {running-median,wotan,celerite}` (default `running-median`), `--window-days` | Writes a hash-bound processed array with detrended flux, propagated errors, sector labels, and raw-input provenance. |
+| `search <candidate-id>` | `--engine {bls,tls}`, `--period-min`, `--period-max`, `--duration-grid-hours`, `--signal`, `--detrending-method` | Writes engine-specific search results and a content-addressed input manifest. The default blind period interval is 0.5 to 15.0 days. TLS requires the `discovery` extra. |
 | `screen <candidate-id>` | `--signal`, `--detrending-method` | Writes `outputs/fixed_ephemeris_screen.json` or a signal-scoped equivalent after fixed-ephemeris primary, odd-even, half-phase, and alternating-event checks. |
-| `vet <candidate-id>` | `--n-draws`, `--signal`, `--n-jobs`, `--progress` | Runs the optional TRICERATOPS wrapper and writes `outputs/triceratops_report.json` with input provenance and a claim-ineligible diagnostic FPP. The default draw count is 2000. |
+| `vet <candidate-id>` | `--n-draws`, `--signal`, `--n-jobs`, `--no-progress` | Runs the optional TRICERATOPS wrapper and writes `outputs/triceratops_report.json` and `decisions/triceratops_vetting_decision.json` with input provenance and a claim-ineligible diagnostic FPP. The interactive telemetry HUD is shown by default. The default draw count is 2000. |
 | `archive <candidate-id>` | `--radius-arcsec` | Writes `outputs/archival_vetting_report.json` from Gaia DR3 and available ExoFOP context. The default search radius is 60 arcsec. |
 | `plot <candidate-id>` | `--signal`, `--corner` | Writes a candidate-data phase-folded light-curve figure, plus an optional posterior corner plot when a matching fit chain exists. It does not create a centroid-evidence figure. |
 
@@ -395,7 +398,7 @@ They affect CLI presentation only and never alter an artifact or gate.
 | `asteroseismology <candidate-id>` | `--numax-min` (default 100 μHz), `--numax-max` (default 1600 μHz) | Writes `outputs/asteroseismic_results.json`. |
 | `localization <candidate-id>` | `--search-radius` (default 60 arcsec) | Writes `outputs/prf_localization_results.json` from pixel-depth and Gaussian-template screening. |
 | `sed <candidate-id>` | None | Writes `outputs/sed_fit_results.json` and an MCMC chain array. |
-| `fit <candidate-id>` | `--n-samples`, `--eccentric`, `--signal`, `--detrending-method`, `--sampler {auto,emcee,numpyro,dynesty}`, `--device {auto,cpu,gpu}`, `--ldtk-prior`, `--n-jobs`, `--progress`, `--resume` | Writes a candidate-local exploratory fit and chain. `auto` records GPU NumPyro selection or CPU emcee fallback; emcee can resume only from a current no-pickle intermediate chain checkpoint. The sampler, fallback reason, runtime, and convergence diagnostics are part of the artifact contract. |
+| `fit <candidate-id>` | `--n-samples`, `--eccentric`, `--signal`, `--detrending-method`, `--sampler {auto,emcee,numpyro,dynesty}`, `--device {auto,cpu,gpu}`, `--ldtk-prior`, `--n-jobs`, `--no-progress`, `--resume` | Writes a candidate-local exploratory fit and chain. The interactive telemetry HUD is shown by default. `auto` records GPU NumPyro selection or CPU emcee fallback; emcee can resume only from a current no-pickle intermediate chain checkpoint. The sampler, fallback reason, runtime, and convergence diagnostics are part of the artifact contract. |
 | `phasecurve <candidate-id>` | None | Writes `outputs/phase_curve_results.json`. |
 | `ttv <candidate-id>` | `--signal`, `--fit-orbital-decay` | Writes `outputs/ttv_analysis_results.json` and may create a timing diagram. The optional derivative is a formal diagnostic, not evidence for orbital decay. |
 | `activity <candidate-id>` | None | Writes `outputs/stellar_activity_results.json`. |

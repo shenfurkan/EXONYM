@@ -36,13 +36,17 @@ record carries:
   ``unvalidated_candidate``, ``false_positive``, ``validated``, ``confirmed``,
   or ``inconclusive``.
 * ``publication`` --- ``none``, ``draft``, ``submitted``, or ``published``.
+* ``review_status`` --- ``unreviewed``, ``triaged``, ``reviewed``, or
+  ``adjudicated``.
+* ``retention_class`` --- ``hot``, ``warm``, ``cold``, or ``hold``; an
+  operational storage label independent of lifecycle and science.
 
 Validation enforces:
 
 * Schema version match (exactly 2).
 * Candidate ID matches its enclosing directory name.
-* Lifecycle state, workflow phase, disposition, and publication values drawn
-  from the closed enumerations declared in this module.
+* Lifecycle state, workflow phase, disposition, publication, review status, and
+  retention values drawn from the closed enumerations declared in this module.
 * Non-finite JSON number constants (``Infinity``, ``NaN``) are rejected at the
   parse level; duplicate object keys produce an immediate error.
 * Workspace paths and metadata files must never be symlinks, junctions, or
@@ -182,6 +186,13 @@ SCIENTIFIC_DISPOSITIONS = (
 )
 # Publication lifecycle, independent of the scientific disposition.
 PUBLICATION_STATES = ("none", "draft", "submitted", "published")
+# Human-review progress is independent of scientific disposition.  A triage
+# result may route work, but only an explicit review record reaches
+# ``adjudicated``.
+REVIEW_STATUSES = ("unreviewed", "triaged", "reviewed", "adjudicated")
+# Storage labels are operational hints only.  ``cold`` never authorizes local
+# deletion; an independently verified archive is required before any purge.
+RETENTION_CLASSES = ("hot", "warm", "cold", "hold")
 
 # Recognized survey missions for metadata tagging and ingestion routing.
 MISSIONS = ("tess", "kepler", "k2", "plato", "cheops")
@@ -512,6 +523,8 @@ def new_candidate_metadata(
     * ``workflow.phase`` to ``"intake"`` (the first of seven phases).
     * ``scientific_disposition`` to ``"unknown"``.
     * ``publication`` to ``"none"``.
+    * ``review_status`` to ``"unreviewed"``.
+    * ``retention_class`` to ``"hot"``.
     * ``identifiers.aliases`` seeded with ``[candidate_id]``.
 
     Parameters
@@ -566,6 +579,8 @@ def new_candidate_metadata(
         "workflow": {"phase": "intake"},
         "scientific_disposition": "unknown",
         "publication": "none",
+        "review_status": "unreviewed",
+        "retention_class": "hot",
         "created_at": _created_at(),
         "notes": "Verify canonical catalog metadata before beginning analysis.",
     }
@@ -632,6 +647,10 @@ def validate_metadata(metadata: Dict[str, Any], candidate_id: str) -> None:
         raise ValueError("invalid scientific disposition")
     if metadata.get("publication") not in PUBLICATION_STATES:
         raise ValueError("invalid publication state")
+    if metadata.get("review_status", "unreviewed") not in REVIEW_STATUSES:
+        raise ValueError("invalid review status")
+    if metadata.get("retention_class", "hot") not in RETENTION_CLASSES:
+        raise ValueError("invalid retention class")
 
 
 def _parse_finite_float(value: str) -> float:

@@ -1,5 +1,7 @@
 """Unit coverage for the sticky telemetry HUD and its plain-text fallback."""
 
+from types import SimpleNamespace
+
 from exonym.telemetry import (
     LiveTelemetry,
     _current_rss_bytes,
@@ -46,6 +48,18 @@ def test_plain_mode_writes_no_ansi_and_reports_progress(capsys, monkeypatch):
     assert "production" in captured.out
     assert "writing output" in captured.out
     assert "finished in" in captured.out
+
+
+def test_windows_defaults_to_plain_telemetry(monkeypatch):
+    monkeypatch.setattr(
+        "exonym.telemetry.sys.stdout",
+        SimpleNamespace(isatty=lambda: True),
+    )
+    monkeypatch.setattr("exonym.telemetry.sys.platform", "win32")
+
+    telemetry = LiveTelemetry("hud-target")
+
+    assert telemetry.plain is True
 
 
 def test_live_mode_drives_progress_and_never_raises(monkeypatch):
@@ -103,14 +117,14 @@ def test_live_mode_drives_progress_and_never_raises(monkeypatch):
     assert any(kwargs.get("completed") == 40 for kwargs in progress_proxy.updates)
     assert any(kwargs.get("progress_label") == " 40% /  60% left" for kwargs in progress_proxy.updates)
     assert FakeLive.instances[0].kwargs == {
-        "refresh_per_second": 6,
+        "auto_refresh": False,
         "transient": True,
-        "redirect_stdout": True,
-        "redirect_stderr": True,
+        "redirect_stdout": False,
+        "redirect_stderr": False,
         "vertical_overflow": "crop",
         "get_renderable": hud._refresh_renderer,
     }
-    assert FakeLive.instances[0].refresh is False
+    assert FakeLive.instances[0].refresh is True
 
 
 def test_eta_mcmc_evidence_and_step_timer_reset(monkeypatch):
