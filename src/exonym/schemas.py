@@ -1096,20 +1096,49 @@ def validate_schemas(
     exofop_prior_schema = schemas.get(EXOFOP_PRIOR_RETRIEVAL_SCHEMA)
     checkpoint_schema = schemas.get(CHECKPOINT_SCHEMA)
     surveys_root = candidate_root / "_surveys"
+
+    # Collect workspace directories from both the legacy flat layout and
+    # any lifecycle-group subdirectories (active/, paused/, …).
+    def _iter_workspace_dirs() -> List[Path]:
+        dirs: List[Path] = []
+        for entry in sorted(candidate_root.iterdir()):
+            if not entry.is_dir() or entry.name.startswith("_"):
+                continue
+            if (entry / "candidate.json").is_file():
+                dirs.append(entry)
+            else:
+                from .workspace import LIFECYCLE_STATES
+                if entry.name in LIFECYCLE_STATES:
+                    for child in sorted(entry.iterdir()):
+                        if child.is_dir() and not child.name.startswith("_") and (child / "candidate.json").is_file():
+                            dirs.append(child)
+        return dirs
+
+    def _resolve_single_workspace(cid: str) -> Optional[Path]:
+        flat = candidate_root / cid
+        if flat.is_dir() and (flat / "candidate.json").is_file():
+            return flat
+        from .workspace import LIFECYCLE_STATES
+        for grp in LIFECYCLE_STATES:
+            grp_path = candidate_root / grp / cid
+            if grp_path.is_dir() and (grp_path / "candidate.json").is_file():
+                return grp_path
+        return None
+
     if candidate_id is None:
-        workspace_dirs = sorted(candidate_root.iterdir())
+        workspace_dirs = _iter_workspace_dirs()
     else:
-        workspace_dirs = [candidate_root / candidate_id]
-        if not workspace_dirs[0].is_dir():
+        resolved = _resolve_single_workspace(candidate_id)
+        if resolved is None:
+            missing = candidate_root / candidate_id
             report.add(
-                workspace_dirs[0],
+                missing,
                 "candidate-workspace-missing",
                 "selected candidate workspace does not exist",
             )
             return
+        workspace_dirs = [resolved]
     for workspace_dir in workspace_dirs:
-        if not workspace_dir.is_dir() or workspace_dir.name == "_surveys":
-            continue
 
         metadata_path = workspace_dir / "candidate.json"
         if metadata_path.is_file():

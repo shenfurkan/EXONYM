@@ -329,14 +329,48 @@ def validate_signal_suffix(signal: Optional[str]) -> Optional[str]:
 
 
 def _candidate_path(repository_root: Path, candidate_id: str) -> Path:
-    """Return the one permitted direct workspace path for a candidate ID.
+    """Return the canonical flat workspace path for a candidate ID.
 
     This enforces the directory ownership invariant: a candidate's
     workspace is *always* ``<repository_root>/candidate/<candidate_id>/``.
     No other location is valid for candidate-owned data.  The path is
     resolved before return to eliminate any symlink indirection.
+
+    New workspaces are provisioned under a lifecycle group (``active/``)
+    via :func:`_candidate_group_path`; this flat-path helper remains for
+    collision checks and legacy compat.
     """
     return repository_root.resolve() / CANDIDATE_DIRECTORY / validate_candidate_id(candidate_id)
+
+
+def _candidate_group_path(repository_root: Path, candidate_id: str, group: str) -> Path:
+    """Return the workspace path nested under a lifecycle-group directory."""
+    return repository_root.resolve() / CANDIDATE_DIRECTORY / group / validate_candidate_id(candidate_id)
+
+
+def _resolve_candidate_path(repository_root: Path, candidate_id: str) -> Path:
+    """Find a candidate workspace at its actual filesystem location.
+
+    Resolution order:
+    1. Flat legacy path ``candidate/<id>/``.
+    2. Lifecycle-group paths ``candidate/<group>/<id>/`` for every
+       recognised group (``active``, ``paused``, …).
+
+    Returns the first match whose ``candidate.json`` exists.  When no
+    match is found, the flat path is returned so that the caller can
+    issue a descriptive ``FileNotFoundError`` pointing at the canonical
+    location.
+    """
+    normalized = validate_candidate_id(candidate_id)
+    repo = repository_root.resolve()
+    flat = repo / CANDIDATE_DIRECTORY / normalized
+    if (flat / METADATA_FILENAME).is_file():
+        return flat
+    for group in LIFECYCLE_STATES:
+        group_path = repo / CANDIDATE_DIRECTORY / group / normalized
+        if (group_path / METADATA_FILENAME).is_file():
+            return group_path
+    return flat
 
 
 def _created_at() -> str:
@@ -761,9 +795,8 @@ def create_candidate(
     path = _candidate_path(repository_root, normalized_id)
     if path.exists():
         raise FileExistsError("candidate workspace already exists: {0}".format(path))
-    # Case-insensitive collision check across all discovered workspaces.
-    # A directory name "foo" and "FOO" would be the same on case-insensitive
-    # filesystems; pre-emptively rejecting prevents cross-platform drift.
+    # Case-insensitive collision check across all discovered workspaces
+    # (both flat legacy and grouped).
     existing = [candidate.candidate_id for candidate in discover_candidates(repository_root)]
     if any(other.casefold() == normalized_id.casefold() for other in existing):
         raise FileExistsError("candidate ID collides with an existing workspace")
@@ -831,7 +864,7 @@ def load_candidate(repository_root: Path, candidate_id: str) -> CandidateWorkspa
     """
     repository_root = repository_root.resolve()
     normalized_id = validate_candidate_id(candidate_id)
-    path = _candidate_path(repository_root, normalized_id)
+    path = _resolve_candidate_path(repository_root, normalized_id)
     metadata_path = path / METADATA_FILENAME
     from .isolation import is_reparse_point
 
@@ -862,23 +895,19 @@ def load_candidate(repository_root: Path, candidate_id: str) -> CandidateWorkspa
 
 
 def discover_candidates(repository_root: Path) -> List[CandidateWorkspace]:
-    """Return direct candidate workspaces ordered by identifier.
+    """Return candidate workspaces from flat and grouped locations.
 
-    Candidate IDs are part of the ownership boundary, so only
-    ``candidate/<candidate-id>/candidate.json`` is a registered workspace.
-    Collection directories beginning with an underscore are reserved for
-    candidate-local cohorts and never represent individual candidates.
+    Candidate workspaces may live directly under ``candidate/`` (legacy
+    flat layout) or under lifecycle-group subdirectories
+    (``candidate/active/``, ``candidate/paused/``, …).  Collection
+    directories beginning with an underscore are reserved for
+    candidate-local cohorts (e.g. ``_surveys/``) and are never
+    individual candidates.
 
-    Discovery walks the ``candidate/`` top-level directory, filters to
-    non-underscore-prefixed subdirectories that contain a ``candidate.json``
-    file, and attempts to ``load_candidate`` on each.  Directories that
-    fail to load (missing metadata, parse errors, reparse points) are
-    silently skipped so that one broken workspace does not prevent
-    enumeration of the rest.
-
-    Returns are sorted lexicographically by candidate ID (case-sensitive
-    on the directory name), providing a stable ordering for CLI listing
-    and batch operations.
+    Discovery walks ``candidate/``, classifies each top-level entry, and
+    collects workspaces from both flat and grouped layouts.  Returns are
+    sorted lexicographically by candidate ID so that CLI listing and
+    batch operations see a stable order.
 
     Parameters
     ----------
@@ -888,25 +917,33 @@ def discover_candidates(repository_root: Path) -> List[CandidateWorkspace]:
     Returns
     -------
     list of CandidateWorkspace
-        Loaded workspaces, ordered by identifier.  Empty list if
-        ``candidate/`` does not exist.
+        Loaded workspaces, ordered by identifier.
     """
     candidate_root = repository_root.resolve() / CANDIDATE_DIRECTORY
     if not candidate_root.is_dir():
         return []
     candidates = []
     for path in sorted(candidate_root.iterdir(), key=lambda item: item.name):
-        # _prefixed directories are reserved for candidate-local cohorts
-        # (e.g. _surveys/) and are never individual candidate workspaces.
         if not path.is_dir() or path.name.startswith("_"):
             continue
-        cid = path.name.lower()
-        if not (path / METADATA_FILENAME).is_file():
-            continue
-        try:
-            candidates.append(load_candidate(repository_root, cid))
-        except (FileNotFoundError, ValueError):
-            continue
+        if (path / METADATA_FILENAME).is_file():
+            # Legacy flat candidate.
+            cid = path.name.lower()
+            try:
+                candidates.append(load_candidate(repository_root, cid))
+            except (FileNotFoundError, ValueError):
+                continue
+        elif path.name in LIFECYCLE_STATES:
+            # Lifecycle-group directory: descend and collect.
+            for child in sorted(path.iterdir(), key=lambda item: item.name):
+                if not child.is_dir() or child.name.startswith("_"):
+                    continue
+                if not (child / METADATA_FILENAME).is_file():
+                    continue
+                try:
+                    candidates.append(load_candidate(repository_root, child.name))
+                except (FileNotFoundError, ValueError):
+                    continue
     return candidates
 
 
@@ -915,19 +952,23 @@ def discover_candidates_with_outcomes(
 ) -> Tuple[List[CandidateWorkspace], List[Dict[str, str]]]:
     """Discover valid workspaces and retain invalid direct entries as outcomes.
 
-    Batch automation must not silently omit a direct workspace merely because
+    Batch automation must not silently omit a workspace merely because
     its metadata is incomplete or invalid. The normal discovery API keeps its
     valid-workspace-only behavior; this companion supplies an operator-visible
     incomplete outcome for batch callers.
+
+    Workspaces are collected from both the legacy flat layout and any
+    lifecycle-group directories (``active/``, ``paused/``, …).
     """
     candidate_root = repository_root.resolve() / CANDIDATE_DIRECTORY
     if not candidate_root.is_dir():
         return [], []
     candidates: List[CandidateWorkspace] = []
     incomplete: List[Dict[str, str]] = []
-    for path in sorted(candidate_root.iterdir(), key=lambda item: item.name):
-        if not path.is_dir() or path.name.startswith("_"):
-            continue
+
+    def _collect(path: Path) -> None:
+        if not (path / METADATA_FILENAME).is_file():
+            return
         try:
             candidate = load_candidate(repository_root, path.name)
         except (OSError, FileNotFoundError, ValueError) as exc:
@@ -940,6 +981,16 @@ def discover_candidates_with_outcomes(
             )
         else:
             candidates.append(candidate)
+
+    for path in sorted(candidate_root.iterdir(), key=lambda item: item.name):
+        if not path.is_dir() or path.name.startswith("_"):
+            continue
+        if (path / METADATA_FILENAME).is_file():
+            _collect(path)
+        elif path.name in LIFECYCLE_STATES:
+            for child in sorted(path.iterdir(), key=lambda item: item.name):
+                if child.is_dir() and not child.name.startswith("_"):
+                    _collect(child)
     return candidates, incomplete
 
 
@@ -971,3 +1022,133 @@ def workspace_layout(candidate: CandidateWorkspace) -> Dict[str, Path]:
     for relative_path in WORKSPACE_DIRECTORIES:
         paths[relative_path] = candidate.path / relative_path
     return paths
+
+
+LIFECYCLE_GROUP_MAP = {
+    "active": "active",
+    "paused": "paused",
+    "stopped": "stopped",
+    "published": "published",
+    "archived": "archived",
+}
+
+
+def move_candidate(workspace: CandidateWorkspace, group: str) -> CandidateWorkspace:
+    """Atomically relocate a workspace to a lifecycle-group directory.
+
+    The rename happens within ``candidate/``, so it is a same-filesystem
+    atomic operation on all major platforms.  The returned
+    ``CandidateWorkspace`` has an updated ``path`` pointing at the new
+    location.
+    """
+    if group not in LIFECYCLE_STATES:
+        raise ValueError("invalid lifecycle group: {0}".format(group))
+    target_dir = _candidate_group_path(
+        workspace.repository_root, workspace.candidate_id, group
+    )
+    if workspace.path.resolve() == target_dir.resolve():
+        return workspace
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    workspace.path.rename(target_dir)
+    return CandidateWorkspace(
+        workspace.repository_root,
+        workspace.candidate_id,
+        target_dir,
+        dict(workspace.metadata),
+    )
+
+
+def organize_candidates(
+    repository_root: Path,
+    *,
+    candidate_id: Optional[str] = None,
+    by: str = "lifecycle",
+    apply: bool = False,
+) -> Dict[str, Any]:
+    """Move candidates into lifecycle-group directories (dry-run when ``apply=False``)."""
+    repository_root = Path(repository_root).resolve()
+    incomplete: List[Dict[str, str]] = []
+    if candidate_id is not None:
+        try:
+            candidates = [load_candidate(repository_root, candidate_id)]
+            scope = "candidate"
+        except (FileNotFoundError, ValueError) as exc:
+            return {
+                "schema_version": 1,
+                "scope": "candidate",
+                "by": by,
+                "apply": apply,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "summary": {"total": 0, "moved": 0, "unchanged": 0, "errors": 1},
+                "incomplete": [{"candidate_id": candidate_id, "reason": str(exc)}],
+                "candidates": [],
+            }
+    else:
+        candidates, incomplete = discover_candidates_with_outcomes(repository_root)
+        scope = "all-candidates"
+
+    total = 0
+    moved = 0
+    unchanged = 0
+    errors = 0
+    items: List[Dict[str, Any]] = []
+
+    for ws in candidates:
+        total += 1
+        lifecycle = ws.metadata.get("lifecycle", {}).get("state")
+        if lifecycle not in LIFECYCLE_GROUP_MAP:
+            errors += 1
+            items.append({"candidate_id": ws.candidate_id, "status": "error",
+                          "reason": "unknown lifecycle state"})
+            continue
+        target_group = LIFECYCLE_GROUP_MAP[lifecycle]
+        current_parent = ws.path.resolve().parent.name
+        if current_parent == target_group:
+            unchanged += 1
+            items.append({"candidate_id": ws.candidate_id, "status": "unchanged",
+                          "from_group": current_parent, "to_group": target_group})
+            continue
+        if apply:
+            try:
+                moved_ws = move_candidate(ws, target_group)
+                moved += 1
+                items.append({
+                    "candidate_id": ws.candidate_id,
+                    "from": ws.path.relative_to(repository_root).as_posix(),
+                    "to": moved_ws.path.relative_to(repository_root).as_posix(),
+                    "from_group": current_parent, "to_group": target_group,
+                    "status": "moved",
+                })
+            except OSError as exc:
+                errors += 1
+                items.append({"candidate_id": ws.candidate_id, "status": "error",
+                              "reason": str(exc)})
+        else:
+            moved += 1
+            target_path = _candidate_group_path(
+                repository_root, ws.candidate_id, target_group
+            )
+            items.append({
+                "candidate_id": ws.candidate_id,
+                "from": ws.path.relative_to(repository_root).as_posix(),
+                "to": target_path.relative_to(repository_root).as_posix(),
+                "from_group": current_parent, "to_group": target_group,
+                "status": "proposed",
+            })
+
+    return {
+        "schema_version": 1,
+        "scope": scope,
+        "by": by,
+        "apply": apply,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "summary": {
+            "total": total,
+            "moved": moved if apply else 0,
+            "unchanged": unchanged,
+            "proposed": moved if not apply else 0,
+            "errors": errors,
+        },
+        "incomplete": incomplete,
+        "candidates": items,
+    }

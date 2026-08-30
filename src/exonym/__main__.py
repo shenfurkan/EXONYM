@@ -222,6 +222,26 @@ def _build_parser() -> argparse.ArgumentParser:
         "--verify", action="store_true", help="Verify classification review evidence hashes only."
     )
 
+    organize_parser = commands.add_parser(
+        "organize",
+        help="Move candidates into lifecycle-group folders (dry-run by default).",
+    )
+    organize_parser.add_argument(
+        "--candidate", dest="candidate_id", help="Limit organization to one candidate."
+    )
+    organize_parser.add_argument(
+        "--by", choices=("lifecycle",), default="lifecycle",
+        help="Grouping key (default: lifecycle).",
+    )
+    organize_mode = organize_parser.add_mutually_exclusive_group()
+    organize_mode.add_argument(
+        "--dry-run", action="store_true", default=True,
+        help="Preview proposed moves without changing the filesystem (default).",
+    )
+    organize_mode.add_argument(
+        "--apply", action="store_true", help="Perform the filesystem moves.",
+    )
+
     survey_parser = commands.add_parser(
         "survey", help="Create and operate a bounded independent-discovery survey."
     )
@@ -1045,6 +1065,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
             )
             return 0
+
+        if args.command == "organize":
+            from .workspace import organize_candidates
+
+            apply = getattr(args, "apply", False)
+            result = organize_candidates(
+                repository_root,
+                candidate_id=args.candidate_id,
+                by=args.by,
+                apply=apply,
+            )
+            _print_json(result)
+            return 0 if result["summary"]["errors"] == 0 else 1
 
         if args.command == "survey":
             from .survey import (

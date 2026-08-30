@@ -776,3 +776,60 @@ def test_cli_science_outputs_exist_on_disk(tmp_path):
         "sed_fit_results.json",
     ):
         assert (outputs_dir / filename).is_file()
+
+
+def test_cli_organize_dry_run_then_apply(tmp_path):
+    """``exonym organize`` proposes moves, then ``--apply`` executes them."""
+    repo = _repo(tmp_path)
+    root = ["--root", str(repo)]
+    assert main(root + ["init", "test-xyz"]) == 0
+    flat_json = repo / "candidate" / "test-xyz" / "candidate.json"
+    assert flat_json.is_file()
+
+    # Dry-run must not alter filesystem.
+    rc = main(root + ["organize", "--candidate", "test-xyz"])
+    assert rc == 0
+    assert flat_json.is_file()
+
+    # Apply the move.
+    rc = main(root + ["organize", "--candidate", "test-xyz", "--apply"])
+    assert rc == 0
+    assert not (repo / "candidate" / "test-xyz").exists()
+    assert (repo / "candidate" / "active" / "test-xyz" / "candidate.json").is_file()
+
+    # Load after move still works.
+    from exonym.workspace import load_candidate
+    ws = load_candidate(repo, "test-xyz")
+    assert ws.metadata["lifecycle"]["state"] == "active"
+    assert ws.path.relative_to(repo).as_posix() == "candidate/active/test-xyz"
+
+
+def test_cli_organize_paused_and_active_separate(tmp_path):
+    """Candidates with different lifecycle states land in different groups."""
+    repo = _repo(tmp_path)
+    root = ["--root", str(repo)]
+    assert main(root + ["init", "alpha-active"]) == 0
+    assert main(root + ["init", "beta-paused"]) == 0
+
+    from exonym.gatekeeper import set_lifecycle_state
+    from exonym.workspace import load_candidate
+
+    set_lifecycle_state(load_candidate(repo, "beta-paused"), "paused", reason="test")
+
+    rc = main(root + ["organize", "--apply"])
+    assert rc == 0
+
+    assert (repo / "candidate" / "active" / "alpha-active" / "candidate.json").is_file()
+    assert (repo / "candidate" / "paused" / "beta-paused" / "candidate.json").is_file()
+    assert not (repo / "candidate" / "alpha-active").exists()
+    assert not (repo / "candidate" / "beta-paused").exists()
+
+
+def test_cli_organize_unchanged_is_noop(tmp_path):
+    """Already-grouped candidates stay where they are."""
+    repo = _repo(tmp_path)
+    root = ["--root", str(repo)]
+    assert main(root + ["init", "steady"]) == 0
+    assert main(root + ["organize", "--apply"]) == 0
+    assert main(root + ["organize", "--apply"]) == 0  # second run is idempotent
+    assert (repo / "candidate" / "active" / "steady" / "candidate.json").is_file()
