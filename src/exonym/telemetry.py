@@ -41,6 +41,13 @@ def _format_elapsed(seconds: float) -> str:
     return "{0:02d}:{1:02d}:{2:02d}".format(hours, minutes, secs)
 
 
+def _progress_label(done: int, total: Optional[int]) -> str:
+    """Render a percentage only when the engine supplied a real total."""
+    if total is None or total <= 0:
+        return " --"
+    return "{0:>3.0f}%".format(100.0 * min(max(0, done), total) / total)
+
+
 def _current_rss_bytes() -> Optional[int]:
     """Best-effort resident set size of the current process in bytes."""
     try:
@@ -148,11 +155,13 @@ class LiveTelemetry:
         self._progress = Progress(
             TextColumn("[bold cyan]{task.description}"),
             BarColumn(bar_width=28),
-            "[progress.percentage]{task.percentage:>3.0f}%",
+            TextColumn("[progress.percentage]{task.fields[progress_label]}"),
             TimeElapsedColumn(),
         )
         self._task_id = self._progress.add_task(
-            self.step_name, total=self.total if self.total else None
+            self.step_name,
+            total=self.total if self.total else None,
+            progress_label=_progress_label(self.done, self.total),
         )
 
         def _render() -> Group:
@@ -224,7 +233,12 @@ class LiveTelemetry:
             total = max(done, int(total))
             self.done, self.total = done, total
             if self._progress is not None and self._task_id is not None:
-                self._progress.update(self._task_id, completed=done, total=total)
+                self._progress.update(
+                    self._task_id,
+                    completed=done,
+                    total=total,
+                    progress_label=_progress_label(done, total),
+                )
             self._redraw()
         except Exception:  # noqa: BLE001
             pass
@@ -232,15 +246,19 @@ class LiveTelemetry:
     def set_step(self, step_name: str, total: Optional[int] = None) -> None:
         """Switch the displayed step label."""
         try:
+            total = int(total) if total is not None else None
+            if self.step_name == step_name and self.total == total:
+                self._redraw()
+                return
             self.step_name = step_name
-            if total is not None:
-                self.total = total
+            self.done, self.total = 0, total
             if self._progress is not None and self._task_id is not None:
                 self._progress.reset(
                     self._task_id,
                     description=step_name,
                     total=total if total else None,
                     completed=0,
+                    progress_label=_progress_label(0, total),
                 )
             self._redraw()
         except Exception:  # noqa: BLE001

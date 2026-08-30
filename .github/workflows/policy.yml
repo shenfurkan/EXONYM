@@ -56,6 +56,20 @@ jobs:
           python-version: "3.9"
       - name: Install debug environment
         run: pip install -e ".[test,security,debug]"
+      # Semgrep 1.136.0 requires Python 3.11, while Exonym remains tested on
+      # its supported Python 3.9 baseline. Install it persistently so the
+      # full debugger can invoke the required `semgrep` executable.
+      - name: Set up Semgrep runtime
+        id: full-semgrep-python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Semgrep runtime
+        run: >-
+          pipx install --python "${{ steps.full-semgrep-python.outputs.python-path }}"
+          --pip-args="setuptools<81" "semgrep==1.136.0"
+      - name: Expose Semgrep executable
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Candidate-free full debugger
         run: exonym --root . debug --full
       - name: Upload full debug report

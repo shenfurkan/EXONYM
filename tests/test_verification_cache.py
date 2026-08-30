@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 
+import exonym.verification_cache as verification_cache
 from exonym.verification_cache import CandidateVerificationCache
 from exonym.workspace import create_candidate
 
@@ -28,6 +29,29 @@ def test_candidate_cache_reuses_unchanged_hash_and_metadata(tmp_path):
         "candidate_json_cache_hits": 1,
         "candidate_json_cache_misses": 0,
     }
+
+
+def test_hash_cache_hit_still_reads_and_rehashes_the_artifact(tmp_path, monkeypatch):
+    workspace = create_candidate(tmp_path, "cache-rehash-contract")
+    artifact = workspace.path / "outputs" / "artifact.json"
+    artifact.write_text('{"result": "synthetic"}\n', encoding="utf-8")
+
+    first = CandidateVerificationCache(tmp_path)
+    expected_digest = first.sha256(artifact)
+    first.save()
+
+    calls = []
+    original_sha256 = verification_cache._sha256
+
+    def recording_sha256(path):
+        calls.append(path)
+        return original_sha256(path)
+
+    monkeypatch.setattr(verification_cache, "_sha256", recording_sha256)
+    second = CandidateVerificationCache(tmp_path)
+    assert second.sha256(artifact) == expected_digest
+    assert calls == [artifact]
+    assert second.statistics()["hash_cache_hits"] == 1
 
 
 def test_changed_candidate_json_drops_stale_digest_before_hashing(tmp_path):

@@ -13,6 +13,9 @@ Target: {{TOI}} / {{TIC}} | Updated: {{TIMESTAMP}}
 This file is updated at each checkpoint. Run `exonym track {{CANDIDATE_ID}}`
 for the machine-parsed gate progress dashboard.
 
+Record workspace checkpoint IDs separately from fit sampler checkpoints. Live
+telemetry reports progress and resources only; it is not convergence evidence.
+
 ## Gate status
 
 - Gate behavior: fail closed

@@ -82,3 +82,54 @@ def test_paper_export_preserves_tiny_posterior_without_inventing_an_upper_limit(
     assert rendered == r"{5 \times 10^{-6}}^{+5 \times 10^{-5}}_{-5 \times 10^{-5}}"
     assert "<" not in rendered
     assert "{0}" not in rendered
+
+
+def test_export_paper_signal_scopes_figures_and_nonfinite_vetting_values(tmp_path):
+    workspace = create_candidate(tmp_path, "paper-synthetic-signal")
+    outputs = workspace.path / "outputs"
+    (outputs / "triceratops_report.02.json").write_text(
+        '{"FPP": NaN, "NFPP": Infinity}\n', encoding="utf-8"
+    )
+    figure = workspace.path / "figures" / "phase_folded_lc.02.png"
+    figure.parent.mkdir(parents=True, exist_ok=True)
+    figure.write_bytes(b"synthetic image")
+
+    macro_path = export_paper(workspace, signal=".02")
+
+    macros = macro_path.read_text(encoding="utf-8")
+    manifest = json.loads(
+        (workspace.path / "paper" / "generated" / "paper_export_manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert r"\renewcommand{\ExonymFpp}{Not available}" in macros
+    assert r"\renewcommand{\ExonymNfpp}{Not available}" in macros
+    assert r"\renewcommand{\ExonymFigureTransit}{../figures/phase_folded_lc.02.png}" in macros
+    assert manifest["signal"] == ".02"
+    assert {source["path"] for source in manifest["sources"]} == {
+        "outputs/triceratops_report.02.json"
+    }
+
+
+def test_export_paper_degrades_when_vetting_report_is_absent(tmp_path):
+    workspace = create_candidate(tmp_path, "paper-synthetic-no-vet")
+
+    macro_path = export_paper(workspace)
+
+    macros = macro_path.read_text(encoding="utf-8")
+    manifest = json.loads(
+        (workspace.path / "paper" / "generated" / "paper_export_manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert r"\renewcommand{\ExonymFpp}{Not available}" in macros
+    assert r"\renewcommand{\ExonymNfpp}{Not available}" in macros
+    assert manifest["sources"] == []
+
+
+def test_latex_text_escapes_all_special_characters_including_backslash_first():
+    from exonym.paper_export import _latex_text
+
+    assert _latex_text(r"\&%$#_{}~^") == (
+        r"\textbackslash{}\&\%\$\#\_\{\}\textasciitilde{}\textasciicircum{}"
+    )

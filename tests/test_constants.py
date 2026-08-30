@@ -1,4 +1,6 @@
 import math
+import re
+from pathlib import Path
 
 import pytest
 
@@ -23,3 +25,12 @@ def test_canonical_conversion_constants_are_self_consistent():
     assert SOLAR_MEAN_DENSITY_G_CM3 == pytest.approx(1.4097798243, rel=1e-10)
     assert PARSEC_M == pytest.approx(3.085677581491367e16, rel=1e-15)
     assert math.isfinite(PARSEC_M)
+
+
+def test_package_version_matches_project_metadata():
+    from exonym import __version__
+
+    project_text = (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    match = re.search(r'^version\s*=\s*"([^"]+)"$', project_text, flags=re.MULTILINE)
+    assert match is not None
+    assert __version__ == match.group(1)

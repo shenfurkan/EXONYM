@@ -1114,7 +1114,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     for e in engine_statuses:
                         inst = "yes" if e.installed else "no"
                         ver = e.version or "-"
-                        print(f"{e.name:<14} {e.capability:<18} {inst:<11} {ver:<12} {e.optional_group:<14}")
+                        print(
+                            f"{e.name[:14]:<14} {e.capability[:18]:<18} {inst:<11} "
+                            f"{ver[:12]:<12} {e.optional_group[:14]:<14}"
+                        )
                 return 0
 
             if args.engine_action == "check":
@@ -1426,17 +1429,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     candidate.candidate_id,
                     repository_root,
                     step_name="TRICERATOPS Monte Carlo Vetting",
-                    total_steps=1,
                     interactive=True,
                 )
             with telemetry_context as telemetry:
                 def progress_callback(step, done=None, total=None):
                     if telemetry is None:
                         return
-                    telemetry.set_step(step, total=total)
-                    telemetry.note_text("The backend does not expose per-draw progress.")
-                    if done is not None and total is not None:
-                        telemetry.report_progress(done, total)
+                    telemetry.set_step(step)
+                    telemetry.note_text(
+                        "TRICERATOPS does not expose completed-draw counts; percentage is unavailable."
+                    )
 
                 output = run_triceratops_simulation(
                     candidate,

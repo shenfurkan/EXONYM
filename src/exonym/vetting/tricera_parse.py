@@ -316,7 +316,9 @@ def _parallel_calc_probs_dispatcher(
             numba_module = None
             previous_threads = None
 
-    _notify_progress(progress_callback, "TRICERATOPS Monte Carlo Vetting", 0, 1)
+    # The optional backend does not expose a completed-draw count. These are
+    # lifecycle milestones, not a synthetic one-step percentage.
+    _notify_progress(progress_callback, "TRICERATOPS Monte Carlo Vetting")
     try:
         target.calc_probs(
             time=observed_input["time_days"],
@@ -334,7 +336,7 @@ def _parallel_calc_probs_dispatcher(
     finally:
         if numba_module is not None and previous_threads is not None:
             numba_module.set_num_threads(previous_threads)
-    _notify_progress(progress_callback, "TRICERATOPS Monte Carlo Vetting", 1, 1)
+    _notify_progress(progress_callback, "TRICERATOPS Monte Carlo completed")
     return execution
 
 

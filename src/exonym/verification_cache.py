@@ -204,6 +204,12 @@ class CandidateVerificationCache:
                     temporary.unlink()
 
     def statistics(self) -> Dict[str, int]:
+        """Return cache effectiveness counters.
+
+        ``hash_cache_hits`` counts files whose current SHA-256 matches a prior
+        cache record. Every file is still opened and rehashed; this counter
+        records prior-digest agreement, not skipped I/O.
+        """
         return {
             "hash_cache_hits": self.hash_hits,
             "hash_cache_misses": self.hash_misses,

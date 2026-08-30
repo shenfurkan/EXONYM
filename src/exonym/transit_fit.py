@@ -204,7 +204,13 @@ _worker_context: Optional[Dict[str, Any]] = None
 
 
 def _init_worker(context: Dict[str, Any]) -> None:
-    """Initialise one multiprocessing worker with the full data context."""
+    """Initialise one multiprocessing worker with the full data context.
+
+    Worker initialization overrides BLAS thread-limit variables to one, even
+    when the parent environment requests more threads. This prevents
+    oversubscription across parallel emcee workers; serial execution preserves
+    a pre-existing parent setting through ``setdefault``.
+    """
     global _worker_context
     _worker_context = context
     # Prevent NumPy MKL/OpenBLAS oversubscription inside workers.
@@ -220,6 +226,9 @@ def _log_prob_worker(theta: np.ndarray) -> float:
 
     The data arrays are read from the module-level ``_worker_context`` global,
     set once per worker by ``_init_worker``.
+
+    Raises ``RuntimeError`` when pool dispatch occurs before `_init_worker`.
+    That is a worker-pool ordering failure, not a scientific result.
     """
     ctx = _worker_context
     if ctx is None:

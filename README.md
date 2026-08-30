@@ -370,6 +370,7 @@ They affect CLI presentation only and never alter an artifact or gate.
 | `verify --candidates` | `--schemas-only`, `--fresh`, `--fix` | Runs the cache-aware candidate integrity audit. `--fresh` rehashes, and `--fix` repairs safe derived drift. |
 | `debug --changed` / `debug --full` | `--since <git-ref>`, `--format {text,json,sarif}` | Runs source-only diagnostics and synthetic regressions. It never traverses `candidate/`; reports and temporary test sandboxes are stored under `log/debug/`, with failed sandboxes retained for investigation. |
 | `export-paper <candidate-id>` | `--signal` | Writes candidate-local TeX macros and a hash-bound manuscript export manifest without making a claim. |
+| `analysis-status <candidate-id>` | None | Records candidate-local analysis-stage coverage and unavailable stages; it is not a scientific result or claim. |
 
 ### Acquisition, search, and screening commands
 
@@ -383,7 +384,7 @@ They affect CLI presentation only and never alter an artifact or gate.
 | `detrend <candidate-id>` | `--method {running-median,wotan,celerite}`, `--window-days` | Writes a hash-bound processed array with detrended flux, propagated errors, sector labels, and raw-input provenance. |
 | `search <candidate-id>` | `--engine {bls,tls}`, `--period-min`, `--period-max`, `--signal`, `--detrending-method` | Writes engine-specific search results and a content-addressed input manifest. The default blind period interval is 0.5 to 15.0 days. TLS requires the `discovery` extra. |
 | `screen <candidate-id>` | `--signal`, `--detrending-method` | Writes `outputs/fixed_ephemeris_screen.json` or a signal-scoped equivalent after fixed-ephemeris primary, odd-even, half-phase, and alternating-event checks. |
-| `vet <candidate-id>` | `--n-draws`, `--signal` | Runs the optional TRICERATOPS wrapper and writes `outputs/triceratops_report.json` with input provenance and a claim-ineligible diagnostic FPP. The default draw count is 2000. |
+| `vet <candidate-id>` | `--n-draws`, `--signal`, `--n-jobs`, `--progress` | Runs the optional TRICERATOPS wrapper and writes `outputs/triceratops_report.json` with input provenance and a claim-ineligible diagnostic FPP. The default draw count is 2000. |
 | `archive <candidate-id>` | `--radius-arcsec` | Writes `outputs/archival_vetting_report.json` from Gaia DR3 and available ExoFOP context. The default search radius is 60 arcsec. |
 | `plot <candidate-id>` | `--signal`, `--corner` | Writes a candidate-data phase-folded light-curve figure, plus an optional posterior corner plot when a matching fit chain exists. It does not create a centroid-evidence figure. |
 

@@ -1,6 +1,12 @@
 """Unit coverage for the sticky telemetry HUD and its plain-text fallback."""
 
-from exonym.telemetry import LiveTelemetry, _current_rss_bytes, _format_bytes, _format_elapsed
+from exonym.telemetry import (
+    LiveTelemetry,
+    _current_rss_bytes,
+    _format_bytes,
+    _format_elapsed,
+    _progress_label,
+)
 
 
 def test_format_helpers():
@@ -8,6 +14,9 @@ def test_format_helpers():
     assert _format_bytes(1536) == "1.50 KB"
     assert _format_elapsed(0) == "00:00:00"
     assert _format_elapsed(3723) == "01:02:03"
+    assert _progress_label(0, None) == " --"
+    assert _progress_label(4, 10) == " 40%"
+    assert _progress_label(12, 10) == "100%"
 
 
 def test_current_rss_helper_returns_int_or_none():
@@ -33,7 +42,7 @@ def test_live_mode_drives_progress_and_never_raises(monkeypatch):
         def __init__(self, *args, **kwargs):
             self.updates = []
 
-        def add_task(self, description, total=None):
+        def add_task(self, description, total=None, **fields):
             return "task"
 
         def update(self, task_id, **kwargs):
@@ -80,3 +89,4 @@ def test_live_mode_drives_progress_and_never_raises(monkeypatch):
 
     assert FakeLive.instances and FakeLive.instances[0].entered is False
     assert any(kwargs.get("completed") == 40 for kwargs in progress_proxy.updates)
+    assert any(kwargs.get("progress_label") == " 40%" for kwargs in progress_proxy.updates)

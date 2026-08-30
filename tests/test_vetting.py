@@ -607,8 +607,8 @@ def test_triceratops_native_thread_dispatcher_falls_back_to_serial_without_numba
     assert execution["parallel_backend"] == "serial"
     assert execution["fallback_reason"].startswith("native thread control unavailable:")
     assert progress == [
-        ("TRICERATOPS Monte Carlo Vetting", 0, 1),
-        ("TRICERATOPS Monte Carlo Vetting", 1, 1),
+        ("TRICERATOPS Monte Carlo Vetting", None, None),
+        ("TRICERATOPS Monte Carlo completed", None, None),
     ]
 
 

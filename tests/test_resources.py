@@ -54,3 +54,19 @@ def test_default_root_uses_cwd_for_an_installed_package(monkeypatch, tmp_path):
 
     # Assert
     assert default_root == workspace.resolve()
+
+
+def test_template_content_parity():
+    """Wheel fallback templates must match authoritative content across line endings."""
+    repository_root = Path(__file__).parents[1]
+    templates_root = repository_root / "templates"
+    resources_root = repository_root / "src" / "exonym" / "_resources" / "templates"
+
+    source_paths = {path.relative_to(templates_root) for path in templates_root.rglob("*") if path.is_file()}
+    resource_paths = {
+        path.relative_to(resources_root) for path in resources_root.rglob("*") if path.is_file()
+    }
+
+    assert resource_paths == source_paths
+    for relative in sorted(source_paths):
+        assert _normalized_text(resources_root / relative) == _normalized_text(templates_root / relative)
