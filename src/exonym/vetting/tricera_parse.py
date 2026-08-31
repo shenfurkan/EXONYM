@@ -533,6 +533,8 @@ def _prepare_observed_transit_input(workspace: Any, signal: Optional[str]) -> Di
     out_of_transit = (np.abs(phase_days) >= duration_days) & (
         np.abs(phase_days) <= local_baseline_limit
     )
+    if int(np.count_nonzero(out_of_transit)) < 3:
+        out_of_transit = np.abs(phase_days) > 0.5 * duration_days
     if int(np.count_nonzero(in_transit)) < transit_bin_count or int(np.count_nonzero(out_of_transit)) < 3:
         raise ValueError("TRICERATOPS requires populated in-transit and out-of-transit phase bins")
     depth_ppm = float((np.median(phase_flux[out_of_transit]) - np.median(phase_flux[in_transit])) * 1e6)
