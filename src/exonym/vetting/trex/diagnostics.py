@@ -12,13 +12,12 @@ References
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 
 from .marginal_likelihoods import (
-    SCENARIO_TP, SCENARIO_PTP, SCENARIO_DTP,
-    N_TARGET_SCENARIOS, _SCENARIO_NAMES, compute_fpp_nfpp,
+    _SCENARIO_NAMES, compute_fpp_nfpp,
 )
 
 FPP_THRESHOLD: float = 0.015

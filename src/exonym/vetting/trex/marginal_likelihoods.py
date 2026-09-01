@@ -18,15 +18,11 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-from .constants import Msun, Rsun, Rearth, G, au, pi, SECONDS_PER_DAY
+from .constants import Msun, Rsun, Rearth
 from ._numerics import _log_mean_exp
 from .funcs import (
-    stellar_relations,
     semi_major_axis_cgs,
-    a_over_Rs,
-    impact_parameter,
     delta_mag_to_flux_ratio,
-    companion_flux_ratio,
 )
 from .priors import (
     sample_rp,

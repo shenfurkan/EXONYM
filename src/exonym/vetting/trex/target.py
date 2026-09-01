@@ -9,14 +9,12 @@ constructor arguments or loaded from candidate-owned files.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from .constants import Msun, Rsun, pi, G, au
-from .funcs import stellar_relations, delta_mag_to_flux_ratio
+from .funcs import stellar_relations
 
 
 class TargetScene:

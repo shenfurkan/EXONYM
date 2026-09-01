@@ -14,7 +14,7 @@ All functions are pure NumPy/SciPy with no side effects.
 from __future__ import annotations
 
 import math
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import numpy as np
 from scipy.interpolate import InterpolatedUnivariateSpline

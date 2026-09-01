@@ -18,13 +18,12 @@ the (log) prior probability density at given parameter values.
 from __future__ import annotations
 
 import math
-from typing import Optional, Tuple
 
 import numpy as np
 from scipy.stats import beta as _beta_dist
 from scipy.stats import powerlaw as _powerlaw_dist
 
-from .constants import Msun, Rsun, au, G, pi
+from .constants import Msun, au, G, pi
 from .funcs import separation_at_contrast
 
 # ---------------------------------------------------------------------------

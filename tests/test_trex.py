@@ -10,15 +10,15 @@ import math
 import numpy as np
 import pytest
 
-from exonym.vetting.trex.constants import Msun, Rsun, Rearth, G, au, pi
+from exonym.vetting.trex.constants import Msun, Rsun, Rearth, G, au
 from exonym.vetting.trex._numerics import _log_mean_exp, _normalize_probabilities
 from exonym.vetting.trex.funcs import (
     stellar_relations, J_Ks_to_Tmag, companion_flux_ratio, dilute_flux,
-    separation_at_contrast, delta_mag_to_flux_ratio, semi_major_axis_cgs,
+    delta_mag_to_flux_ratio, semi_major_axis_cgs,
     a_over_Rs, impact_parameter,
 )
 from exonym.vetting.trex.priors import (
-    sample_rp, sample_inc, sample_ecc, sample_w, sample_q,
+    sample_rp, sample_inc, sample_ecc, sample_q,
     lnprior_bound, lnprior_background,
 )
 from exonym.vetting.trex.target import TargetScene
