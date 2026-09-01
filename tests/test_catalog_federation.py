@@ -1,5 +1,6 @@
 import json
 import io
+from datetime import datetime, timezone
 from urllib.parse import unquote_plus
 
 import pytest
@@ -488,7 +489,11 @@ def test_known_signal_match_schema_rejects_tampered_snapshot_binding(tmp_path):
     )
 
 
-def test_recorded_known_signal_evidence_is_hash_bound_and_requires_review(tmp_path):
+def test_recorded_known_signal_evidence_is_hash_bound_and_requires_review(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "exonym.ephemeris_matching._now",
+        lambda: datetime(2026, 8, 15, tzinfo=timezone.utc),
+    )
     candidate = _candidate(tmp_path)
     _write_candidate_ephemeris(candidate)
     raw_artifact = candidate.path / "literature" / "known-eb-row.txt"

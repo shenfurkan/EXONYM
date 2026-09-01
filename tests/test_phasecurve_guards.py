@@ -81,6 +81,28 @@ def test_circular_phase_summary_never_serializes_one_as_a_phase_fraction():
     assert summary["median"] == 0.0
 
 
+def test_eccentric_harmonic_basis_differs_from_circular_geometry():
+    from exonym.phasecurve import build_design_matrix
+
+    phase_days = np.array([-0.2, 0.1, 0.3])
+    arguments = (
+        np.arange(phase_days.size, dtype=float),
+        phase_days,
+        1.0,
+        0.04,
+        np.ones(phase_days.size, dtype=int),
+    )
+    circular, names, _ = build_design_matrix(*arguments)
+    eccentric, _, _ = build_design_matrix(
+        *arguments,
+        orbital_eccentricity=0.3,
+        argument_periastron_radians=0.4,
+    )
+
+    reflection_index = names.index("reflection_semiamplitude")
+    assert not np.allclose(circular[:, reflection_index], eccentric[:, reflection_index])
+
+
 def test_eccentric_secondary_control_uses_named_reordered_chain_coordinates(tmp_path):
     from exonym.phasecurve import resolve_secondary_eclipse_control
     from exonym.transit_fit import PARAMETER_NAMES_ECCENTRIC

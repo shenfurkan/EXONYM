@@ -110,6 +110,15 @@
         "constant_optimizer_status": { "type": "integer" },
         "constant_optimizer_message": { "type": "string", "minLength": 1 },
         "uncertainty_estimation": { "type": "string", "minLength": 1 },
+        "posterior_sampling": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["constant_model", "keplerian_model"],
+          "properties": {
+            "constant_model": { "$ref": "#/$defs/posterior_sampling" },
+            "keplerian_model": { "$ref": "#/$defs/posterior_sampling" }
+          }
+        },
         "noise_model": { "type": "string", "minLength": 1 },
         "activity_regression": {
           "type": "object",
@@ -148,6 +157,21 @@
     "caveat": { "type": "string", "minLength": 1 }
   },
   "$defs": {
+    "posterior_sampling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sampler", "seed", "walker_count", "burn_in_steps", "production_steps", "retained_draws", "mean_acceptance_fraction", "prior"],
+      "properties": {
+        "sampler": { "const": "emcee-affine-invariant-ensemble" },
+        "seed": { "type": "integer", "minimum": 0 },
+        "walker_count": { "type": "integer", "minimum": 2 },
+        "burn_in_steps": { "type": "integer", "minimum": 1 },
+        "production_steps": { "type": "integer", "minimum": 1 },
+        "retained_draws": { "type": "integer", "minimum": 1 },
+        "mean_acceptance_fraction": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+        "prior": { "type": "string", "minLength": 1 }
+      }
+    },
     "artifact": {
       "type": "object",
       "additionalProperties": false,

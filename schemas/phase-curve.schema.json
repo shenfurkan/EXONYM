@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": ["schema_version", "work_package", "generated_utc", "source", "method", "status", "period_days", "epoch_btjd", "n_points_after_primary_transit_mask", "n_sectors", "n_covariance_clusters", "primary_mask_half_width_hours", "secondary_box_duration_hours", "components", "maximum_absolute_significance_sigma", "interpretation"],
   "properties": {
-    "schema_version": {"enum": ["1.0", "1.1"]},
+    "schema_version": {"enum": ["1.0", "1.1", "1.2"]},
     "work_package": {"const": "PHASE_CURVE"},
     "generated_utc": {"type": "string", "format": "date-time"},
     "source": {"const": "candidate-data"},
@@ -25,6 +25,7 @@
     "secondary_box_phase": {"type": "number", "minimum": 0, "exclusiveMaximum": 1},
     "secondary_box_duration_hours": {"type": "number", "exclusiveMinimum": 0},
     "secondary_box_template_method": {"enum": ["fixed-secondary-box", "posterior-marginalized-eccentric-box"]},
+    "orbital_geometry": {"$ref": "#/$defs/orbital_geometry"},
     "components": {"$ref": "#/$defs/components"},
     "maximum_absolute_significance_sigma": {"type": ["number", "null"], "minimum": 0},
     "input_error_binning_convention": {"type": "string", "minLength": 1},
@@ -37,6 +38,10 @@
     {
       "properties": {"schema_version": {"const": "1.1"}},
       "required": ["scientific_status", "validation_eligible", "validation_reason", "secondary_eclipse_control", "secondary_box_phase", "secondary_box_template_method"]
+    },
+    {
+      "properties": {"schema_version": {"const": "1.2"}},
+      "required": ["scientific_status", "validation_eligible", "validation_reason", "secondary_eclipse_control", "secondary_box_phase", "secondary_box_template_method", "orbital_geometry"]
     }
   ],
   "$defs": {
@@ -61,6 +66,16 @@
         "median": {"type": "number", "exclusiveMinimum": 0},
         "p16": {"type": "number", "exclusiveMinimum": 0},
         "p84": {"type": "number", "exclusiveMinimum": 0}
+      }
+    },
+    "orbital_geometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eccentricity", "argument_periastron_radians", "harmonic_basis"],
+      "properties": {
+        "eccentricity": {"type": "number", "minimum": 0, "exclusiveMaximum": 1},
+        "argument_periastron_radians": {"type": "number"},
+        "harmonic_basis": {"const": "Keplerian true-anomaly conjunction geometry"}
       }
     },
     "circular_transit_fit": {

@@ -493,6 +493,45 @@ def test_run_triceratops_records_incompatible_runtime_without_execution(tmp_path
     assert decision["execution_status"] == "unavailable"
     assert decision["result_status"] == "unresolved"
     assert decision["error"]["code"] == "triceratops-runtime-incompatible"
+
+
+def test_run_triceratops_passes_measured_exposure_to_trex(tmp_path, monkeypatch):
+    from exonym.vetting.tricera_parse import run_triceratops_simulation
+
+    workspace, _ = _vet_workspace_stub(tmp_path, tic="123456789")
+    observed = _observed_input_stub(tmp_path)
+    observed["exposure_days"] = 600.0 / 86400.0
+    captured = {}
+
+    class Result:
+        fpp = 0.1
+        nfpp = 0.01
+
+        @staticmethod
+        def top_scenarios(_count):
+            return []
+
+    def fake_run_trex_vetting(*_args, **kwargs):
+        captured.update(kwargs)
+        return Result()
+
+    monkeypatch.setattr(
+        "exonym.statistical_vetting.require_vetting_readiness",
+        lambda *_args, **_kwargs: tmp_path / "outputs" / "statistical_vetting_evidence.json",
+    )
+    monkeypatch.setattr(
+        "exonym.vetting.tricera_parse._prepare_observed_transit_input",
+        lambda *_args, **_kwargs: observed,
+    )
+    monkeypatch.setattr("exonym.engines.check_engine", lambda _name: (True, "available"))
+    monkeypatch.setattr("exonym.vetting.trex.run_trex_vetting", fake_run_trex_vetting)
+    monkeypatch.setattr("exonym.inputs.load_stellar_parameters", lambda *_args: {})
+
+    run_triceratops_simulation(workspace)
+
+    assert captured["exptime_days"] == pytest.approx(observed["exposure_days"])
+
+
 def test_run_triceratops_requires_readiness_inside_public_function(tmp_path, monkeypatch):
     from exonym.vetting.tricera_parse import run_triceratops_simulation
 
@@ -859,9 +898,12 @@ def test_spacing_correlation_reports_no_dnu_for_a_flat_spectrum():
 def test_numax_clipping_reports_requested_and_effective_bounds(monkeypatch):
     import exonym.asteroseismology as asteroseismology
 
+    time = np.linspace(0.0, 10.0, 100)
+    support = asteroseismology.frequency_support(time)
+
     def fake_power_spectrum(_time, _flux, frequency_min_uhz, frequency_max_uhz):
-        assert frequency_min_uhz == pytest.approx(asteroseismology.PSD_MIN_UHZ)
-        assert frequency_max_uhz == pytest.approx(asteroseismology.PSD_MAX_UHZ)
+        assert frequency_min_uhz == pytest.approx(50.0)
+        assert frequency_max_uhz == pytest.approx(support["nyquist_uhz"])
         frequency = np.linspace(frequency_min_uhz, frequency_max_uhz, 32)
         return frequency, np.ones_like(frequency), np.ones_like(frequency), frequency
 
@@ -874,19 +916,20 @@ def test_numax_clipping_reports_requested_and_effective_bounds(monkeypatch):
 
     with pytest.warns(UserWarning) as warnings:
         result = asteroseismology.estimate_oscillation_envelope(
-            np.linspace(0.0, 10.0, 100),
+            time,
             np.ones(100),
             50.0,
             9000.0,
         )
 
-    assert len(warnings) == 2
+    assert len(warnings) == 1
     assert result["numax_min_requested_uhz"] == pytest.approx(50.0)
     assert result["numax_max_requested_uhz"] == pytest.approx(9000.0)
-    assert result["numax_min_used"] == pytest.approx(asteroseismology.PSD_MIN_UHZ)
-    assert result["numax_max_used"] == pytest.approx(asteroseismology.PSD_MAX_UHZ)
-    assert result["numax_min_clipped"] is True
+    assert result["numax_min_used"] == pytest.approx(50.0)
+    assert result["numax_max_used"] == pytest.approx(support["nyquist_uhz"])
+    assert result["numax_min_clipped"] is False
     assert result["numax_max_clipped"] is True
+    assert result["frequency_support"] == pytest.approx(support)
 
 
 def test_asteroseismic_artifact_retains_numax_bound_provenance(tmp_path, monkeypatch):
@@ -932,6 +975,13 @@ def test_asteroseismic_artifact_retains_numax_bound_provenance(tmp_path, monkeyp
         "numax_max_used": 2000.0,
         "numax_min_clipped": True,
         "numax_max_clipped": True,
+        "frequency_support": {
+            "baseline_days": 10.0,
+            "median_cadence_seconds": 120.0,
+            "rayleigh_uhz": 1.0,
+            "nyquist_uhz": 2000.0,
+            "duty_cycle": 0.5,
+        },
     }
     unavailable_pysyd = {
         "status": "unavailable",
@@ -972,10 +1022,20 @@ def test_asteroseismic_artifact_retains_numax_bound_provenance(tmp_path, monkeyp
     assert payload["search_range_uhz"] == [100.0, 2000.0]
     assert payload["requested_search_range_uhz"] == [50.0, 9000.0]
     assert payload["numax_search_bounds"] == {
-        "supported_range_uhz": [100.0, 2000.0],
+        "supported_range_uhz": [1.0, 2000.0],
         "lower_clipped": True,
         "upper_clipped": True,
     }
+
+
+def test_frequency_support_rejects_an_unsupported_nyquist_range():
+    from exonym.asteroseismology import compute_power_spectrum, frequency_support
+
+    time = np.arange(100, dtype=float) * (30.0 / 1440.0)
+    support = frequency_support(time)
+
+    with pytest.raises(ValueError, match="cadence-supported"):
+        compute_power_spectrum(time, np.ones_like(time), 1.0, support["nyquist_uhz"] * 1.1)
 
 
 def test_seismic_scaling_relations():
@@ -1000,7 +1060,7 @@ def test_seismic_mass_radius_falls_back_to_priors():
     assert "priors" in result["method"]
 
 
-def test_seismic_sanity_check_rejects_unphysical_scaling():
+def test_seismic_sanity_check_requires_physical_values_or_catalog_consistency():
     from exonym.asteroseismology import seismic_sanity_check
 
     implausible = {"mass_solar": 25.99, "radius_solar": 6.68}
@@ -1008,7 +1068,6 @@ def test_seismic_sanity_check_rejects_unphysical_scaling():
         implausible, radius_prior_solar=2.15, prior_is_catalog=True
     )
     assert verdict["plausible"] is False
-    assert any("mass" in reason for reason in verdict["reasons"])
     assert any("prior" in reason for reason in verdict["reasons"])
 
     plausible = {"mass_solar": 1.9, "radius_solar": 2.1}
@@ -1017,8 +1076,11 @@ def test_seismic_sanity_check_rejects_unphysical_scaling():
     ]
 
     synthetic_source = seismic_sanity_check(implausible)
-    assert synthetic_source["plausible"] is False
-    assert synthetic_source["reasons"] == ["mass outside plausible range"]
+    assert synthetic_source["plausible"] is True
+
+    invalid = seismic_sanity_check({"mass_solar": float("nan"), "radius_solar": -1.0})
+    assert invalid["plausible"] is False
+    assert invalid["reasons"] == ["mass is not positive and finite", "radius is not positive and finite"]
 
 
 def test_asteroseismic_optional_adapters_write_hashed_candidate_local_manifests(tmp_path, monkeypatch):
@@ -1169,8 +1231,8 @@ def test_prf_localization_requires_a_competing_source_for_target_dominance(tmp_p
     report = json.loads(output.read_text(encoding="utf-8"))
 
     # Assert
-    assert report["source"] == "not-run-no-candidate-tpf"
-    assert report["summary"]["conclusion"] == "inconclusive_no_candidate_tpf"
+    assert report["source"] == "not-run-mission-calibrated-prf-required"
+    assert report["summary"]["conclusion"] == "inconclusive_mission_calibrated_prf_required"
     assert report["summary"]["sectors_with_competing_sources_modeled"] == 0
     assert report["sector_results"] == []
 
@@ -1210,7 +1272,7 @@ def test_prf_localization_ignores_missing_competitor_ratio_in_summary(tmp_path):
         output = run_prf_localization(workspace)
 
     report = json.loads(output.read_text(encoding="utf-8"))
-    assert report["summary"]["sectors_with_competing_sources_modeled"] == 1
+    assert report["summary"]["sectors_with_competing_sources_modeled"] == 0
     assert report["summary"]["median_target_to_other_difference_ratio"] is None
 
 
@@ -1231,9 +1293,7 @@ def test_prf_localization_retains_skipped_tpf_diagnostics(tmp_path):
         output = run_prf_localization(workspace)
     report = json.loads(output.read_text(encoding="utf-8"))
 
-    assert report["skipped_tpf_products"] == [
-        {"path": "data/raw/s0031_tp.fits", "reason": "missing-quality-column"}
-    ]
+    assert report["skipped_tpf_products"] == []
 
 
 def test_tpf_loader_skips_unverified_sector_and_uses_canonical_sector_name(tmp_path):
@@ -1556,6 +1616,21 @@ def test_sed_fit_requires_candidate_owned_photometry(tmp_path, monkeypatch):
     monkeypatch.setattr("exonym.sed.load_photometry", lambda _: None)
 
     with pytest.raises(RuntimeError, match="candidate-owned broadband photometry"):
+        run_sed_fit(workspace)
+    assert not (workspace.path / "outputs" / "sed_fit_results.json").exists()
+
+
+def test_sed_fit_fails_closed_without_a_response_integrated_grid(tmp_path, monkeypatch):
+    from exonym.sed import run_sed_fit
+    from exonym.workspace import create_candidate
+
+    workspace = create_candidate(tmp_path, "sed-grid-required")
+    monkeypatch.setattr(
+        "exonym.sed.load_photometry",
+        lambda _: {"2MASS": {"J": {"mag": 10.0, "error": 0.02}}},
+    )
+
+    with pytest.raises(RuntimeError, match="response-integrated"):
         run_sed_fit(workspace)
     assert not (workspace.path / "outputs" / "sed_fit_results.json").exists()
 
@@ -2544,6 +2619,7 @@ def test_ttv_linear_ephemeris_has_small_residuals():
         and item["resonance_j"] == 2
     )
     assert inner_context["super_period_days"] == pytest.approx(8.75, rel=0.01)
+    assert any(item["resonance_j"] == 5 for item in contexts)
     exact_context = next(
         item
         for item in contexts
@@ -2685,6 +2761,9 @@ def test_ttv_rejects_low_snr_epochs_and_persists_epoch_diagnostics(tmp_path, mon
         assert record["sigma_t0_days"] is None
     assert timing["n_transits_fit"] >= 2
     assert timing["n_rejected_epochs"] == len(timing["rejected_epochs"])
+    accepted = [record for record in timing["per_epoch"] if not record["excluded_no_detection"]]
+    assert all(record["local_duration_days"] is not None for record in accepted)
+    assert timing["epoch_acceptance"]["local_duration_method"].startswith("bounded profile")
     assert "uncertainty_clipped_epochs" in timing
     assert "search_boundary_epochs" in timing
     json.dumps(payload, allow_nan=False)

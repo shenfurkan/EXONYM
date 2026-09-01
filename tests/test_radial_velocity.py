@@ -135,6 +135,10 @@ def test_rv_keplerian_fit_recovers_synthetic_amplitude_and_records_provenance(tm
     assert eccentricity_parameterization["maximum_eccentricity_exclusive"] == 0.95
     assert "numerical support restriction" in eccentricity_parameterization["scientific_limitation"]
     assert report["diagnostics"]["activity_regression"]["status"] == "not-provided"
+    assert "Hessian" not in report["diagnostics"]["uncertainty_estimation"]
+    sampling = report["diagnostics"]["posterior_sampling"]
+    assert sampling["keplerian_model"]["sampler"] == "emcee-affine-invariant-ensemble"
+    assert sampling["keplerian_model"]["retained_draws"] > 0
     assert len(report["models"]["keplerian"]["parameters"]["instrument_jitters"]) == 1
 
     manifests = list((workspace.path / "runs" / "rv-keplerian").glob("*/engine-run.json"))

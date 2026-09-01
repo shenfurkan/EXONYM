@@ -69,6 +69,7 @@ class ArchivalVettingService:
     MIRROR_GAIA_TAP_URL = "https://gaia.gec.asiaa.sinica.edu.tw/tap-server/tap/sync"
     TARGET_PRESENCE_ARCSEC = 2.0
     EXOFOP_TARGET_EPOCH_JYEAR = 2000.0
+    MAX_JSON_RESPONSE_BYTES = 16 * 1024 * 1024
 
     def __init__(
         self,
@@ -212,7 +213,10 @@ class ArchivalVettingService:
                 )
                 with urllib.request.urlopen(req, timeout=self.timeout) as response:
                     if response.status == 200:
-                        raw_data = response.read().decode("utf-8", errors="replace")
+                        raw_bytes = response.read(self.MAX_JSON_RESPONSE_BYTES + 1)
+                        if len(raw_bytes) > self.MAX_JSON_RESPONSE_BYTES:
+                            return None
+                        raw_data = raw_bytes.decode("utf-8", errors="replace")
                         try:
                             return json.loads(raw_data)
                         except json.JSONDecodeError:

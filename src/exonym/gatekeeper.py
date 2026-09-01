@@ -278,36 +278,7 @@ def _raw_product_provenance_error(
         return "product is not a raw FITS/FZ file"
     sidecar = product_path.with_name(product_path.stem + ".provenance.json")
     if not sidecar.is_file():
-        # Graceful fallback: auto-generate a minimal provenance sidecar from
-        # the product bytes. The record is flagged ``auto_generated: true`` so
-        # downstream consumers can distinguish it from a manually curated
-        # provenance record.  A warning is emitted to the runtime log.
-        try:
-            product_hash = _sha256_file(resolved_product)
-        except OSError as exc:
-            return "cannot hash product for auto-provenance: {0}".format(exc)
-        auto_record = {
-            "schema_version": 2,
-            "sha256": product_hash,
-            "auto_generated": True,
-            "auto_generated_reason": "sidecar missing; hash computed from product bytes",
-            "generated_at": _now(),
-        }
-        try:
-            sidecar.write_text(
-                json.dumps(auto_record, indent=2, sort_keys=True, allow_nan=False) + "\n",
-                encoding="utf-8",
-            )
-        except OSError as exc:
-            return "cannot write auto-generated sidecar: {0}".format(exc)
-        import logging
-
-        logging.getLogger("exonym.gatekeeper").warning(
-            "auto-generated provenance for %s (sha256=%s)",
-            product_path.name,
-            product_hash,
-        )
-        return None
+        return "missing provenance sidecar"
     if _has_workspace_reparse_point(workspace_root, sidecar):
         return "sidecar path crosses a symlink or reparse point"
     try:

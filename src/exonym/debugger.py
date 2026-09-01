@@ -12,6 +12,7 @@ import argparse
 import ast
 import json
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -36,6 +37,12 @@ _SCIENTIFIC_MODULES = {
     "sed.py",
     "transit_fit.py",
     "ttv.py",
+}
+_NESTED_TEST_MAP = {
+    "src/exonym/vetting/tricera_parse.py": (
+        "tests/test_signal_suffixes.py",
+        "tests/test_vetting.py",
+    ),
 }
 _SELF_CHECK_EXPRESSION = "not test_self_check_of_actual_repository"
 _RUFF_BASELINE_PATH = Path("policy") / "debug-baseline.json"
@@ -712,6 +719,13 @@ def _select_tests(root: Path, mode: str, changed_paths: Sequence[Path]) -> List[
                 candidate = "tests/test_{0}".format(path.name)
                 if (root / candidate).is_file():
                     tests.add(candidate)
+                else:
+                    nested_tests = _NESTED_TEST_MAP.get(path.as_posix())
+                    if nested_tests is not None:
+                        tests.update(nested_tests)
+                    else:
+                        package_test = "tests/test_{0}.py".format(path.parent.name)
+                        tests.add(package_test if (root / package_test).is_file() else "tests")
             if path.name in _SCIENTIFIC_MODULES:
                 tests.update(
                     {
@@ -763,16 +777,24 @@ def _run_tool(
             output_path=_relative(tools_dir.parent, output_path),
             detail="command is not installed",
         )
+    popen_kwargs = {
+        "cwd": str(root),
+        "env": environment,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.STDOUT,
+        "text": True,
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
     try:
-        completed = subprocess.run(
-            command,
-            cwd=str(root),
-            env=environment,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=False,
-        )
+        process = subprocess.Popen(command, **popen_kwargs)
+        stdout, _ = process.communicate()
+    except KeyboardInterrupt:
+        if "process" in locals():
+            _terminate_process_tree(process)
+        raise
     except OSError as exc:
         output_path.write_text("{0}: {1}\n".format(type(exc).__name__, exc), encoding="utf-8")
         return ToolResult(
@@ -783,14 +805,34 @@ def _run_tool(
             output_path=_relative(tools_dir.parent, output_path),
             detail="could not start command",
         )
-    output_path.write_text(completed.stdout or "", encoding="utf-8")
+    output_path.write_text(stdout or "", encoding="utf-8")
     return ToolResult(
         name=name,
-        status="passed" if completed.returncode == 0 else "failed",
+        status="passed" if process.returncode == 0 else "failed",
         command=command,
-        returncode=completed.returncode,
+        returncode=process.returncode,
         output_path=_relative(tools_dir.parent, output_path),
     )
+
+
+def _terminate_process_tree(process: subprocess.Popen) -> None:
+    """Terminate a debugger tool and descendants after an interruption."""
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        else:
+            os.killpg(process.pid, signal.SIGTERM)
+        process.communicate(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        process.kill()
+        process.communicate()
 
 
 def _run_static_contract_scan(root: Path, paths: Sequence[Path], tools_dir: Path) -> ToolResult:

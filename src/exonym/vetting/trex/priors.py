@@ -133,13 +133,14 @@ def sample_ecc(x: np.ndarray, planet: bool, P_orb: float) -> np.ndarray:
     Binaries, P > 10 d: Moe & Di Stefano (2017) power-law nu=0.6.
     """
     x = np.asarray(x, dtype=float)
-    size = len(x)
+    if not np.all(np.isfinite(x)) or np.any((x < 0.0) | (x >= 1.0)):
+        raise ValueError("eccentricity draws must be finite values in [0, 1)")
     if planet:
-        return _beta_dist.rvs(0.867, 3.030, size=size)
+        return _beta_dist.ppf(x, 0.867, 3.030)
     elif P_orb <= 10.0:
-        return _powerlaw_dist.rvs(0.2, size=size)
+        return _powerlaw_dist.ppf(x, 0.2)
     else:
-        return _powerlaw_dist.rvs(0.6, size=size)
+        return _powerlaw_dist.ppf(x, 0.6)
 
 
 # ---------------------------------------------------------------------------

@@ -187,11 +187,15 @@ def test_child_process_interrupt_writes_reports_before_reraising(
         lambda *_args: [("synthetic", ["synthetic"])],
     )
     monkeypatch.setattr(debugger.shutil, "which", lambda _command: "synthetic")
+    terminated = []
     monkeypatch.setattr(
         debugger.subprocess,
-        "run",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+        "Popen",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            communicate=lambda: (_ for _ in ()).throw(KeyboardInterrupt()),
+        ),
     )
+    monkeypatch.setattr(debugger, "_terminate_process_tree", lambda process: terminated.append(process))
 
     with pytest.raises(KeyboardInterrupt):
         debugger.run_debug(tmp_path, mode="changed")
@@ -202,6 +206,7 @@ def test_child_process_interrupt_writes_reports_before_reraising(
     assert payload["tmp_preserved"] is True
     assert (run_dir / "tools" / "debugger-interrupted.txt").is_file()
     assert not list((run_dir / "report").glob("*.tmp"))
+    assert len(terminated) == 1
 
 
 def test_sarif_contains_static_source_locations(tmp_path: Path, monkeypatch) -> None:
@@ -383,6 +388,21 @@ def test_changed_test_file_is_its_own_focused_regression(tmp_path: Path) -> None
     assert selected == ["tests/test_synthetic.py"]
 
 
+def test_changed_vetting_parser_selects_its_shared_regressions(tmp_path: Path) -> None:
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    for name in ("test_signal_suffixes.py", "test_vetting.py"):
+        tests_dir.joinpath(name).write_text("", encoding="utf-8")
+
+    selected = debugger._select_tests(
+        tmp_path,
+        "changed",
+        [Path("src/exonym/vetting/tricera_parse.py")],
+    )
+
+    assert selected == ["tests/test_signal_suffixes.py", "tests/test_vetting.py"]
+
+
 def test_tool_start_oserror_is_a_blocking_debugger_failure(tmp_path: Path, monkeypatch) -> None:
     """A discovered executable that cannot start must fail the debugger exit code."""
     tools_dir = tmp_path / "log" / "debug" / "run" / "tools"
@@ -390,7 +410,7 @@ def test_tool_start_oserror_is_a_blocking_debugger_failure(tmp_path: Path, monke
     monkeypatch.setattr(debugger.shutil, "which", lambda _command: "synthetic")
     monkeypatch.setattr(
         debugger.subprocess,
-        "run",
+        "Popen",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("synthetic startup failure")),
     )
 

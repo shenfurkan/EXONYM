@@ -149,8 +149,9 @@ def _eval_scenario(
         q = sample_q(x_q, M_host)
         M_EB = q * M_host
         M_total = (M_host + M_EB) * Msun
-        R_EB = q * R_host
-        # Flux ratio from radii
+        # Use the empirical Torres/CDWRF relation mirrored from TRICERATOPS,
+        # rather than assuming stellar radius scales linearly with mass ratio.
+        R_EB, _ = stellar_relations(M_EB)
         EB_fluxratio_arr = R_EB ** 2 / (R_host ** 2 + R_EB ** 2)
     else:
         M_total = M_host * Msun
@@ -159,10 +160,12 @@ def _eval_scenario(
 
     a_cm = semi_major_axis_cgs(eff_period, M_total)
     a_rs = a_cm / (R_host * Rsun)
-    rp_rs = R_p * Rearth / (R_host * Rsun)
+    occultor_rs = (
+        R_EB / R_host if is_EB and R_EB is not None else R_p * Rearth / (R_host * Rsun)
+    )
 
     b = np.abs(a_rs * np.cos(np.radians(inc)))
-    transit_mask = _geometric_transit_mask(b, rp_rs, ecc, w, a_rs)
+    transit_mask = _geometric_transit_mask(b, occultor_rs, ecc, w, a_rs)
 
     lnL = np.full(n_draws, -np.inf)
 

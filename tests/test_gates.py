@@ -239,9 +239,8 @@ def test_acquisition_gate_requires_provenance_sidecars(tmp_path):
     raw = candidate.path / "data" / "raw"
     raw.mkdir(parents=True, exist_ok=True)
     (raw / "lc.fits").write_bytes(b"fits")
-    # Auto-provenance now generates a minimal sidecar when none exists,
-    # so the gate should pass without a manually written sidecar.
-    assert not gate_errors(candidate), "gate must pass: auto-provenance generates missing sidecar"
+    assert any("missing provenance sidecar" in error for error in gate_errors(candidate))
+    assert not (raw / "lc.provenance.json").exists()
 
     (raw / "lc.provenance.json").write_text(
         json.dumps(

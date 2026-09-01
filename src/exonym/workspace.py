@@ -968,6 +968,13 @@ def discover_candidates_with_outcomes(
 
     def _collect(path: Path) -> None:
         if not (path / METADATA_FILENAME).is_file():
+            incomplete.append(
+                {
+                    "candidate_id": path.name,
+                    "status": "incomplete",
+                    "reason": "Candidate workspace has no candidate metadata.",
+                }
+            )
             return
         try:
             candidate = load_candidate(repository_root, path.name)
@@ -985,12 +992,12 @@ def discover_candidates_with_outcomes(
     for path in sorted(candidate_root.iterdir(), key=lambda item: item.name):
         if not path.is_dir() or path.name.startswith("_"):
             continue
-        if (path / METADATA_FILENAME).is_file():
-            _collect(path)
-        elif path.name in LIFECYCLE_STATES:
+        if path.name in LIFECYCLE_STATES:
             for child in sorted(path.iterdir(), key=lambda item: item.name):
                 if child.is_dir() and not child.name.startswith("_"):
                     _collect(child)
+        else:
+            _collect(path)
     return candidates, incomplete
 
 

@@ -75,6 +75,13 @@ def test_runner_applies_evidence_backed_dnu_correction_and_records_input_provena
         "numax_max_used": 1600.0,
         "numax_min_clipped": False,
         "numax_max_clipped": False,
+        "frequency_support": {
+            "baseline_days": 10.0,
+            "median_cadence_seconds": 120.0,
+            "rayleigh_uhz": 1.0,
+            "nyquist_uhz": 2000.0,
+            "duty_cycle": 0.5,
+        },
     }
     unavailable_pysyd = {
         "status": "unavailable",

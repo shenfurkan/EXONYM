@@ -650,6 +650,7 @@ def run_triceratops_simulation(
                 n_draws=n_draws,
                 random_seed=random_seed,
                 progress_callback=progress_callback,
+                exptime_days=observed_input["exposure_days"],
             )
 
             fpp = result.fpp if result.fpp is not None else float("nan")

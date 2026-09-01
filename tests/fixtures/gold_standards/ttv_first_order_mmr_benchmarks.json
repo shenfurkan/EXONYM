@@ -28,6 +28,20 @@
       "expected_super_period_days": 505.0
     },
     {
+      "name": "near-4-to-3",
+      "period_inner_days": 10.0,
+      "period_outer_days": 13.466666666666667,
+      "j_resonance": 4,
+      "expected_super_period_days": 336.6666666666667
+    },
+    {
+      "name": "near-5-to-4",
+      "period_inner_days": 10.0,
+      "period_outer_days": 12.625,
+      "j_resonance": 5,
+      "expected_super_period_days": 252.5
+    },
+    {
       "name": "exact-3-to-2",
       "period_inner_days": 10.0,
       "period_outer_days": 15.0,

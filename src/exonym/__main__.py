@@ -1137,7 +1137,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             }
                         )
                 _print_json({"outcomes": outcomes, "claim_eligible": False})
-                return 0
+                return 1 if any(
+                    outcome.get("status") in {"failed", "incomplete"}
+                    for outcome in outcomes
+                ) else 0
             survey = load_survey(repository_root, args.survey_id)
             if args.survey_action == "add-target":
                 candidate = load_survey_candidate(repository_root, args.candidate_id)
@@ -1300,7 +1303,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         "claim_eligible": False,
                     }
                 )
-                return 0
+                return 1 if any(
+                    outcome.get("status") in {"failed", "incomplete"}
+                    for cycle in journal["cycles"]
+                    for outcome in cycle["auto_vet"]
+                ) else 0
 
         if args.command == "engine":
             import dataclasses

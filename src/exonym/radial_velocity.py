@@ -39,6 +39,8 @@ KEPLER_SOLVER_TOLERANCE_RAD = 1e-12
 KEPLER_SOLVER_MAX_ITERATIONS = 64
 MAXIMUM_FIT_ECCENTRICITY = 0.95
 RV_MODEL_CONFIGURATION = "instrument-jitter-linear-trend-optional-activity-v1"
+POSTERIOR_BURN_IN_STEPS = 200
+POSTERIOR_PRODUCTION_STEPS = 400
 
 
 def _sha256(path: Path) -> str:
@@ -413,16 +415,69 @@ def _negative_log_likelihood(residual: np.ndarray, effective_uncertainty: np.nda
     return float(value) if math.isfinite(float(value)) else math.inf
 
 
-def _inverse_hessian_covariance(result: Any, parameter_count: int) -> np.ndarray:
-    """Extract a finite local inverse-Hessian covariance approximation."""
-    inverse_hessian = getattr(result, "hess_inv", None)
-    if inverse_hessian is None:
-        return np.full((parameter_count, parameter_count), np.nan)
-    dense = inverse_hessian.todense() if hasattr(inverse_hessian, "todense") else inverse_hessian
-    covariance = np.asarray(dense, dtype=float)
-    if covariance.shape != (parameter_count, parameter_count) or not np.all(np.isfinite(covariance)):
-        return np.full((parameter_count, parameter_count), np.nan)
-    return 0.5 * (covariance + covariance.T)
+def _sample_posterior(
+    objective: Any,
+    start: np.ndarray,
+    bounds: Sequence[Tuple[Optional[float], Optional[float]]],
+    seed: int,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Draw a bounded ensemble posterior without using optimizer curvature.
+
+    The likelihood is the same normalized independent-Gaussian likelihood used
+    for model comparison and bounds implement explicit uniform support.  An
+    unavailable sampler is an execution failure rather than a Hessian fallback.
+    """
+    try:
+        import emcee
+    except ImportError as exc:
+        raise RuntimeError("RV posterior sampling requires emcee") from exc
+
+    start = np.asarray(start, dtype=float)
+    dimension = start.size
+    walker_count = max(2 * dimension + 2, 24)
+    rng = np.random.default_rng(seed)
+    scales = np.maximum(np.abs(start) * 0.02, 0.02)
+    positions = start + rng.normal(scale=scales, size=(walker_count, dimension))
+    for index, (lower, upper) in enumerate(bounds):
+        if lower is not None:
+            positions[:, index] = np.maximum(positions[:, index], float(lower) + 1e-10)
+        if upper is not None:
+            positions[:, index] = np.minimum(positions[:, index], float(upper) - 1e-10)
+
+    def log_probability(theta: np.ndarray) -> float:
+        if not np.all(np.isfinite(theta)):
+            return -math.inf
+        for value, (lower, upper) in zip(theta, bounds):
+            if (lower is not None and value < lower) or (upper is not None and value > upper):
+                return -math.inf
+        value = float(objective(theta))
+        return -value if math.isfinite(value) else -math.inf
+
+    sampler = emcee.EnsembleSampler(walker_count, dimension, log_probability)
+    random_state = np.random.get_state()
+    np.random.seed(seed)
+    try:
+        state = sampler.run_mcmc(positions, POSTERIOR_BURN_IN_STEPS, progress=False)
+        sampler.reset()
+        sampler.run_mcmc(state, POSTERIOR_PRODUCTION_STEPS, progress=False)
+    finally:
+        np.random.set_state(random_state)
+    samples = np.asarray(sampler.get_chain(flat=True), dtype=float)
+    if samples.ndim != 2 or samples.shape[1] != dimension or not np.all(np.isfinite(samples)):
+        raise RuntimeError("RV posterior sampler returned invalid draws")
+    acceptance = float(np.mean(sampler.acceptance_fraction))
+    if not math.isfinite(acceptance) or acceptance <= 0.0:
+        raise RuntimeError("RV posterior sampler accepted no draws")
+    return samples, {
+        "sampler": "emcee-affine-invariant-ensemble",
+        "seed": int(seed),
+        "walker_count": walker_count,
+        "burn_in_steps": POSTERIOR_BURN_IN_STEPS,
+        "production_steps": POSTERIOR_PRODUCTION_STEPS,
+        "retained_draws": int(samples.shape[0]),
+        "mean_acceptance_fraction": acceptance,
+        "prior": "uniform within the explicit optimizer support bounds",
+    }
 
 
 def _eccentricity_components(theta: np.ndarray, component_start: int) -> Tuple[float, float, float, float]:
@@ -470,7 +525,7 @@ def fit_radial_velocity(
 
     Returns:
         Path: Candidate-local ``outputs/rv_keplerian_fit.json`` with input
-        hashes, formal local covariance summaries, model statistics, and a run
+        hashes, posterior uncertainty summaries, model statistics, and a run
         manifest.
 
     Raises:
@@ -481,9 +536,9 @@ def fit_radial_velocity(
             cannot produce a valid fit.
 
     Note:
-        The fit uses a local inverse-Hessian uncertainty approximation and
-        independent residual likelihood.  It does not model correlated noise,
-        additional companions, or establish a validation probability.
+        The fit uses bounded ensemble posterior sampling with an independent
+        residual likelihood. It does not model correlated noise, additional
+        companions, or establish a validation probability.
     """
     from scipy.optimize import minimize
 
@@ -658,31 +713,53 @@ def fit_radial_velocity(
         velocity - fitted_prediction, fitted_effective_uncertainty, keplerian_parameter_count
     )
     degrees_of_freedom = int(time.size - keplerian_parameter_count)
-    covariance = _inverse_hessian_covariance(result, keplerian_parameter_count)
-    constant_covariance = _inverse_hessian_covariance(constant_result, constant_parameter_count)
-    standard_errors = np.sqrt(np.clip(np.diag(covariance), 0.0, np.inf))
-    constant_standard_errors = np.sqrt(np.clip(np.diag(constant_covariance), 0.0, np.inf))
+    seed = int(input_hash[:16], 16) % (2**32)
+    constant_samples, constant_sampling = _sample_posterior(
+        constant_negative_log_likelihood,
+        constant_result.x,
+        common_bounds,
+        seed,
+    )
+    posterior_samples, posterior_sampling = _sample_posterior(
+        keplerian_negative_log_likelihood,
+        result.x,
+        keplerian_bounds,
+        (seed + 1) % (2**32),
+    )
+    standard_errors = np.std(posterior_samples, axis=0, ddof=1)
+    constant_standard_errors = np.std(constant_samples, axis=0, ddof=1)
     amplitude_index = nuisance_parameter_count
     amplitude = math.exp(float(result.x[amplitude_index]))
-    amplitude_uncertainty = _finite_uncertainty(amplitude * standard_errors[amplitude_index])
+    amplitude_uncertainty = _finite_uncertainty(
+        float(np.std(np.exp(posterior_samples[:, amplitude_index]), ddof=1))
+    )
     eccentricity, argument, first_component, second_component = _eccentricity_components(
         result.x, amplitude_index + 2
     )
-    norm_squared = first_component * first_component + second_component * second_component
-    eccentricity_gradient = np.zeros(keplerian_parameter_count)
-    eccentricity_gradient[amplitude_index + 2] = 1.9 * first_component / (1.0 + norm_squared) ** 2
-    eccentricity_gradient[amplitude_index + 3] = 1.9 * second_component / (1.0 + norm_squared) ** 2
-    eccentricity_uncertainty = _finite_uncertainty(
-        math.sqrt(max(float(eccentricity_gradient @ covariance @ eccentricity_gradient), 0.0))
+    posterior_eccentricity = np.asarray(
+        [
+            _eccentricity_components(sample, amplitude_index + 2)[0]
+            for sample in posterior_samples
+        ],
+        dtype=float,
     )
-    argument_uncertainty: Optional[float] = None
-    if norm_squared > 1e-12:
-        argument_gradient = np.zeros(keplerian_parameter_count)
-        argument_gradient[amplitude_index + 2] = -second_component / norm_squared
-        argument_gradient[amplitude_index + 3] = first_component / norm_squared
-        argument_uncertainty = _finite_uncertainty(
-            math.degrees(math.sqrt(max(float(argument_gradient @ covariance @ argument_gradient), 0.0)))
-        )
+    posterior_argument = np.asarray(
+        [
+            _eccentricity_components(sample, amplitude_index + 2)[1]
+            for sample in posterior_samples
+        ],
+        dtype=float,
+    )
+    eccentricity_uncertainty = _finite_uncertainty(float(np.std(posterior_eccentricity, ddof=1)))
+    argument_resultant = math.hypot(
+        float(np.mean(np.cos(posterior_argument))),
+        float(np.mean(np.sin(posterior_argument))),
+    )
+    argument_uncertainty = (
+        _finite_uncertainty(math.degrees(math.sqrt(-2.0 * math.log(argument_resultant))))
+        if argument_resultant > 0.0
+        else None
+    )
 
     def nuisance_parameters(
         theta: np.ndarray,
@@ -799,7 +876,11 @@ def fit_radial_velocity(
             "optimizer_message": str(result.message),
             "constant_optimizer_status": int(constant_result.status),
             "constant_optimizer_message": str(constant_result.message),
-            "uncertainty_estimation": "local inverse-Hessian approximation to the full Gaussian likelihood; it does not include model-selection or activity-model uncertainty",
+            "uncertainty_estimation": "bounded ensemble posterior draws from the full Gaussian likelihood; it does not include model-selection or activity-model uncertainty",
+            "posterior_sampling": {
+                "constant_model": constant_sampling,
+                "keplerian_model": posterior_sampling,
+            },
             "noise_model": "quoted per-observation uncertainty combined in quadrature with fitted per-instrument jitter",
             "activity_regression": {
                 "status": "jointly-fitted" if activity_values is not None else "not-provided",

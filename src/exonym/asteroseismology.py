@@ -55,8 +55,6 @@ from .workspace import CandidateWorkspace
 NUMAX_SUN_UHZ = 3090.0      # Solar frequency of maximum oscillation power (microHz)
 DNU_SUN_UHZ = 135.1         # Solar large frequency separation (microHz)
 
-PSD_MIN_UHZ = 100.0         # Default minimum frequency for stellar PSD search (microHz)
-PSD_MAX_UHZ = 2000.0        # Default maximum frequency for stellar PSD search (microHz)
 DNU_MIN_UHZ = 30.0          # Minimum trial Delta-nu lag (microHz)
 DNU_MAX_UHZ = 200.0         # Maximum trial Delta-nu lag (microHz) — Solar Δν☉ ≈ 135.1 µHz; must exceed it — Chaplin & Miglio 2013
 # 1 microhertz is exactly 0.0864 cycles per day.  The prior name reversed
@@ -69,11 +67,33 @@ def _odd_bins(value: float) -> int:
     return bins if bins % 2 else bins + 1
 
 
+def frequency_support(time: Sequence[float]) -> Dict[str, float]:
+    """Derive cadence-supported Fourier limits from day-based timestamps."""
+    values = np.unique(np.sort(np.asarray(time, dtype=float)[np.isfinite(time)]))
+    if values.size < 50:
+        raise ValueError("insufficient finite cadences for frequency support")
+    steps_days = np.diff(values)
+    steps_days = steps_days[steps_days > 0.0]
+    if steps_days.size == 0:
+        raise ValueError("frequency support requires distinct cadence times")
+    baseline_days = float(values[-1] - values[0])
+    if not math.isfinite(baseline_days) or baseline_days <= 0.0:
+        raise ValueError("frequency support requires a positive time baseline")
+    cadence_days = float(np.median(steps_days))
+    return {
+        "baseline_days": baseline_days,
+        "median_cadence_seconds": cadence_days * SECONDS_PER_DAY,
+        "rayleigh_uhz": 1.0 / (baseline_days * CPD_PER_UHZ),
+        "nyquist_uhz": 0.5 / (cadence_days * CPD_PER_UHZ),
+        "duty_cycle": min(1.0, float(values.size * cadence_days / baseline_days)),
+    }
+
+
 def compute_power_spectrum(
     time: Sequence[float],
     flux: Sequence[float],
-    frequency_min_uhz: float = PSD_MIN_UHZ,
-    frequency_max_uhz: float = PSD_MAX_UHZ,
+    frequency_min_uhz: float,
+    frequency_max_uhz: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Compute a background-whitened Lomb-Scargle power spectrum.
 
@@ -114,6 +134,9 @@ def compute_power_spectrum(
     flux_arr = flux_arr[finite]
     if time_arr.size < 50:
         raise ValueError("insufficient data for power spectrum estimation")
+    support = frequency_support(time_arr)
+    if frequency_min_uhz < support["rayleigh_uhz"] or frequency_max_uhz > support["nyquist_uhz"]:
+        raise ValueError("requested frequency range exceeds cadence-supported Fourier range")
 
     frequency_day, power = LombScargle(
         time_arr,
@@ -368,26 +391,25 @@ def estimate_oscillation_envelope(
     numax_max_requested = float(numax_max_uhz)
     if not math.isfinite(numax_min_requested) or not math.isfinite(numax_max_requested):
         raise ValueError("numax search bounds must be finite")
+    support = frequency_support(time)
     numax_min_used = numax_min_requested
     numax_max_used = numax_max_requested
-    # NUMERICAL_GUARD: Keep the envelope search within the PSD support instead
-    # of extrapolating a frequency grid beyond its declared native range.
-    numax_min_clipped = numax_min_requested < PSD_MIN_UHZ
-    numax_max_clipped = numax_max_requested > PSD_MAX_UHZ
+    numax_min_clipped = numax_min_requested < support["rayleigh_uhz"]
+    numax_max_clipped = numax_max_requested > support["nyquist_uhz"]
     if numax_min_clipped:
         warnings.warn(
-            "numax_min_uhz {0:.1f} uHz clamped to search floor {1:.1f} uHz".format(
-                numax_min_used, PSD_MIN_UHZ
+            "numax_min_uhz {0:.1f} uHz clamped to cadence-supported floor {1:.1f} uHz".format(
+                numax_min_used, support["rayleigh_uhz"]
             )
         )
-        numax_min_used = PSD_MIN_UHZ
+        numax_min_used = support["rayleigh_uhz"]
     if numax_max_clipped:
         warnings.warn(
-            "numax_max_uhz {0:.1f} uHz clamped to search ceiling {1:.1f} uHz".format(
-                numax_max_used, PSD_MAX_UHZ
+            "numax_max_uhz {0:.1f} uHz clamped to cadence-supported Nyquist limit {1:.1f} uHz".format(
+                numax_max_used, support["nyquist_uhz"]
             )
         )
-        numax_max_used = PSD_MAX_UHZ
+        numax_max_used = support["nyquist_uhz"]
     search_low = numax_min_used
     search_high = numax_max_used
     if search_high <= search_low:
@@ -419,6 +441,7 @@ def estimate_oscillation_envelope(
         "numax_max_used": numax_max_used,
         "numax_min_clipped": numax_min_clipped,
         "numax_max_clipped": numax_max_clipped,
+        "frequency_support": support,
         "numax_candidate_uhz": numax_candidate,
         "envelope_peak_ratio": float(envelope[peak_index]),
         "dnu_candidate_uhz": dnu_candidate,
@@ -630,6 +653,11 @@ def seismic_uncertainty_summary(
         uncertainty. This deliberately excludes systematic scaling-relation
         error and is not a complete stellar posterior.
     """
+    if isinstance(draws, bool) or not isinstance(draws, int) or draws <= 0:
+        return {
+            "status": "unavailable-invalid-draw-count",
+            "reason": "draws must be a positive integer.",
+        }
     try:
         numax = float(envelope["numax_candidate_uhz"])
         dnu = float(envelope["dnu_candidate_uhz"])
@@ -719,10 +747,6 @@ def seismic_uncertainty_summary(
     }
 
 
-# ASTROPHYSICAL_HEURISTIC: Broad plausibility bounds prevent an uncalibrated
-# PSD peak from being propagated as an unreviewed stellar solution.
-SEISMIC_MASS_BOUNDS_SOLAR = (0.05, 20.0)
-SEISMIC_RADIUS_BOUNDS_SOLAR = (0.05, 20.0)
 SEISMIC_PRIOR_RATIO_TOLERANCE = 2.0
 
 
@@ -744,24 +768,16 @@ def seismic_sanity_check(
         Dict[str, Any]: ``plausible`` flag and human-readable rejection reasons.
 
     Note:
-        The bounds and prior-ratio comparison are triage heuristics for noisy
-        PSD peaks.  Passing them does not establish mode identification or a
-        physically calibrated stellar characterization.
-
-    Scaling relations applied to noise peaks can return absurd stellar
-    parameters (e.g., a 26 Msun A star from two 120-s sectors). Results outside
-    plausible bounds, or inconsistent with a catalog/SED radius prior by more
-    than the tolerance factor, are flagged so the caller can reject them.
+        Passing this consistency check does not establish mode identification
+        or a physically calibrated stellar characterization.
     """
     reasons: List[str] = []
     mass = float(seismic.get("mass_solar", 0.0))
     radius = float(seismic.get("radius_solar", 0.0))
-    mass_lo, mass_hi = SEISMIC_MASS_BOUNDS_SOLAR
-    radius_lo, radius_hi = SEISMIC_RADIUS_BOUNDS_SOLAR
-    if not (mass_lo <= mass <= mass_hi):
-        reasons.append("mass outside plausible range")
-    if not (radius_lo <= radius <= radius_hi):
-        reasons.append("radius outside plausible range")
+    if not math.isfinite(mass) or mass <= 0.0:
+        reasons.append("mass is not positive and finite")
+    if not math.isfinite(radius) or radius <= 0.0:
+        reasons.append("radius is not positive and finite")
     if prior_is_catalog and radius_prior_solar and radius_prior_solar > 0 and radius > 0:
         ratio = radius / float(radius_prior_solar)
         if not (1.0 / SEISMIC_PRIOR_RATIO_TOLERANCE <= ratio <= SEISMIC_PRIOR_RATIO_TOLERANCE):
@@ -1332,10 +1348,14 @@ def run_asteroseismology(
             float(envelope["numax_max_requested_uhz"]),
         ],
         "numax_search_bounds": {
-            "supported_range_uhz": [PSD_MIN_UHZ, PSD_MAX_UHZ],
+            "supported_range_uhz": [
+                envelope["frequency_support"]["rayleigh_uhz"],
+                envelope["frequency_support"]["nyquist_uhz"],
+            ],
             "lower_clipped": bool(envelope["numax_min_clipped"]),
             "upper_clipped": bool(envelope["numax_max_clipped"]),
         },
+        "frequency_support": envelope["frequency_support"],
         "numax_uhz": envelope["numax_candidate_uhz"],
         "envelope_peak_ratio": envelope["envelope_peak_ratio"],
         "dnu_uhz": envelope["dnu_candidate_uhz"],

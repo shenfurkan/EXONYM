@@ -23,6 +23,7 @@ from exonym.vetting.trex.priors import (
 )
 from exonym.vetting.trex.target import TargetScene
 from exonym.vetting.trex.diagnostics import TrexResult, generate_diagnostics
+from exonym.vetting.trex.marginal_likelihoods import _eval_scenario
 
 
 # ============================================================================
@@ -158,10 +159,51 @@ def test_sample_ecc_planet():
     assert 0.1 < np.median(ecc) < 0.4
 
 
+@pytest.mark.parametrize("planet, period_days", [(True, 5.0), (False, 5.0), (False, 20.0)])
+def test_sample_ecc_is_deterministic_for_supplied_draws(planet, period_days):
+    draws = np.array([0.01, 0.2, 0.5, 0.9])
+
+    first = sample_ecc(draws, planet=planet, P_orb=period_days)
+    second = sample_ecc(draws, planet=planet, P_orb=period_days)
+
+    np.testing.assert_array_equal(first, second)
+
+
+@pytest.mark.parametrize("draws", [np.array([-0.1]), np.array([1.0]), np.array([np.nan])])
+def test_sample_ecc_rejects_invalid_draws(draws):
+    with pytest.raises(ValueError, match="finite values"):
+        sample_ecc(draws, planet=True, P_orb=5.0)
+
+
 def test_sample_q_solar():
     rng = np.random.default_rng(42)
     q = sample_q(rng.random(500), M_s=1.0)
     assert np.all((q >= 0.1) & (q <= 1.0))
+
+
+def test_eb_scenarios_use_empirical_companion_radii(monkeypatch):
+    import exonym.vetting.trex.marginal_likelihoods as marginal_likelihoods
+
+    captured = []
+    monkeypatch.setattr(
+        marginal_likelihoods,
+        "lnL_EB",
+        lambda *_args, **kwargs: captured.append(_args[3]) or 0.0,
+    )
+    monkeypatch.setattr(marginal_likelihoods, "sample_q", lambda draws, _mass: np.full(draws.size, 0.2))
+    monkeypatch.setattr(marginal_likelihoods, "sample_inc", lambda draws: np.full(draws.size, 90.0))
+    monkeypatch.setattr(marginal_likelihoods, "sample_ecc", lambda draws, **_kwargs: np.zeros(draws.size))
+    monkeypatch.setattr(marginal_likelihoods, "sample_w", lambda draws: np.full(draws.size, 90.0))
+
+    _eval_scenario(
+        np.array([0.0]), np.array([1.0]), 0.01, 5.0, 1.0, 1.0, 0.4, 0.2,
+        2, is_planet=False, is_EB=True, use_2xP=False,
+        rng=np.random.default_rng(1),
+    )
+
+    expected_radius, _ = stellar_relations(np.array([0.2]))
+    assert captured == pytest.approx([float(expected_radius[0])] * 2)
+    assert captured[0] != pytest.approx(0.2)
 
 
 def test_lnprior_bound_finite():

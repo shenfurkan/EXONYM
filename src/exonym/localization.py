@@ -1115,6 +1115,42 @@ def run_prf_localization(
     """
     outputs_dir = workspace.path / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
+    # A nominal Gaussian is not a mission-calibrated PRF. Do not create
+    # source-competition evidence until official, position-aware PRF assets and
+    # their recovery calibration are supplied as candidate-owned inputs.
+    payload = {
+        "schema_version": "1.0",
+        "work_package": "PRF_SOURCE_LOCALIZATION",
+        "generated_utc": datetime.now(timezone.utc).isoformat(),
+        "candidate_id": workspace.candidate_id,
+        "source": "not-run-mission-calibrated-prf-required",
+        "calibration_status": "uncalibrated",
+        "validation_eligible": False,
+        "method": "not-run: mission-calibrated PRF assets are required",
+        "prf_model": None,
+        "search_radius_arcsec": float(search_radius_arcsec),
+        "source_catalog": "not-read",
+        "skipped_tpf_products": [],
+        "sector_results": [],
+        "summary": {
+            "n_sectors": 0,
+            "n_completed": 0,
+            "sectors_with_competing_sources_modeled": 0,
+            "sectors_with_unresolved_difference_core": 0,
+            "sectors_with_uncalibrated_prf": 0,
+            "median_target_to_other_difference_ratio": None,
+            "median_difference_image_offset_arcsec": None,
+            "conclusion": "inconclusive_mission_calibrated_prf_required",
+        },
+        "caveats": [
+            "Localization did not run because no mission-calibrated, position-aware PRF library and recovery calibration are available.",
+            "The nominal Gaussian screening model is prohibited from producing localization evidence.",
+        ],
+    }
+    output_path = outputs_dir / "prf_localization_results.json"
+    output_path.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    return output_path
+
     ephemeris = load_transit_ephemeris(workspace)
     required_ephemeris_fields = ("period_days", "epoch_btjd", "duration_days")
     field_sources = ephemeris.get("field_sources", {})

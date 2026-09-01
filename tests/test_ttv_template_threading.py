@@ -171,6 +171,7 @@ def test_ttv_threads_candidate_posterior_medians_and_records_template_provenance
     assert captured["template"]["q2"] == pytest.approx(0.2)
     assert captured["template"]["u1"] == pytest.approx(0.32)
     assert captured["template"]["u2"] == pytest.approx(0.48)
+    assert captured["template"]["duration_days"] == pytest.approx(0.1)
     assert template["kind"] == "candidate-local-transit-fit-posterior-median"
     assert template["artifact"]["path"] == "outputs/mcmc_transit_fit.02.json"
     assert template["artifact"]["sha256"] == hashlib.sha256(artifact_path.read_bytes()).hexdigest()

@@ -444,7 +444,7 @@ def test_auto_vet_all_reports_invalid_workspace_as_incomplete(tmp_path, monkeypa
     manifest.write_text("{}\n", encoding="utf-8")
     monkeypatch.setattr("exonym.autonomous.auto_vet_candidate", lambda *_args, **_kwargs: manifest)
 
-    assert main(["--root", str(tmp_path), "survey", "auto-vet", "--all", "--no-download"]) == 0
+    assert main(["--root", str(tmp_path), "survey", "auto-vet", "--all", "--no-download"]) == 1
 
     report = json.loads(capsys.readouterr().out)
     assert {entry["status"] for entry in report["outcomes"]} == {"completed", "incomplete"}
@@ -461,7 +461,7 @@ def test_auto_vet_cli_records_incident_when_candidate_run_cannot_start(tmp_path,
 
     monkeypatch.setattr("exonym.autonomous.auto_vet_candidate", fail_auto_vet)
 
-    assert main(["--root", str(tmp_path), "survey", "auto-vet", candidate.candidate_id]) == 0
+    assert main(["--root", str(tmp_path), "survey", "auto-vet", candidate.candidate_id]) == 1
 
     report = json.loads(capsys.readouterr().out)
     assert report["outcomes"][0]["status"] == "failed"

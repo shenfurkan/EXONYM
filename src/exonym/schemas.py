@@ -2339,6 +2339,7 @@ def validate_schemas(
             len(relative.parts) >= 3
             and relative.parts[-2] == "outputs"
             and not any(p.startswith("_") for p in relative.parts[:-2])
+            and (path.parent.parent / "candidate.json").is_file()
         )
         if not is_candidate_local:
             report.add(
@@ -2358,6 +2359,7 @@ def validate_schemas(
             len(relative.parts) >= 3
             and relative.parts[-2] == "outputs"
             and not any(part.startswith("_") for part in relative.parts[:-2])
+            and (path.parent.parent / "candidate.json").is_file()
         )
         if not is_candidate_local:
             report.add(

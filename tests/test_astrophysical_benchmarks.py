@@ -672,12 +672,13 @@ def test_sed_blackbody_planck_radiation_and_extinction_scaling():
 
 def test_ttv_first_order_mean_motion_resonance_super_periods():
     """
-    NEDEN: 2:1 ve 3:2 rezonanslarına yakın gezegen çiftlerinde Lithwick süper-periyot formülünün
+    NEDEN: 2:1, 3:2, 4:3 ve 5:4 rezonanslarına yakın gezegen çiftlerinde Lithwick süper-periyot formülünün
     analitik olarak tam eşleştiği teyit edilir.
     """
     from exonym.search import calculate_ttv_super_period
 
     payload = _load_fixture("ttv_first_order_mmr_benchmarks.json")
+    assert {case["j_resonance"] for case in payload["cases"]} >= {2, 3, 4, 5}
     for case in payload["cases"]:
         result = calculate_ttv_super_period(
             case["period_inner_days"], case["period_outer_days"], case["j_resonance"]

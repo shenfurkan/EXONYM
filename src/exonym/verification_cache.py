@@ -1,17 +1,16 @@
 """Candidate-local verification cache for integrity audits.
 
 Persisted cache records retain file fingerprints and content digests for audit
-diagnostics. The normal audit reuses a digest when the current file has the
-same recorded size and nanosecond modification time; ``--fresh`` disables the
-cache and rehashes every file. Records remain scoped to the resolved
+diagnostics. Every audit recomputes a file digest before using it as integrity
+evidence; cached fingerprints only distinguish unchanged content for reporting
+and atomic cache updates. Records remain scoped to the resolved
 repository/workspace location and filesystem identity, so a copied cache is
 discarded before it can be considered.
 
 Scientific boundary:
     A fingerprint cache is an optimisation, not provenance or a scientific or
-    cryptographic reproducibility guarantee. A same-size rewrite with a restored
-    mtime can evade the normal cache path; callers must use a fresh audit whenever
-    the trustworthiness of local filesystem metadata is insufficient.
+    cryptographic reproducibility guarantee. It never supplies a digest without
+    recomputing the current file hash.
 """
 
 from __future__ import annotations
@@ -131,24 +130,23 @@ class CandidateVerificationCache:
         return state, record if isinstance(record, dict) else None
 
     def sha256(self, path: Path) -> str:
-        """Return a digest, reusing an unchanged fingerprint-cache entry when safe."""
+        """Return a current digest and record whether its cached value still matches."""
         path = Path(path)
         if not self.enabled:
             self.hash_misses += 1
             return _sha256(path)
         state, record = self._record_for(path)
         fingerprint = _file_fingerprint(path)
+        digest = _sha256(path)
         if (
             record is not None
             and record.get("mtime_ns") == fingerprint["mtime_ns"]
             and record.get("size") == fingerprint["size"]
-            and isinstance(record.get("sha256"), str)
-            and len(record["sha256"]) == 64
+            and record.get("sha256") == digest
         ):
             self.hash_hits += 1
-            return record["sha256"]
-        digest = _sha256(path)
-        self.hash_misses += 1
+        else:
+            self.hash_misses += 1
         if state is not None:
             workspace = self._workspace_for(path)
             assert workspace is not None
@@ -212,10 +210,9 @@ class CandidateVerificationCache:
     def statistics(self) -> Dict[str, int]:
         """Return cache effectiveness counters.
 
-        ``hash_cache_hits`` counts files whose current size and mtime match a
-        prior cache record and whose stored digest was reused without reading
-        the file. ``--fresh`` runs with the cache disabled and reports all files
-        as misses.
+        ``hash_cache_hits`` counts files whose current fingerprint and freshly
+        computed digest match a prior cache record. ``--fresh`` runs with the
+        cache disabled and reports all files as misses.
         """
         return {
             "hash_cache_hits": self.hash_hits,

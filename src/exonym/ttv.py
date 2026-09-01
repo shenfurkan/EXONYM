@@ -145,6 +145,7 @@ def transit_template_parameters(
         This is a timing template, not a full per-epoch transit inference.
     """
     period_days = float(ephemeris["period_days"])
+    duration_days = float(ephemeris["duration_days"])
     depth_ppm = float(ephemeris["depth_ppm"])
     a_rs_value = float(a_rs)
     impact_parameter_value = float(impact_parameter)
@@ -152,6 +153,8 @@ def transit_template_parameters(
     q2_value = float(q2)
     if not math.isfinite(period_days) or period_days <= 0.0:
         raise ValueError("template period_days must be finite and positive")
+    if not math.isfinite(duration_days) or not 0.0 < duration_days < period_days:
+        raise ValueError("template duration_days must be finite, positive, and shorter than period_days")
     if not math.isfinite(depth_ppm) or depth_ppm <= 0.0:
         raise ValueError("template depth_ppm must be finite and positive")
     if not math.isfinite(a_rs_value) or a_rs_value <= 0.0:
@@ -171,6 +174,7 @@ def transit_template_parameters(
     u1, u2 = kipping_to_quadratic_limb_darkening(q1_value, q2_value)
     return {
         "period_days": period_days,
+        "duration_days": duration_days,
         "rp_rs": rp_rs,
         "a_rs": a_rs_value,
         "impact_parameter": impact_parameter_value,
@@ -414,6 +418,10 @@ def _fit_local_template_depth(
         "depth_ppm": depth_ppm,
         "depth_uncertainty_ppm": depth_uncertainty_ppm,
         "depth_snr": float(depth_ppm / depth_uncertainty_ppm),
+        "baseline": float(coefficients[0]),
+        "chi_squared": float(
+            np.sum(((flux_valid - (coefficients[0] - depth_scale * deficit_valid)) / error_valid) ** 2)
+        ),
     }
 
 
@@ -431,6 +439,8 @@ def _rejected_epoch_fit(
         "depth_ppm": None,
         "depth_uncertainty_ppm": None,
         "depth_snr": None,
+        "duration_days": None,
+        "duration_uncertainty_days": None,
         "excluded_no_detection": True,
         "rejection_reason": reason,
         "at_search_boundary": at_search_boundary,
@@ -499,47 +509,57 @@ def fit_transit_epoch(
     ):
         return _rejected_epoch_fit("invalid-window-photometry")
 
-    def chi2(t0_trial: float) -> float:
-        model = _template_flux(template, t_window, t0_trial)
+    def profile_fit(t0_trial: float, duration_scale: float) -> Optional[Dict[str, float]]:
+        model_time = t0_trial + (t_window - t0_trial) / duration_scale
+        model = _template_flux(template, model_time, t0_trial)
         if (
             not isinstance(model, np.ndarray)
             or model.shape != f_window.shape
             or not np.all(np.isfinite(model))
         ):
-            return 1e100
-        return float(np.sum(((f_window - model) / e_window) ** 2))
+            return None
+        return _fit_local_template_depth(f_window, e_window, model)
 
     trials = np.arange(
         t0_expected - grid_half_window_days,
         t0_expected + grid_half_window_days + grid_step_days,
         grid_step_days,
     )
-    values = np.array([chi2(trial) for trial in trials])
-    best_index = int(np.argmin(values))
+    duration_scales = np.exp(np.linspace(math.log(0.5), math.log(2.0), 17))
+    best_depth_fit: Optional[Dict[str, float]] = None
+    best_index = 0
+    best_duration_scale = 1.0
+    best_chi_squared = math.inf
+    for duration_scale in duration_scales:
+        for index, trial in enumerate(trials):
+            local_fit = profile_fit(float(trial), float(duration_scale))
+            if local_fit is not None and local_fit["chi_squared"] < best_chi_squared:
+                best_chi_squared = local_fit["chi_squared"]
+                best_depth_fit = local_fit
+                best_index = index
+                best_duration_scale = float(duration_scale)
     t0_fit = float(trials[best_index])
-    if values[best_index] >= 1e99:
+    if best_depth_fit is None:
         return _rejected_epoch_fit("template-evaluation-failed", t0_fit=t0_fit)
     at_search_boundary = bool(best_index == 0 or best_index == len(trials) - 1)
 
     eps = grid_step_days
     if 0 < best_index < len(trials) - 1:
-        a = values[best_index - 1]
-        b = values[best_index]
-        c = values[best_index + 1]
+        left_fit = profile_fit(float(trials[best_index - 1]), best_duration_scale)
+        center_fit = profile_fit(t0_fit, best_duration_scale)
+        right_fit = profile_fit(float(trials[best_index + 1]), best_duration_scale)
+        if left_fit is None or center_fit is None or right_fit is None:
+            return _rejected_epoch_fit("template-evaluation-failed", t0_fit=t0_fit)
+        a = left_fit["chi_squared"]
+        b = center_fit["chi_squared"]
+        c = right_fit["chi_squared"]
         denominator = a - 2.0 * b + c
         if abs(denominator) > 1e-12:
             t0_fit = t0_fit + 0.5 * eps * (a - c) / denominator
-    best_model = _template_flux(template, t_window, t0_fit)
-    if not isinstance(best_model, np.ndarray) or best_model.shape != f_window.shape:
-        return _rejected_epoch_fit(
-            "template-evaluation-failed",
-            t0_fit=t0_fit,
-            at_search_boundary=at_search_boundary,
-        )
-    depth_fit = _fit_local_template_depth(f_window, e_window, best_model)
+    depth_fit = profile_fit(t0_fit, best_duration_scale)
     if depth_fit is None:
         return _rejected_epoch_fit(
-            "invalid-local-depth-fit",
+            "template-evaluation-failed",
             t0_fit=t0_fit,
             at_search_boundary=at_search_boundary,
         )
@@ -561,7 +581,18 @@ def fit_transit_epoch(
         )
     # NUMERICAL_GUARD: Non-positive local curvature cannot provide a finite
     # quadratic timing uncertainty, so preserve a rejection record instead.
-    curvature = (chi2(t0_fit + eps) - 2.0 * chi2(t0_fit) + chi2(t0_fit - eps)) / (eps**2)
+    left_fit = profile_fit(t0_fit - eps, best_duration_scale)
+    right_fit = profile_fit(t0_fit + eps, best_duration_scale)
+    if left_fit is None or right_fit is None:
+        return _rejected_epoch_fit(
+            "template-evaluation-failed",
+            t0_fit=t0_fit,
+            depth_fit=depth_fit,
+            at_search_boundary=at_search_boundary,
+        )
+    curvature = (
+        left_fit["chi_squared"] - 2.0 * depth_fit["chi_squared"] + right_fit["chi_squared"]
+    ) / (eps**2)
     if not math.isfinite(curvature) or curvature <= 0:
         return _rejected_epoch_fit(
             "non-positive-timing-curvature",
@@ -584,6 +615,8 @@ def fit_transit_epoch(
         "sigma_t0": sigma_t0,
         "sigma_t0_raw": sigma_raw,
         **depth_fit,
+        "duration_days": float(template["duration_days"] * best_duration_scale),
+        "duration_uncertainty_days": None,
         "excluded_no_detection": False,
         "at_search_boundary": at_search_boundary,
         "sigma_t0_clipped": bool(sigma_t0 != sigma_raw),
@@ -1413,6 +1446,8 @@ def transit_timing_analysis(
                 "local_depth_ppm": fit["depth_ppm"],
                 "local_depth_uncertainty_ppm": fit["depth_uncertainty_ppm"],
                 "local_depth_snr": fit["depth_snr"],
+                "local_duration_days": fit.get("duration_days"),
+                "local_duration_uncertainty_days": fit.get("duration_uncertainty_days"),
                 "excluded_no_detection": True,
                 "rejection_reason": fit["rejection_reason"],
                 "at_search_boundary": fit["at_search_boundary"],
@@ -1441,6 +1476,8 @@ def transit_timing_analysis(
             "local_depth_ppm": fit["depth_ppm"],
             "local_depth_uncertainty_ppm": fit["depth_uncertainty_ppm"],
             "local_depth_snr": fit["depth_snr"],
+            "local_duration_days": fit.get("duration_days"),
+            "local_duration_uncertainty_days": fit.get("duration_uncertainty_days"),
             "at_search_boundary": fit["at_search_boundary"],
             "sigma_t0_clipped": fit["sigma_t0_clipped"],
             "excluded_no_detection": False,
@@ -1509,8 +1546,9 @@ def transit_timing_analysis(
         "epoch_acceptance": {
             "requires_positive_local_depth": True,
             "minimum_local_depth_snr": MIN_EPOCH_DEPTH_SNR,
-            "local_depth_method": "weighted baseline plus fixed-template depth scale",
+            "local_depth_method": "weighted baseline plus duration-profiled template depth scale",
             "local_depth_uncertainty": "formal independent-flux-error covariance",
+            "local_duration_method": "bounded profile likelihood over a candidate-derived time-warped template",
         },
         "linear_ephemeris": linear_ephemeris,
         "quadratic_ephemeris": quadratic_ephemeris,
@@ -1998,7 +2036,7 @@ def enumerate_companion_super_periods(
         relation = (
             "inner-companion" if companion_period < candidate_period else "outer-companion"
         )
-        for resonance in (2, 3, 4):
+        for resonance in (2, 3, 4, 5):
             try:
                 super_period = calculate_ttv_super_period(
                     inner_period, outer_period, j_resonance=resonance

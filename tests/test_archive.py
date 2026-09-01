@@ -67,6 +67,27 @@ def test_query_gaia_astrometry_mock():
         assert len(res["sources"]) == 2
 
 
+def test_http_get_json_rejects_an_oversized_response():
+    service = ArchivalVettingService(max_retries=1)
+    service.MAX_JSON_RESPONSE_BYTES = 4
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, limit):
+            assert limit == 5
+            return b"12345"
+
+    with patch("exonym.archive.urllib.request.urlopen", return_value=Response()):
+        assert service._http_get_json("https://example.invalid/response.json") is None
+
+
 def test_query_gaia_validates_high_proper_motion_match_at_j2000():
     service = ArchivalVettingService()
     # Gaia's 2016 position is 3.6 arcsec east of the J2000 target position;

@@ -887,89 +887,34 @@ def _synthetic_photometry(stellar: Dict[str, Any]) -> List[Tuple[str, float, flo
 def run_sed_fit(workspace: CandidateWorkspace) -> Path:
     """Run the candidate-local exploratory broadband SED fit.
 
-    The runner uses a candidate-supplied atmosphere grid when one has the
-    required columns; otherwise it uses the documented reddened-blackbody
-    pivot-wavelength approximation.  It records posterior quantiles, input
-    photometry, residuals, sampler diagnostics, and model caveats.
+    The runner is disabled until a provenance-bound response-integrated stellar
+    atmosphere grid contract is available. It does not substitute a blackbody
+    or an unmanifested generic grid for that evidence.
 
     Args:
         workspace (CandidateWorkspace): Workspace that owns broadband
             photometry, stellar parameters, optional grid data, and outputs.
 
     Returns:
-        Path: Candidate-local ``outputs/sed_fit_results.json``.  The result
-        records the model path and its known approximation limits.
+        Path: Reserved for a future response-integrated fit artifact.
 
     Raises:
-        RuntimeError: Candidate-owned photometry or required parallax data for
-            the blackbody path is unavailable or invalid.
-        OSError: Candidate-local output artifacts cannot be written.
+        RuntimeError: Candidate-owned photometry or the required
+            response-integrated atmosphere-grid contract is unavailable.
 
     Note:
         The fit is an exploratory color diagnostic.  It does not provide a
         calibrated atmosphere posterior, a validation constraint, or a
         lifecycle decision.
     """
-    outputs_dir = workspace.path / "outputs"
-    outputs_dir.mkdir(parents=True, exist_ok=True)
-    stellar = load_stellar_parameters(workspace)
     photometry = load_photometry(workspace)
-    observations, source = _collect_observations(photometry)
-    grid_used = False
+    observations, _ = _collect_observations(photometry)
     if observations is None:
         raise RuntimeError("SED fitting requires candidate-owned broadband photometry")
-    mist_main_sequence_check = _mist_main_sequence_check(workspace, stellar)
-    grid_model = load_atmosphere_grid_model(
-        workspace, [name for name, _, _ in observations]
+    raise RuntimeError(
+        "SED fitting requires a candidate-owned, provenance-bound response-integrated "
+        "stellar-atmosphere grid; blackbody and unmanifested grid fallbacks are disabled."
     )
-    if grid_model is not None:
-        grid_used = True
-    grid_load_failed = not grid_used and (workspace.path / "data" / "external" / "atmosphere_grid.csv").is_file()
-
-    # SCIENTIFIC_BOUNDARY: The fallback is recorded as a blackbody approximation
-    # rather than being presented as an atmosphere-grid inference.
-    fit = (
-        _fit_grid(observations, grid_model, stellar)  # type: ignore[arg-type]
-        if grid_used
-        else _fit_blackbody(observations, stellar)
-    )
-    samples = fit.pop("samples", None)
-
-    payload = {
-        "schema_version": "1.0",
-        "candidate_id": workspace.candidate_id,
-        "work_package": "SED_FIT",
-        "generated_utc": datetime.now(timezone.utc).isoformat(),
-        "source": source,
-        "scientific_status": "exploratory-color-fit",
-        "validation_eligible": False,
-        "grid_used": grid_used,
-        "grid_load_failed": grid_load_failed,
-        "grid_source": (
-            "candidate-data/external/atmosphere_grid.csv" if grid_used else "blackbody-fallback"
-        ),
-        "method": fit["model"],
-        "input_photometry": [
-            {"band": name, "mag": mag, "error": error}
-            for name, mag, error in observations
-        ],
-        "posterior": fit["posterior"],
-        "photometry": fit["photometry"],
-        "fit_quality": fit["fit_quality"],
-        "metadata": fit.get("metadata", {}),
-        "mist_main_sequence_check": mist_main_sequence_check,
-        "caveats": [
-            "Pivot-wavelength monochromatic models approximate passband-integrated photometry.",
-            "Radius and luminosity are derived only for the blackbody path via the parallax prior.",
-            "Grid magnitudes carry an unknown absolute normalization; a free offset absorbs it.",
-            "This exploratory fit is not a response-integrated atmosphere posterior or a validation constraint.",
-        ],
-    }
-    output_path = outputs_dir / "sed_fit_results.json"
-    output_path.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-    if samples is not None:
-        np.save(str(outputs_dir / "sed_fit_chain.npy"), samples)
-    return output_path
 
 
 def cross_match_isochrone_evolution(
