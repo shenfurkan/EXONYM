@@ -26,7 +26,7 @@ EXONYM is an open-source Python framework for the detection, physical modeling, 
 
 ## Platform & Hardware Support
 
-- **Operating Systems:** Linux (Ubuntu, Debian, RHEL, Arch; HPC/cluster ready), macOS (Apple Silicon arm64 & Intel x86_64), and Windows (10 / 11 64-bit with native PowerShell support).
+- **Operating Systems:** Linux (Ubuntu, Debian, RHEL, Arch; HPC/cluster ready), macOS (Apple Silicon arm64 & Intel x86_64), and Windows (via WSL2 Ubuntu environment).
 - **GPU Acceleration:** Optional GPU-accelerated Hamiltonian Monte Carlo (NUTS) transit inference via JAX / NumPyro (`--sampler numpyro --device gpu`).
 - **CPU Multiprocessing:** Multi-core parallel sampling via `emcee` with automatic thread oversubscription prevention (`OMP_NUM_THREADS="1"` and `--n-jobs <N>`).
 - **Air-Gapped Local Operation:** Ingestion connects to NASA MAST and Gaia; all subsequent search, fitting, TTV, and vetting pipelines execute 100% locally from cached data and SHA-256 sidecars.
