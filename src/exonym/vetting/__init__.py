@@ -16,6 +16,7 @@ from .centroid import centroid_gate, centroid_offset_pvalue, centroid_offset_z
 from .ellipsoidal import ellipsoidal_gate, ellipsoidal_variation_amplitude_ppm
 from .oddeven import odd_even_z
 from .tricera_parse import fpp_gate, load_fpp_report
+from .trex import TargetScene, TrexResult, run_trex_vetting
 
 __all__ = [
     "centroid_gate",
@@ -26,4 +27,7 @@ __all__ = [
     "odd_even_z",
     "fpp_gate",
     "load_fpp_report",
+    "TargetScene",
+    "TrexResult",
+    "run_trex_vetting",
 ]

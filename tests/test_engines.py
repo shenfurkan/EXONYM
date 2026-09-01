@@ -94,23 +94,23 @@ def test_check_engine_unconfigured_dependency_has_extra_install_hint(monkeypatch
 
 def test_check_engine_rejects_incompatible_installed_dependency(monkeypatch):
     def fake_version(name):
-        return {"triceratops": "1.0.20", "pytransit": "2.6.11"}[name]
+        return {"dynesty": "2.1.0", "scipy": "1.12.0"}[name]
 
     monkeypatch.setattr("exonym.engines.importlib.util.find_spec", lambda _name: object())
     monkeypatch.setattr(
         "exonym.engines.distribution",
-        lambda name: SimpleNamespace(requires=["pytransit == 2.2"]) if name == "triceratops" else None,
+        lambda name: SimpleNamespace(requires=["scipy <= 1.10"]) if name == "dynesty" else None,
     )
     monkeypatch.setattr("exonym.engines.version", fake_version)
 
-    status = get_engine("triceratops")
-    ready, message = check_engine("triceratops")
+    status = get_engine("dynesty")
+    ready, message = check_engine("dynesty")
 
     assert status is not None
-    assert status.dependency_issues == ("requires pytransit==2.2, but pytransit 2.6.11 is installed",)
+    assert status.dependency_issues == ("requires scipy<=1.10, but scipy 1.12.0 is installed",)
     assert ready is False
     assert "dependency/interface contract is incompatible" in message
-    assert "pytransit 2.6.11" in message
+    assert "scipy 1.12.0" in message
 
 
 def test_run_engine_blocks_an_incompatible_runtime_before_execution(tmp_path, monkeypatch):

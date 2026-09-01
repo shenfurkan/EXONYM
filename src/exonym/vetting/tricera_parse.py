@@ -13,17 +13,9 @@ Scientific boundary:
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import hashlib
-import importlib.metadata
 import json
 import math
-import os
-import ssl
-import sys
-import tempfile
-import threading
-import uuid
 import warnings
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
@@ -47,22 +39,7 @@ FPP_CLAIM_BLOCK_REASON = (
     "observed photometry and scene constraints."
 )
 DEFAULT_TRICERATOPS_SEED = 1729
-_SERVER_AUTH_OID = "1.3.6.1.5.5.7.3.1"
-# TRICERATOPS and its legacy dependencies require process-global CWD, NumPy RNG,
-# and TLS environment changes. Serialize the complete affected region.
-_TRICERATOPS_PROCESS_STATE_LOCK = threading.RLock()
 
-
-def _ensure_legacy_numpy_scalars(numpy_module: Any) -> None:
-    """Restore removed NumPy scalar aliases needed by legacy optional engines.
-
-    The aliases are installed only when NumPy no longer exposes them. This is a
-    compatibility bridge for third-party imports, not a replacement for their
-    own NumPy-2-compatible releases.
-    """
-    for type_name, builtin_type in (("int", int), ("float", float), ("bool", bool)):
-        if type_name not in numpy_module.__dict__:
-            setattr(numpy_module, type_name, builtin_type)
 
 
 
@@ -153,100 +130,7 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _windows_ca_certificates() -> list:
-    """Return Windows certificates trusted for TLS server authentication.
 
-    Python's OpenSSL trust store does not consistently include the Windows
-    root and intermediate stores.  The optional TRICERATOPS backend performs
-    its own HTTP requests, so a temporary PEM bundle is the narrowest way to
-    make that platform trust material available without weakening validation.
-    """
-    if os.name != "nt":
-        return []
-    certificates: list = []
-    try:
-        for store_name in ("ROOT", "CA"):
-            for certificate, encoding, trust in ssl.enum_certificates(store_name):
-                trusted_for_server_auth = trust is True or (
-                    isinstance(trust, (set, tuple, list)) and _SERVER_AUTH_OID in trust
-                )
-                if encoding != "x509_asn" or not trusted_for_server_auth:
-                    continue
-                certificates.append(ssl.DER_cert_to_PEM_cert(certificate))
-    except (AttributeError, OSError, ssl.SSLError):
-        return []
-    return certificates
-
-
-@contextmanager
-def _triceratops_tls_environment():
-    """Provide a verified Windows CA bundle while TRICERATOPS performs I/O.
-
-    Requests honors ``REQUESTS_CA_BUNDLE`` and standard-library clients honor
-    ``SSL_CERT_FILE``.  Both are restored before returning.  The lock prevents
-    concurrent TRICERATOPS runs from replacing each other's temporary bundle.
-    """
-    certificates = _windows_ca_certificates()
-    if not certificates:
-        yield "default"
-        return
-    previous = {
-        name: os.environ.get(name) for name in ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE")
-    }
-    try:
-        from requests.certs import where as requests_ca_bundle
-
-        bundle_texts = [Path(requests_ca_bundle()).read_text(encoding="ascii")]
-        for configured_bundle in set(value for value in previous.values() if value):
-            bundle_texts.append(Path(configured_bundle).read_text(encoding="ascii"))
-    except (ImportError, OSError, UnicodeError):
-        yield "default"
-        return
-
-    bundle_path: Optional[Path] = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="ascii", suffix=".pem", delete=False
-        ) as bundle:
-            for bundle_text in bundle_texts:
-                bundle.write(bundle_text)
-                if not bundle_text.endswith("\n"):
-                    bundle.write("\n")
-            bundle.write("\n".join(certificates))
-            bundle.write("\n")
-            bundle_path = Path(bundle.name)
-        with _TRICERATOPS_PROCESS_STATE_LOCK:
-            os.environ["REQUESTS_CA_BUNDLE"] = str(bundle_path)
-            os.environ["SSL_CERT_FILE"] = str(bundle_path)
-            try:
-                yield "windows-root-intermediate-and-operator-store"
-            finally:
-                for name, value in previous.items():
-                    if value is None:
-                        os.environ.pop(name, None)
-                    else:
-                        os.environ[name] = value
-    finally:
-        if bundle_path is not None:
-            try:
-                bundle_path.unlink()
-            except OSError:
-                pass
-
-
-def _is_tls_verification_error(error: BaseException) -> bool:
-    """Return whether an optional-engine failure is TLS chain verification."""
-    current: Optional[BaseException] = error
-    seen = set()
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if isinstance(current, ssl.SSLCertVerificationError):
-            return True
-        message = str(current).lower()
-        if "certificate_verify_failed" in message or "certificate verify failed" in message:
-            return True
-        current = current.__cause__ or current.__context__
-    return False
 
 
 def _notify_progress(
@@ -264,118 +148,6 @@ def _notify_progress(
         # Presentation callbacks must never change a vetting outcome.
         pass
 
-
-def _parallel_calc_probs_dispatcher(
-    target: Any,
-    observed_input: Dict[str, Any],
-    period: float,
-    n_draws: int,
-    n_jobs: int,
-    progress_callback: Optional[Callable[[str, Optional[int], Optional[int]], None]],
-) -> Dict[str, Any]:
-    """Run one non-partitioned TRICERATOPS calculation with bounded native threads.
-
-    TRICERATOPS has no public chunk/merge API: its scenario evidence uses a
-    global RNG stream and one final normalization.  ``n_jobs`` therefore maps
-    only to its supported in-process PyTransit vectorized mode. Its likelihood
-    implementation uses Numba; this configures its native thread limit when
-    that runtime honors the setting. It never creates worker processes or
-    partitions Monte Carlo draws.
-    """
-    execution: Dict[str, Any] = {
-        "requested_n_jobs": n_jobs,
-        "effective_n_jobs": 1,
-        "calc_probs_parallel": False,
-        "parallel_backend": "serial",
-        "fallback_reason": None,
-    }
-    previous_threads: Optional[int] = None
-    numba_module: Any = None
-    if n_jobs > 1:
-        try:
-            import numba
-
-            numba_module = numba
-            previous_threads = int(numba.get_num_threads())
-            maximum_threads = int(numba.config.NUMBA_NUM_THREADS)
-            effective_threads = min(n_jobs, maximum_threads)
-            numba.set_num_threads(effective_threads)
-            execution.update(
-                {
-                    "effective_n_jobs": effective_threads,
-                    "calc_probs_parallel": True,
-                    "parallel_backend": "triceratops-pytransit-vectorized",
-                    "numba_version": str(numba.__version__),
-                }
-            )
-            if effective_threads != n_jobs:
-                execution["fallback_reason"] = "requested threads exceeded the Numba runtime limit"
-        except Exception as exc:
-            execution["fallback_reason"] = "native thread control unavailable: {0}: {1}".format(
-                type(exc).__name__, exc
-            )
-            numba_module = None
-            previous_threads = None
-
-    # TRICERATOPS prints scenario-start lines and warnings with verbose=1.
-    # Convert those lines into bounded status updates; forwarding them would
-    # force Rich to redraw the HUD for every third-party print.
-    n_stars = len(target.stars[target.stars["tdepth"] > 0]) if hasattr(target, "stars") else 0
-    total_scenarios = n_stars * 8 if n_stars > 0 else None
-    _notify_progress(progress_callback, "TRICERATOPS Monte Carlo Vetting",
-                     done=0 if total_scenarios else None,
-                     total=total_scenarios)
-
-    class _MCProgressStream:
-        """Suppress writes while counting scenario starts and surfacing errors."""
-        def __init__(self, real, cb, total):
-            self._real = real; self._cb = cb; self._total = total
-            self._done = 0; self._partial = ""
-
-        def write(self, text):
-            self._partial += text
-            while "\n" in self._partial:
-                line, self._partial = self._partial.split("\n", 1)
-                s = line.strip()
-                if not s:
-                    continue
-                if "Calculating" in s and "scenario" in s:
-                    self._done += 1
-                    if (self._total is None or self._done <= self._total) and self._cb is not None:
-                        self._cb("TRICERATOPS Monte Carlo Vetting",
-                                 done=self._done, total=self._total)
-                elif any(k in s for k in ("Error", "Exception", "Traceback",
-                                            "WARNING", "raised exception")):
-                    if self._cb is not None:
-                        self._cb(s[:80], done=None, total=None)
-            return len(text)
-
-        def flush(self):
-            return None
-
-        def isatty(self):
-            return getattr(self._real, "isatty", lambda: False)()
-
-    _saved_stdout = sys.stdout
-    sys.stdout = _MCProgressStream(_saved_stdout, progress_callback, total_scenarios)
-    try:
-        target.calc_probs(
-            time=observed_input["time_days"],
-            flux_0=observed_input["flux"],
-            flux_err_0=observed_input["flux_err"],
-            P_orb=period,
-            N=n_draws,
-            parallel=bool(execution["calc_probs_parallel"]),
-            verbose=1,
-            exptime=observed_input["exposure_days"],
-            nsamples=5,
-        )
-    finally:
-        sys.stdout = _saved_stdout
-        if numba_module is not None and previous_threads is not None:
-            numba_module.set_num_threads(previous_threads)
-    _notify_progress(progress_callback, "TRICERATOPS Monte Carlo completed")
-    return execution
 
 
 def _artifact_from_path(workspace: Any, path: Path) -> Dict[str, str]:
@@ -835,135 +607,72 @@ def run_triceratops_simulation(
     if tic_id is not None and runtime_compatible:
         try:
             import numpy as np
+            from exonym.vetting.trex import TargetScene, run_trex_vetting
 
-            # TRICERATOPS and pytransit releases in the supported optional
-            # stack can still import these aliases on NumPy 1.24+ / 2.x.
-            with _TRICERATOPS_PROCESS_STATE_LOCK:
-                _ensure_legacy_numpy_scalars(np)
-                import triceratops.triceratops as triceratops_module
+            _verify_snapshot(workspace, input_snapshot)
 
-                try:
-                    triceratops_version = importlib.metadata.version("triceratops")
-                except importlib.metadata.PackageNotFoundError:
-                    triceratops_version = "unknown"
-                backend = {
-                    "package": "triceratops",
-                    "version": triceratops_version,
-                    "numpy_version": str(np.__version__),
-                }
-                target_cls = triceratops_module.target
-                if observed_input is None:
-                    raise RuntimeError("TRICERATOPS observed input preparation did not complete")
-                sectors = observed_input["sectors"]
-                # TRICERATOPS writes scene inputs in its working directory. Retain
-                # them under the candidate workspace for inspection and replay.
-                cwd_before = os.getcwd()
-                rng_state = np.random.get_state()
-                scene_dir = workspace.path / "data" / "external" / "triceratops" / uuid.uuid4().hex
-                scene_dir.mkdir(parents=True, exist_ok=False)
-                try:
-                    _verify_snapshot(workspace, input_snapshot)
-                    os.chdir(scene_dir)
-                    np.random.seed(random_seed)
-                    _notify_progress(progress_callback, "Constructing TRICERATOPS scene",
-                                     done=0, total=len(sectors))
-                    n_sectors = len(sectors)
+            backend = {
+                "package": "exonym.vetting.trex",
+                "version": "native",
+                "numpy_version": str(np.__version__),
+            }
 
-                    class _NetworkStream:
-                        """Suppress writes; count TessCut downloads and surface errors."""
-                        def __init__(self, real, cb, total):
-                            self._real = real; self._cb = cb; self._total = total
-                            self._done = 0; self._partial = ""
+            if observed_input is None:
+                raise RuntimeError("observed input preparation did not complete")
 
-                        def write(self, text):
-                            self._partial += text
-                            while "\n" in self._partial:
-                                line, self._partial = self._partial.split("\n", 1)
-                                s = line.strip()
-                                if not s:
-                                    continue
-                                if "Getting TessCut" in s:
-                                    self._done += 1
-                                    if self._done <= self._total and self._cb is not None:
-                                        self._cb("Constructing TRICERATOPS scene",
-                                                 done=self._done, total=self._total)
-                                elif any(k in s for k in ("Error", "Exception",
-                                                           "Traceback", "WARNING",
-                                                           "raised exception")):
-                                    if self._cb is not None:
-                                        self._cb(s[:80], done=None, total=None)
-                            return len(text)
+            from ..inputs import load_stellar_parameters
+            stellar = load_stellar_parameters(workspace)
+            ra_val = float(stellar.get("ra_deg", observed_input.get("ra_deg", 0.0)))
+            dec_val = float(stellar.get("dec_deg", observed_input.get("dec_deg", 0.0)))
+            m_s_val = float(stellar.get("mass_solar", observed_input.get("M_s_Msun", 1.0)))
+            r_s_val = float(stellar.get("radius_solar", observed_input.get("R_s_Rsun", 1.0)))
 
-                        def flush(self):
-                            return None
+            scene = TargetScene(
+                tic_id=tic_id,
+                ra_deg=ra_val,
+                dec_deg=dec_val,
+                M_s_Msun=m_s_val,
+                R_s_Rsun=r_s_val,
+                sectors=observed_input.get("sectors", []),
+            )
 
-                        def isatty(self):
-                            return getattr(self._real, "isatty", lambda: False)()
+            time_val = observed_input.get("time_days") if "time_days" in observed_input else observed_input.get("time")
+            flux_val = observed_input["flux"]
+            sigma_val = observed_input.get("flux_err") if "flux_err" in observed_input else observed_input.get("sigma", 0.001)
 
-                    _ns_stdout = sys.stdout
-                    sys.stdout = _NetworkStream(_ns_stdout, progress_callback, n_sectors)
-                    try:
-                        with _triceratops_tls_environment() as certificate_source:
-                            backend["tls_certificate_source"] = certificate_source
-                            targ = target_cls(
-                                ID=tic_id,
-                                sectors=np.array(sectors, dtype=int),
-                                search_radius=search_radius,
-                                mission="TESS",
-                            )
-                            targ.calc_depths(depth_ppm * 1e-6)
-                            backend["execution"] = _parallel_calc_probs_dispatcher(
-                                targ,
-                                observed_input,
-                                period,
-                                n_draws,
-                                n_jobs,
-                                progress_callback,
-                            )
-                    finally:
-                        sys.stdout = _ns_stdout
-                    _verify_snapshot(workspace, input_snapshot)
+            result = run_trex_vetting(
+                scene,
+                time=time_val,
+                flux=flux_val,
+                sigma=sigma_val,
+                period_days=period,
+                depth_ppm=depth_ppm,
+                n_draws=n_draws,
+                random_seed=random_seed,
+                progress_callback=progress_callback,
+            )
 
-                    fpp = float(targ.FPP)
-                    nfpp = float(targ.NFPP)
-                    if not (math.isfinite(fpp) and 0.0 <= fpp <= 1.0):
-                        raise RuntimeError("TRICERATOPS returned an invalid FPP")
-                    if not (math.isfinite(nfpp) and 0.0 <= nfpp <= 1.0):
-                        raise RuntimeError("TRICERATOPS returned an invalid NFPP")
-                    if hasattr(targ, "probs") and hasattr(targ.probs, "groupby"):
-                        scenarios = (
-                            targ.probs.groupby("scenario")["prob"]
-                            .sum()
-                            .sort_values(ascending=False)
-                            .to_dict()
-                        )
-                    source = "triceratops-monte-carlo"
-                finally:
-                    np.random.set_state(rng_state)
-                    os.chdir(cwd_before)
-                    scene_artifacts = [
-                        _artifact_from_path(workspace, path)
-                        for path in sorted(scene_dir.rglob("*"))
-                        if path.is_file()
-                    ]
+            fpp = result.fpp if result.fpp is not None else float("nan")
+            nfpp = result.nfpp if result.nfpp is not None else float("nan")
+            scenarios = dict(result.top_scenarios(99))
+            source = "trex-monte-carlo"
+            scene_artifacts = []
+
+            _verify_snapshot(workspace, input_snapshot)
+
         except Exception as exc:
             fpp = float("nan")
             nfpp = float("nan")
             scenarios = {}
             triceratops_error = "{0}: {1}".format(type(exc).__name__, exc)
             triceratops_exception_type = type(exc).__name__
-            triceratops_error_code = (
-                "triceratops-tls-verification-failed"
-                if _is_tls_verification_error(exc)
-                else "triceratops-runtime-failed"
-            )
+            triceratops_error_code = "trex-runtime-failed"
             warnings.warn(
-                "TRICERATOPS Monte Carlo failed: {0!r}. "
+                "TREX Monte Carlo failed: {0!r}. "
                 "FPP will be marked UNVALIDATED.".format(exc),
                 stacklevel=2,
             )
             source = "triceratops-failed-UNVALIDATED"
-
     if source in ("not-run", "triceratops-failed-UNVALIDATED"):
         unavailable = source == "not-run" or triceratops_exception_type in {
             "ImportError", "ModuleNotFoundError", "PackageNotFoundError",
@@ -1031,10 +740,10 @@ def run_triceratops_simulation(
             if observed_input is not None
             else None
         ),
-        "audit_status": "valid" if source == "triceratops-monte-carlo" else "invalid",
+        "audit_status": "valid" if source == "trex-monte-carlo" else "invalid",
         "audit_invalid_reason": (
             None
-            if source == "triceratops-monte-carlo"
+            if source == "trex-monte-carlo"
             else "TRICERATOPS Monte Carlo did not complete; this report is not auditable scientific evidence."
         ),
         "claim_eligible": False,
@@ -1044,7 +753,7 @@ def run_triceratops_simulation(
     report_path = outputs_dir / f"triceratops_report{suffix}.json"
     _write_json_atomic(report_path, report)
 
-    if source == "triceratops-monte-carlo":
+    if source == "trex-monte-carlo":
         passes = fpp_rounded is not None and nfpp_rounded is not None and fpp_rounded < FPP_THRESHOLD and nfpp_rounded < NFPP_THRESHOLD
         previous = _existing_vetting_decision()
         triage_status = previous.get("triage_status", "not-run")

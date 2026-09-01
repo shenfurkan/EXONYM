@@ -66,6 +66,7 @@ resources/
 textbooks/
 **/textbooks/
 paper/
+triceratopssourcecode/
 
 # 6. INGESTION STAGING, TEMP & LOG FILES
 exonym-ingest-*/

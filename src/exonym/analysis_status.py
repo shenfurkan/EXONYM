@@ -80,7 +80,7 @@ def build_analysis_status(workspace: CandidateWorkspace) -> Path:
         _stage(workspace, "ttv", "outputs/ttv_analysis_results.json", "Candidate-derived stellar parameters or complete timing inputs are unavailable."),
         _stage(workspace, "phase_curve", "outputs/phase_curve_results.json"),
         _stage(workspace, "triage", "decisions/automated_triage.json"),
-        _stage(workspace, "triceratops", "decisions/triceratops_vetting_decision.json"),
+        _stage(workspace, "trex", "decisions/triceratops_vetting_decision.json"),
     ]
     complete = all(item["status"] == "succeeded" for item in stages)
     payload = {

@@ -129,9 +129,9 @@ _ENGINE_CATALOG: Tuple[EngineDescriptor, ...] = (
     EngineDescriptor(
         name="triceratops",
         capability="vetting",
-        optional_group="screening",
-        module_name="triceratops",
-        description="Bayesian transit validation and false positive probability calculation.",
+        optional_group="core",
+        module_name="numpy",
+        description="Native TREX Bayesian transit validation (Giacalone 2021) false positive probability.",
     ),
     EngineDescriptor(
         name="pysyd",
@@ -537,7 +537,7 @@ def run_engine(
     engine_name = engine_status.name
     if engine_name not in _RUNNABLE_ENGINES:
         if engine_name == "triceratops":
-            raise ValueError("TRICERATOPS must run through 'exonym vet' after the pre-vetting workflow.")
+            raise ValueError("Native TREX vetting must run through 'exonym vet' after the pre-vetting workflow.")
         raise ValueError(f"Engine '{engine_name}' has no candidate-local runner.")
 
     started_at = datetime.now(timezone.utc).isoformat()
