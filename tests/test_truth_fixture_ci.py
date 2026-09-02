@@ -152,12 +152,15 @@ def test_ephemeris_truth_ratios_fold_to_reviewable_matches(known_period_days, ex
     """P/2, P, and 2P catalog records retain an unambiguous review route."""
     candidate = {
         "period_days": 10.0,
+        "period_uncertainty_days": 0.01,
         "epoch_btjd": 100.0,
         "duration_hours": 2.0,
     }
     source = {
         "pl_name": "synthetic-known-signal",
         "pl_orbper": known_period_days,
+        "pl_orbpererr1": 0.01,
+        "pl_orbpererr2": -0.01,
         "pl_tranmid": 2457000.0 + 100.0 + known_period_days,
         "pl_trandur": 2.0,
         "pl_tranmid_systemref": "BJD_TDB",

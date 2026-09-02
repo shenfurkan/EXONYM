@@ -53,8 +53,6 @@ WINDOW_DAYS = 0.35              # Half-width of individual transit isolation win
 GRID_HALF_WINDOW_DAYS = 0.02    # Local grid search range around calculated transit time (days)
 GRID_STEP_DAYS = 0.001          # Fine grid resolution for initial transit center search (days)
 MIN_EPOCH_DEPTH_SNR = 3.0       # Formal local-template detection threshold
-MIN_TIMING_SIGMA_DAYS = 0.0005  # Lower reporting bound for a finite timing error
-MAX_TIMING_SIGMA_DAYS = 0.05    # Upper reporting bound for a finite timing error
 MIN_ORBITAL_DECAY_TRANSITS = 4  # Leaves one quadratic-fit residual degree of freedom
 TTV_TEMPLATE_WORK_PACKAGES = ("MCMC_TRANSIT_FIT", "NESTED_TRANSIT_FIT")
 _ECCENTRIC_TEMPLATE_PARAMETERS = frozenset(("sqe_cosw", "sqe_sinw"))
@@ -454,12 +452,14 @@ def _rejected_epoch_fit(
 def fit_transit_epoch(
     time: np.ndarray,
     flux: np.ndarray,
-    flux_err: np.ndarray,
-    template: Dict[str, Any],
-    t0_expected: float,
+    errors: Optional[np.ndarray] = None,
+    template: Optional[Dict[str, Any]] = None,
+    t0_expected: Optional[float] = None,
     window_days: float = WINDOW_DAYS,
     grid_half_window_days: float = GRID_HALF_WINDOW_DAYS,
     grid_step_days: float = GRID_STEP_DAYS,
+    *,
+    flux_err: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     """Fit one transit epoch by grid search plus parabolic refinement.
 
@@ -495,10 +495,16 @@ def fit_transit_epoch(
     ``MIN_EPOCH_DEPTH_SNR``. The reported timing uncertainty is unavailable
     (``None``) when the local timing curvature is non-positive.
     """
+    if flux_err is not None:
+        if errors is not None:
+            raise ValueError("supply either flux_err or errors, not both")
+        errors = flux_err
+    if errors is None or template is None or t0_expected is None:
+        raise ValueError("errors, template, and t0_expected are required")
     mask = (time > t0_expected - window_days) & (time < t0_expected + window_days)
     t_window = time[mask]
     f_window = flux[mask]
-    e_window = flux_err[mask]
+    e_window = errors[mask]
     if t_window.size < MIN_POINTS_PER_TRANSIT:
         return _rejected_epoch_fit("insufficient-cadences")
     if (
@@ -608,18 +614,17 @@ def fit_transit_epoch(
             depth_fit=depth_fit,
             at_search_boundary=at_search_boundary,
         )
-    sigma_raw = float(sigma_t0)
-    sigma_t0 = float(np.clip(sigma_t0, MIN_TIMING_SIGMA_DAYS, MAX_TIMING_SIGMA_DAYS))
+    sigma_t0 = float(sigma_t0)
     return {
         "t0_fit": t0_fit,
         "sigma_t0": sigma_t0,
-        "sigma_t0_raw": sigma_raw,
+        "sigma_t0_raw": sigma_t0,
         **depth_fit,
         "duration_days": float(template["duration_days"] * best_duration_scale),
         "duration_uncertainty_days": None,
         "excluded_no_detection": False,
         "at_search_boundary": at_search_boundary,
-        "sigma_t0_clipped": bool(sigma_t0 != sigma_raw),
+        "sigma_t0_clipped": False,
         "rejection_reason": None,
     }
 

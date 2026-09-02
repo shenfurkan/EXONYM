@@ -7,7 +7,7 @@ Key Scientific Steps:
 1. Planetary Transit Masking: Masks all primary transit windows ($\pm 0.75 \times T_{14}$)
    to prevent transit box harmonics from creating spurious rotation signals.
 2. Generalized Lomb-Scargle (GLS) Periodogram (Zechmeister & Kürster 2009):
-   Fits a floating-mean sinusoid across trial periods $P \in [1, 20]$ days.
+    Fits a floating-mean sinusoid across cadence- and baseline-derived periods.
 3. Sampling-window and cross-sector harmonic diagnostics:
    Preserve cadence-window features and whether segment peaks are compatible with
    one fundamental frequency or its first harmonic.
@@ -41,8 +41,8 @@ from .inputs import load_light_curve_table, load_transit_ephemeris
 from .lightcurve import phase_hours
 from .workspace import CandidateWorkspace
 
-PERIOD_MIN_DAYS = 1.0               # Minimum rotation period for GLS search grid (days)
-PERIOD_MAX_DAYS = 20.0              # Maximum rotation period for GLS search grid (days)
+MINIMUM_SAMPLES_PER_CYCLE = 2.0     # Nyquist sampling requirement for the shortest period
+MINIMUM_OBSERVED_CYCLES = 2.0       # Required baseline coverage for the longest period
 SAMPLES_PER_PEAK = 10               # Frequency oversampling factor per Rayleigh peak
 TRANSIT_MASK_HALF_DURATIONS = 0.75  # Planetary transit exclusion window half-width
 WINDOW_PEAK_LIMIT = 5               # Retained cadence-window peaks per segment
@@ -54,8 +54,8 @@ def gls_periodogram(
     time: Sequence[float],
     flux: Sequence[float],
     flux_err: Optional[Sequence[float]] = None,
-    period_min_days: float = PERIOD_MIN_DAYS,
-    period_max_days: float = PERIOD_MAX_DAYS,
+    period_min_days: Optional[float] = None,
+    period_max_days: Optional[float] = None,
     samples_per_peak: int = SAMPLES_PER_PEAK,
 ) -> Tuple[np.ndarray, np.ndarray, float]:
     """Return GLS periods, powers, and its analytic white-noise FAP reference."""
@@ -75,10 +75,24 @@ def gls_periodogram(
         error_arr = error_arr[finite]
     if time_arr.size < 50:
         raise ValueError("insufficient data for periodogram analysis")
+    ordered_time = np.sort(time_arr)
+    cadence_days = float(np.median(np.diff(ordered_time)))
+    baseline_days = float(ordered_time[-1] - ordered_time[0])
+    dynamic_period_min = MINIMUM_SAMPLES_PER_CYCLE * cadence_days
+    dynamic_period_max = baseline_days / MINIMUM_OBSERVED_CYCLES
+    minimum_period = dynamic_period_min if period_min_days is None else float(period_min_days)
+    maximum_period = dynamic_period_max if period_max_days is None else float(period_max_days)
+    if (
+        not math.isfinite(minimum_period)
+        or not math.isfinite(maximum_period)
+        or minimum_period <= 0.0
+        or maximum_period <= minimum_period
+    ):
+        raise ValueError("invalid period search bounds")
     ls = LombScargle(time_arr, flux_arr - np.nanmean(flux_arr), dy=error_arr)
     frequency, power = ls.autopower(
-        minimum_frequency=1.0 / period_max_days,
-        maximum_frequency=1.0 / period_min_days,
+        minimum_frequency=1.0 / maximum_period,
+        maximum_frequency=1.0 / minimum_period,
         samples_per_peak=samples_per_peak,
     )
     periods = 1.0 / np.asarray(frequency)

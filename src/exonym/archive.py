@@ -231,7 +231,7 @@ class ArchivalVettingService:
     ) -> List[Dict[str, Any]]:
         """Cone search via a TAP sync endpoint returning JSON row data."""
         tap_query = (
-            f"SELECT source_id, ra, dec, phot_g_mean_mag, ruwe, pmra, pmdec, ref_epoch, "
+            f"SELECT source_id, ra, dec, phot_g_mean_mag, phot_bp_mean_mag, phot_rp_mean_mag, ruwe, pmra, pmdec, ref_epoch, "
             f"DISTANCE(POINT('ICRS', ra, dec), POINT('ICRS', {ra}, {dec}))*3600.0 AS sep_arcsec "
             f"FROM gaiadr3.gaia_source "
             f"WHERE 1=CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', {ra}, {dec}, {radius_arcsec/3600.0})) "
@@ -249,11 +249,22 @@ class ArchivalVettingService:
             ra_val = _finite_float(row[1]) if len(row) > 1 else None
             dec_val = _finite_float(row[2]) if len(row) > 2 else None
             gmag = _finite_float(row[3]) if len(row) > 3 else None
-            ruwe_val = _finite_float(row[4]) if len(row) > 4 else None
-            pmra_val = _finite_float(row[5]) if len(row) > 5 else None
-            pmdec_val = _finite_float(row[6]) if len(row) > 6 else None
-            reference_epoch = _finite_float(row[7]) if len(row) > 7 else None
-            sep_val = _finite_float(row[8]) if len(row) > 8 else None
+            if len(row) >= 11:
+                bp_mag = _finite_float(row[4])
+                rp_mag = _finite_float(row[5])
+                ruwe_val = _finite_float(row[6])
+                pmra_val = _finite_float(row[7])
+                pmdec_val = _finite_float(row[8])
+                reference_epoch = _finite_float(row[9])
+                sep_val = _finite_float(row[10])
+            else:
+                bp_mag = None
+                rp_mag = None
+                ruwe_val = _finite_float(row[4]) if len(row) > 4 else None
+                pmra_val = _finite_float(row[5]) if len(row) > 5 else None
+                pmdec_val = _finite_float(row[6]) if len(row) > 6 else None
+                reference_epoch = _finite_float(row[7]) if len(row) > 7 else None
+                sep_val = _finite_float(row[8]) if len(row) > 8 else None
             # Backward-compatible handling of fixtures and cached responses
             # produced before proper-motion columns were requested.
             if sep_val is None and len(row) == 6:
@@ -269,6 +280,8 @@ class ArchivalVettingService:
                     "separation_arcsec": round(sep_val, 4),
                     "ruwe": round(ruwe_val, 4) if ruwe_val is not None else None,
                     "phot_g_mean_mag": round(gmag, 4) if gmag is not None else None,
+                    "phot_bp_mean_mag": round(bp_mag, 4) if bp_mag is not None else None,
+                    "phot_rp_mean_mag": round(rp_mag, 4) if rp_mag is not None else None,
                     "pmra_mas_per_year": round(pmra_val, 6)
                     if pmra_val is not None
                     else None,
@@ -323,6 +336,17 @@ class ArchivalVettingService:
                 g_mag = _finite_float(row["Gmag"])
             except KeyError:
                 g_mag = None
+            bp_mag: Optional[float] = None
+            rp_mag: Optional[float] = None
+            for column, destination in (("BPmag", "bp"), ("RPmag", "rp")):
+                try:
+                    value = _finite_float(row[column])
+                except KeyError:
+                    value = None
+                if destination == "bp":
+                    bp_mag = value
+                else:
+                    rp_mag = value
             pmra_val: Optional[float] = None
             for column in ("pmRA", "pmra"):
                 try:
@@ -355,6 +379,8 @@ class ArchivalVettingService:
                     "separation_arcsec": round(sep_arcsec, 4),
                     "ruwe": round(ruwe_val, 4) if ruwe_val is not None else None,
                     "phot_g_mean_mag": round(g_mag, 4) if g_mag is not None else None,
+                    "phot_bp_mean_mag": round(bp_mag, 4) if bp_mag is not None else None,
+                    "phot_rp_mean_mag": round(rp_mag, 4) if rp_mag is not None else None,
                     "pmra_mas_per_year": round(pmra_val, 6)
                     if pmra_val is not None
                     else None,

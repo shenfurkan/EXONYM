@@ -39,6 +39,11 @@ FPP_CLAIM_BLOCK_REASON = (
     "observed photometry and scene constraints."
 )
 DEFAULT_TRICERATOPS_SEED = 1729
+TREX_SCENE_MANIFEST_RELATIVE_PATH = Path("data") / "external" / "trex_scene.json"
+
+
+class TrexSceneUnavailableError(RuntimeError):
+    """Required candidate-owned TREX scene evidence is unavailable or invalid."""
 
 
 
@@ -191,6 +196,197 @@ def _snapshot_artifacts(workspace: Any, artifacts: Iterable[object]) -> list:
 def _verify_snapshot(workspace: Any, artifacts: Iterable[object]) -> None:
     """Fail closed when an input changes during an optional-engine run."""
     _snapshot_artifacts(workspace, artifacts)
+
+
+def _scene_number(value: object, name: str, *, positive: bool = False) -> float:
+    if isinstance(value, bool):
+        raise TrexSceneUnavailableError("TREX scene {0} must be a finite number".format(name))
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TrexSceneUnavailableError("TREX scene {0} must be a finite number".format(name)) from exc
+    if not math.isfinite(number) or (positive and number <= 0.0):
+        qualifier = "positive finite" if positive else "finite"
+        raise TrexSceneUnavailableError(
+            "TREX scene {0} must be a {1} number".format(name, qualifier)
+        )
+    return number
+
+
+def _scene_artifact(workspace: Any, record: object, label: str) -> Dict[str, str]:
+    """Validate one hash-bound candidate artifact referenced by a scene manifest."""
+    if not isinstance(record, dict):
+        raise TrexSceneUnavailableError("TREX scene {0} artifact is missing".format(label))
+    path_value = record.get("path")
+    digest = record.get("sha256")
+    if not isinstance(path_value, str) or not isinstance(digest, str):
+        raise TrexSceneUnavailableError("TREX scene {0} artifact is malformed".format(label))
+    try:
+        artifact = _artifact_from_path(workspace, workspace.path / path_value)
+    except (OSError, ValueError) as exc:
+        raise TrexSceneUnavailableError(
+            "TREX scene {0} artifact is unavailable".format(label)
+        ) from exc
+    if artifact["sha256"] != digest:
+        raise TrexSceneUnavailableError(
+            "TREX scene {0} artifact does not match its recorded hash".format(label)
+        )
+    return artifact
+
+
+def _load_trex_scene(workspace: Any, tic_id: int, sectors: list) -> Tuple[Any, list]:
+    """Build a fully evidenced TREX scene from candidate-owned immutable inputs.
+
+    ``data/external/trex_scene.json`` binds explicit stellar values, every Gaia
+    neighbor, a contrast curve, and a retained TRILEGAL/background population.
+    Values are deliberately not inferred from incomplete catalog records: an
+    absent field makes the optional FPP execution unresolved.
+    """
+    from ..archive import load_validated_archival_gaia_sources, load_validated_archival_report
+    from .trex import TargetScene
+
+    manifest_path = workspace.path / TREX_SCENE_MANIFEST_RELATIVE_PATH
+    try:
+        manifest = load_fpp_report(manifest_path)
+    except ValueError as exc:
+        raise TrexSceneUnavailableError(
+            "TREX scene manifest is unavailable or invalid: {0}".format(exc)
+        ) from exc
+    if manifest.get("schema_version") != 1 or manifest.get("candidate_id") != workspace.candidate_id:
+        raise TrexSceneUnavailableError("TREX scene manifest does not match this candidate")
+    if manifest.get("source") != "candidate-data":
+        raise TrexSceneUnavailableError("TREX scene manifest is not candidate-derived evidence")
+
+    target = manifest.get("target")
+    if not isinstance(target, dict):
+        raise TrexSceneUnavailableError("TREX scene manifest lacks target parameters")
+    target_values = {
+        "ra_deg": _scene_number(target.get("ra_deg"), "target.ra_deg"),
+        "dec_deg": _scene_number(target.get("dec_deg"), "target.dec_deg"),
+        "M_s_Msun": _scene_number(target.get("mass_solar"), "target.mass_solar", positive=True),
+        "R_s_Rsun": _scene_number(target.get("radius_solar"), "target.radius_solar", positive=True),
+        "Teff_K": _scene_number(target.get("teff_k"), "target.teff_k", positive=True),
+        "Tmag": _scene_number(target.get("tess_mag"), "target.tess_mag"),
+        "plx_mas": _scene_number(target.get("parallax_mas"), "target.parallax_mas", positive=True),
+    }
+
+    archival_record = manifest.get("archival_gaia")
+    archival_artifact = _scene_artifact(workspace, archival_record, "archival Gaia")
+    if archival_artifact["path"] != "outputs/archival_vetting_report.json":
+        raise TrexSceneUnavailableError("TREX scene must bind the archival Gaia report")
+    archival_report = load_validated_archival_report(workspace)
+    gaia = archival_report.get("gaia_astrometry") if isinstance(archival_report, dict) else None
+    archival_target, archival_neighbors, _ = load_validated_archival_gaia_sources(workspace)
+    if not isinstance(gaia, dict) or not isinstance(archival_target, dict):
+        raise TrexSceneUnavailableError("TREX requires a validated archival Gaia target context")
+    sources = gaia.get("sources")
+    if (
+        not isinstance(sources, list)
+        or gaia.get("nearby_sources_count") != len(sources)
+        or any(not isinstance(source, dict) for source in sources)
+    ):
+        raise TrexSceneUnavailableError("TREX archival Gaia source list is incomplete")
+    target_source_id = str(archival_target.get("source_id", ""))
+    neighbor_source_ids = [str(neighbor.get("source_id", "")) for neighbor in archival_neighbors]
+    if not target_source_id or any(not source_id for source_id in neighbor_source_ids):
+        raise TrexSceneUnavailableError("TREX archival Gaia sources require identifiers")
+    if len(set([target_source_id] + neighbor_source_ids)) != len(sources):
+        raise TrexSceneUnavailableError("TREX archival Gaia source identifiers are ambiguous")
+    if not isinstance(archival_record, dict) or archival_record.get("target_source_id") != target_source_id:
+        raise TrexSceneUnavailableError("TREX scene Gaia target does not match archival evidence")
+    if archival_record.get("neighbor_source_ids") != neighbor_source_ids:
+        raise TrexSceneUnavailableError("TREX scene does not retain every archival Gaia neighbor")
+
+    # Archival coordinates are rounded to six decimals when the report is written.
+    coordinates = archival_report.get("target_coordinates") if isinstance(archival_report, dict) else None
+    if not isinstance(coordinates, dict):
+        raise TrexSceneUnavailableError("TREX archival Gaia context lacks target coordinates")
+    for key in ("ra_deg", "dec_deg"):
+        archived = _scene_number(coordinates.get(key), "archival target.{0}".format(key))
+        if not math.isclose(target_values[key], archived, rel_tol=0.0, abs_tol=0.5e-6):
+            raise TrexSceneUnavailableError("TREX scene target coordinates do not match archival evidence")
+
+    contrast = manifest.get("contrast_curve")
+    contrast_artifact = _scene_artifact(workspace, contrast, "contrast curve")
+    if not isinstance(contrast, dict):
+        raise TrexSceneUnavailableError("TREX scene contrast curve is missing")
+    separations = contrast.get("separations_arcsec")
+    values = contrast.get("delta_magnitudes")
+    if not isinstance(separations, list) or not isinstance(values, list):
+        raise TrexSceneUnavailableError("TREX scene contrast curve arrays are missing")
+
+    background = manifest.get("background")
+    background_artifact = _scene_artifact(workspace, background, "TRILEGAL/background")
+    if not isinstance(background, dict) or background.get("model") not in ("trilegal", "background"):
+        raise TrexSceneUnavailableError("TREX requires a declared TRILEGAL/background population")
+    star_count = background.get("star_count")
+    if isinstance(star_count, bool) or not isinstance(star_count, int) or star_count < 0:
+        raise TrexSceneUnavailableError("TREX background star_count must be a non-negative integer")
+
+    manifest_neighbors = manifest.get("resolved_neighbors")
+    if not isinstance(manifest_neighbors, list) or len(manifest_neighbors) != len(neighbor_source_ids):
+        raise TrexSceneUnavailableError("TREX scene does not include every archival Gaia neighbor")
+    by_source_id = {}
+    for neighbor in manifest_neighbors:
+        if not isinstance(neighbor, dict) or not isinstance(neighbor.get("source_id"), str):
+            raise TrexSceneUnavailableError("TREX scene has a malformed Gaia neighbor")
+        source_id = neighbor["source_id"]
+        if source_id in by_source_id:
+            raise TrexSceneUnavailableError("TREX scene repeats an archival Gaia neighbor")
+        by_source_id[source_id] = neighbor
+    if set(by_source_id) != set(neighbor_source_ids):
+        raise TrexSceneUnavailableError("TREX scene Gaia neighbors do not match archival evidence")
+    archival_neighbors_by_id = {
+        str(neighbor["source_id"]): neighbor for neighbor in archival_neighbors
+    }
+    resolved_neighbors = []
+    for source_id in neighbor_source_ids:
+        manifest_neighbor = by_source_id[source_id]
+        separation = _scene_number(
+            manifest_neighbor.get("separation_arcsec"),
+            "neighbor.separation_arcsec",
+            positive=True,
+        )
+        archived_separation = _scene_number(
+            archival_neighbors_by_id[source_id].get("separation_arcsec"),
+            "archival neighbor.separation_arcsec",
+            positive=True,
+        )
+        if not math.isclose(separation, archived_separation, rel_tol=0.0, abs_tol=0.5e-6):
+            raise TrexSceneUnavailableError(
+                "TREX scene neighbor separation does not match archival Gaia evidence"
+            )
+        resolved_neighbors.append(
+            {
+                "source_id": source_id,
+                "M_s": _scene_number(
+                    manifest_neighbor.get("mass_solar"), "neighbor.mass_solar", positive=True
+                ),
+                "R_s": _scene_number(
+                    manifest_neighbor.get("radius_solar"), "neighbor.radius_solar", positive=True
+                ),
+                "delta_mag": _scene_number(
+                    manifest_neighbor.get("delta_mag"), "neighbor.delta_mag"
+                ),
+                "separation_arcsec": separation,
+            }
+        )
+    try:
+        scene = TargetScene(
+            tic_id=tic_id,
+            sectors=sectors,
+            contrast_separations=separations,
+            contrast_values=values,
+            resolved_neighbors=resolved_neighbors,
+            N_background=star_count,
+            trilegal_cache=workspace.path / background_artifact["path"],
+            background_sha256=background_artifact["sha256"],
+            **target_values,
+        )
+    except (TypeError, ValueError) as exc:
+        raise TrexSceneUnavailableError("TREX scene parameters are invalid: {0}".format(exc)) from exc
+    manifest_artifact = _artifact_from_path(workspace, manifest_path)
+    return scene, [manifest_artifact, archival_artifact, contrast_artifact, background_artifact]
 
 
 def _prepare_observed_transit_input(workspace: Any, signal: Optional[str]) -> Dict[str, Any]:
@@ -607,7 +803,7 @@ def run_triceratops_simulation(
     if tic_id is not None and runtime_compatible:
         try:
             import numpy as np
-            from exonym.vetting.trex import TargetScene, run_trex_vetting
+            from exonym.vetting.trex import run_trex_vetting
 
             _verify_snapshot(workspace, input_snapshot)
 
@@ -620,25 +816,21 @@ def run_triceratops_simulation(
             if observed_input is None:
                 raise RuntimeError("observed input preparation did not complete")
 
-            from ..inputs import load_stellar_parameters
-            stellar = load_stellar_parameters(workspace)
-            ra_val = float(stellar.get("ra_deg", observed_input.get("ra_deg", 0.0)))
-            dec_val = float(stellar.get("dec_deg", observed_input.get("dec_deg", 0.0)))
-            m_s_val = float(stellar.get("mass_solar", observed_input.get("M_s_Msun", 1.0)))
-            r_s_val = float(stellar.get("radius_solar", observed_input.get("R_s_Rsun", 1.0)))
-
-            scene = TargetScene(
-                tic_id=tic_id,
-                ra_deg=ra_val,
-                dec_deg=dec_val,
-                M_s_Msun=m_s_val,
-                R_s_Rsun=r_s_val,
-                sectors=observed_input.get("sectors", []),
+            scene, scene_artifacts = _load_trex_scene(
+                workspace,
+                tic_id,
+                observed_input.get("sectors", []),
             )
+            input_snapshot = _snapshot_artifacts(
+                workspace, list(input_snapshot) + list(scene_artifacts)
+            )
+            _verify_snapshot(workspace, input_snapshot)
 
             time_val = observed_input.get("time_days") if "time_days" in observed_input else observed_input.get("time")
             flux_val = observed_input["flux"]
-            sigma_val = observed_input.get("flux_err") if "flux_err" in observed_input else observed_input.get("sigma", 0.001)
+            sigma_val = observed_input.get("flux_err") if "flux_err" in observed_input else observed_input.get("sigma")
+            if sigma_val is None:
+                raise RuntimeError("observed input lacks a measured flux uncertainty")
 
             result = run_trex_vetting(
                 scene,
@@ -667,17 +859,24 @@ def run_triceratops_simulation(
             scenarios = {}
             triceratops_error = "{0}: {1}".format(type(exc).__name__, exc)
             triceratops_exception_type = type(exc).__name__
-            triceratops_error_code = "trex-runtime-failed"
-            warnings.warn(
-                "TREX Monte Carlo failed: {0!r}. "
-                "FPP will be marked UNVALIDATED.".format(exc),
-                stacklevel=2,
+            triceratops_error_code = (
+                "trex-scene-unavailable"
+                if isinstance(exc, TrexSceneUnavailableError)
+                else "trex-runtime-failed"
             )
+            warning = (
+                "TREX scene is unavailable: {0!r}. FPP will be marked UNVALIDATED."
+                if isinstance(exc, TrexSceneUnavailableError)
+                else "TREX Monte Carlo failed: {0!r}. FPP will be marked UNVALIDATED."
+            )
+            warnings.warn(warning.format(exc), stacklevel=2)
             source = "triceratops-failed-UNVALIDATED"
     if source in ("not-run", "triceratops-failed-UNVALIDATED"):
         unavailable = source == "not-run" or triceratops_exception_type in {
             "ImportError", "ModuleNotFoundError", "PackageNotFoundError",
-        } or triceratops_error_code == "triceratops-runtime-incompatible"
+        } or triceratops_error_code in {
+            "triceratops-runtime-incompatible", "trex-scene-unavailable",
+        }
         failure = triceratops_error or "TRICERATOPS could not run because no numeric TIC identifier is available."
         write_triceratops_vetting_decision(
             workspace,
@@ -688,7 +887,9 @@ def run_triceratops_simulation(
             input_artifacts=input_snapshot,
             error={
                 "code": triceratops_error_code
-                if triceratops_error_code == "triceratops-runtime-incompatible"
+                if triceratops_error_code in {
+                    "triceratops-runtime-incompatible", "trex-scene-unavailable",
+                }
                 else "triceratops-unavailable"
                 if unavailable
                 else triceratops_error_code,

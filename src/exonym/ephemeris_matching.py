@@ -40,11 +40,12 @@ RECORDED_EVIDENCE_SOURCE_KINDS = (
     "literature",
 )
 _RECORD_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-METHOD = "known-signal-ephemeris-period-epoch-duration-harmonic-v4"
-PERIOD_RELATIVE_TOLERANCE = 0.001
+METHOD = "known-signal-ephemeris-period-epoch-duration-harmonic-v6"
 EPOCH_TOLERANCE_DURATION_MULTIPLIER = 1.0
 DURATION_RELATIVE_TOLERANCE = 0.5
-HARMONIC_FACTORS = (0.5, 1.0, 2.0, 3.0)
+# Only adjacent first-order j:(j-1) resonances and their reciprocals are
+# comparison candidates; higher-order ratios are not silently promoted.
+HARMONIC_FACTORS = (0.5, 0.6667, 0.75, 0.8, 1.0, 1.25, 1.3333, 1.5, 2.0)
 
 # Every automatic source must state its field names, duration unit, and whether
 # the retained epoch is safe to compare with a candidate BJD_TDB ephemeris.
@@ -52,6 +53,7 @@ HARMONIC_FACTORS = (0.5, 1.0, 2.0, 3.0)
 _PROVIDER_FIELD_CONTRACTS = {
     SUPPORTED_PROVIDER: {
         "period": "pl_orbper",
+        "period_uncertainty": ("pl_orbpererr1", "pl_orbpererr2"),
         "epoch": "pl_tranmid",
         "duration": "pl_trandur",
         "name": ("pl_name", "pl_letter"),
@@ -60,6 +62,7 @@ _PROVIDER_FIELD_CONTRACTS = {
     },
     TOI_PROVIDER: {
         "period": "pl_orbper",
+        "period_uncertainty": ("pl_orbpererr1", "pl_orbpererr2"),
         "epoch": "pl_tranmid",
         "duration": "pl_trandurh",
         "name": ("toi",),
@@ -68,6 +71,7 @@ _PROVIDER_FIELD_CONTRACTS = {
     },
     RECORDED_EVIDENCE_PROVIDER: {
         "period": "pl_orbper",
+        "period_uncertainty": (),
         "epoch": "pl_tranmid",
         "duration": "pl_trandur",
         "name": ("pl_name",),
@@ -298,10 +302,12 @@ def _candidate_ephemeris(
     path = _ephemeris_input_path(workspace, signal, source)
     if not path.is_file():
         raise ValueError("known-signal matching cannot hash the selected ephemeris artifact")
+    candidate_period_uncertainty = _candidate_period_uncertainty(path)
     return {
         "source": source,
         "signal": signal,
         "period_days": period,
+        "period_uncertainty_days": candidate_period_uncertainty,
         "epoch_btjd": epoch,
         "duration_hours": duration_days * 24.0,
         "time_system": BTJD_TIME_SYSTEM,
@@ -451,6 +457,31 @@ def _field(record: Mapping[str, Any], name: str) -> Optional[float]:
     return _finite(lowered.get(name.lower()))
 
 
+def _positive_uncertainty(record: Mapping[str, Any], names: Sequence[str]) -> Optional[float]:
+    """Return the largest finite reported bound without inferring one."""
+    values = [
+        abs(value)
+        for name in names
+        if (value := _field(record, name)) is not None and value != 0.0
+    ]
+    return max(values) if values else None
+
+
+def _candidate_period_uncertainty(path: Path) -> Optional[float]:
+    """Read an explicitly reported period uncertainty from the selected artifact."""
+    try:
+        payload = _read_json(path)
+    except (OSError, UnicodeError, ValueError):
+        return None
+    transit = payload.get("transit")
+    if not isinstance(transit, Mapping):
+        transit = payload
+    return _positive_uncertainty(
+        transit,
+        ("period_uncertainty_days", "period_error_days", "period_err_days"),
+    )
+
+
 def _epoch_time_scale(provider: str, source: Mapping[str, Any], contract: Mapping[str, Any]) -> str:
     """Return BJD_TDB only when the provider row itself declares that scale."""
     if provider != SUPPORTED_PROVIDER:
@@ -479,12 +510,26 @@ def _compare_record(
     epoch_bjd = raw_epoch_bjd if epoch_time_scale == "BJD_TDB" else None
     duration_hours = _field(source, str(contract["duration"]))
     candidate_period = float(candidate["period_days"])
+    candidate_period_uncertainty = _finite(candidate.get("period_uncertainty_days"))
+    if candidate_period_uncertainty is not None and candidate_period_uncertainty <= 0.0:
+        candidate_period_uncertainty = None
+    known_period_uncertainty = _positive_uncertainty(
+        source, tuple(contract["period_uncertainty"])
+    )
     candidate_epoch = float(candidate["epoch_btjd"])
     candidate_duration = float(candidate["duration_hours"])
     ratio = period / candidate_period
     harmonic = min(HARMONIC_FACTORS, key=lambda value: abs(ratio - value))
     period_difference = abs(ratio - harmonic) / harmonic
-    period_harmonic_match = period_difference <= PERIOD_RELATIVE_TOLERANCE
+    period_difference_days = abs(period - harmonic * candidate_period)
+    period_tolerance = (
+        math.hypot(known_period_uncertainty, abs(harmonic) * candidate_period_uncertainty)
+        if known_period_uncertainty is not None and candidate_period_uncertainty is not None
+        else None
+    )
+    period_harmonic_match = (
+        period_difference_days <= period_tolerance if period_tolerance is not None else None
+    )
     epoch_btjd = epoch_bjd - 2457000.0 if epoch_bjd is not None else None
     epoch_tolerance = max(candidate_duration, duration_hours or 0.0) * EPOCH_TOLERANCE_DURATION_MULTIPLIER / 24.0
     # For non-unity harmonic ratios the epoch folding must happen on the
@@ -493,7 +538,7 @@ def _compare_record(
     # period would always fail the epoch check and fall through to
     # "no-ephemeris-match".
     phase_period = candidate_period
-    if harmonic != 1.0 and period_harmonic_match:
+    if harmonic != 1.0 and period_harmonic_match is True:
         phase_period = min(period, candidate_period)
     epoch_delta = (
         _phase_delta_days(epoch_btjd, candidate_epoch, phase_period)
@@ -507,7 +552,7 @@ def _compare_record(
     # as its declared boolean/null contract; the explicit flag carries the
     # additional review state without making candidate artifacts schema-invalid.
     harmonic_parity_ambiguous = bool(
-        period_harmonic_match and epoch_match_raw is False and harmonic != 1.0
+        period_harmonic_match is True and epoch_match_raw is False and harmonic != 1.0
     )
     epoch_match = epoch_match_raw
     duration_ratio = duration_hours / candidate_duration if duration_hours is not None and candidate_duration > 0 else None
@@ -526,12 +571,17 @@ def _compare_record(
             (str(source.get(field, "")) for field in contract["name"] if str(source.get(field, ""))), None
         ),
         "known_period_days": period,
+        "known_period_uncertainty_days": known_period_uncertainty,
         "known_epoch_bjd_tdb": epoch_bjd,
         "known_epoch_time_scale": epoch_time_scale,
         "known_duration_hours": duration_hours,
         "period_ratio_known_over_candidate": ratio,
         "nearest_harmonic_factor": harmonic,
         "period_relative_difference": period_difference,
+        "period_difference_days": period_difference_days,
+        "candidate_period_uncertainty_days": candidate_period_uncertainty,
+        "period_tolerance_days": period_tolerance,
+        "period_tolerance_status": "available" if period_tolerance is not None else "unavailable",
         "period_harmonic_match": period_harmonic_match,
         "epoch_phase_delta_days": epoch_delta,
         "epoch_tolerance_days": epoch_tolerance if epoch_bjd is not None else None,
@@ -540,8 +590,11 @@ def _compare_record(
         "duration_ratio_known_over_candidate": duration_ratio,
         "duration_compatible": duration_compatible,
         "review_required": bool(
-            period_harmonic_match
-            and (epoch_match is True or epoch_match is None or harmonic_parity_ambiguous)
+            period_harmonic_match is None
+            or (
+                period_harmonic_match is True
+                and (epoch_match is True or epoch_match is None or harmonic_parity_ambiguous)
+            )
         ),
     }
 
@@ -580,13 +633,18 @@ def match_known_signal_ephemerides(
     unresolved = [
         entry
         for entry in comparisons
-        if entry["period_harmonic_match"]
-        and (entry["epoch_match"] is None or entry["harmonic_parity_ambiguous"])
+        if entry["review_required"] and not (
+            entry["period_harmonic_match"] is True and entry["epoch_match"] is True
+        )
     ]
     if full_matches:
         status = "review-required-known-signal-match"
     elif unresolved:
-        status = "review-required-period-harmonic"
+        status = (
+            "review-required-period-tolerance-unavailable"
+            if any(entry["period_tolerance_status"] == "unavailable" for entry in unresolved)
+            else "review-required-period-harmonic"
+        )
     elif source_snapshots:
         status = "no-ephemeris-match-in-current-supported-catalog"
     else:
@@ -604,7 +662,7 @@ def match_known_signal_ephemerides(
         "candidate_ephemeris": candidate,
         "configuration": {
             "supported_providers": [SUPPORTED_PROVIDER, TOI_PROVIDER, RECORDED_EVIDENCE_PROVIDER],
-            "period_relative_tolerance": PERIOD_RELATIVE_TOLERANCE,
+            "period_comparison_method": "reported-period-uncertainty-quadrature-v1",
             "epoch_tolerance_duration_multiplier": EPOCH_TOLERANCE_DURATION_MULTIPLIER,
             "duration_relative_tolerance": DURATION_RELATIVE_TOLERANCE,
             "harmonic_factors": list(HARMONIC_FACTORS),

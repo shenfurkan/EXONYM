@@ -6,7 +6,12 @@ import hashlib
 import numpy as np
 import pytest
 
-from exonym.inputs import _time_values_to_btjd_tdb, load_light_curve_table, load_transit_ephemeris
+from exonym.inputs import (
+    _time_values_to_btjd_tdb,
+    load_light_curve_table,
+    load_stellar_parameters,
+    load_transit_ephemeris,
+)
 from exonym.detrending import detrend_candidate, transit_mask_from_ephemeris
 from exonym.workspace import create_candidate
 
@@ -115,8 +120,8 @@ def test_explicit_btjd_field_rejects_a_conflicting_time_system(tmp_path):
     ephemeris = load_transit_ephemeris(workspace)
 
     assert ephemeris["source"] == "partial-candidate-config"
-    assert ephemeris["field_sources"]["epoch_btjd"] == "synthetic-demo"
-    assert ephemeris["time_system"] == "synthetic-demo"
+    assert ephemeris["field_sources"]["epoch_btjd"] is None
+    assert ephemeris["time_system"] is None
 
 
 def test_detrended_loader_requires_hash_bound_raw_provenance(tmp_path):
@@ -301,7 +306,7 @@ def test_detrended_loader_rejects_a_changed_transit_mask_ephemeris(tmp_path):
         ),
         encoding="utf-8",
     )
-    # An invalidated BLS binding resolves to synthetic-demo while a fresh BLS
+    # An invalidated BLS binding resolves to unavailable while a fresh BLS
     # rerun is pending. The existing detrended artifact remains usable because
     # its own immutable mask provenance is complete and hash-bound.
     assert load_light_curve_table(
@@ -319,3 +324,25 @@ def test_detrended_loader_rejects_a_changed_transit_mask_ephemeris(tmp_path):
             require_raw_provenance=True,
             detrending_method="running-median",
         )
+
+
+def test_load_transit_ephemeris_and_stellar_parameters_fail_closed_when_absent(tmp_path):
+    """Missing ephemeris/stellar parameter files must yield source='unavailable' and None fields."""
+    workspace = create_candidate(tmp_path, "empty-candidate")
+
+    ephemeris = load_transit_ephemeris(workspace)
+    assert ephemeris["source"] == "unavailable"
+    assert ephemeris["period_days"] is None
+    assert ephemeris["epoch_btjd"] is None
+    assert ephemeris["duration_days"] is None
+    assert ephemeris["depth_ppm"] is None
+    assert ephemeris["time_system"] is None
+
+    stellar = load_stellar_parameters(workspace)
+    assert stellar["source"] == "unavailable"
+    assert stellar["teff_k"] is None
+    assert stellar["logg_cgs"] is None
+    assert stellar["feh"] is None
+    assert stellar["mass_solar"] is None
+    assert stellar["radius_solar"] is None
+    assert stellar["parallax_mas"] is None

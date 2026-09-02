@@ -211,6 +211,97 @@ def _observed_input_stub(tmp_path):
     }
 
 
+def _write_trex_scene_manifest(workspace, *, include_neighbor=True):
+    external = workspace.path / "data" / "external"
+    external.mkdir(parents=True, exist_ok=True)
+    contrast_path = external / "synthetic_contrast_curve.csv"
+    contrast_path.write_text("separation_arcsec,delta_mag\n0.1,2.0\n1.0,5.0\n", encoding="utf-8")
+    background_path = external / "synthetic_trilegal.csv"
+    background_path.write_text("synthetic background population\n", encoding="utf-8")
+    target = {
+        "source_id": "synthetic-target",
+        "separation_arcsec": 0.0,
+        "ra_deg": 10.0,
+        "dec_deg": -20.0,
+        "phot_g_mean_mag": 10.0,
+    }
+    sources = [target]
+    neighbors = []
+    if include_neighbor:
+        sources.append(
+            {
+                "source_id": "synthetic-neighbor",
+                "separation_arcsec": 1.0,
+                "ra_deg": 10.01,
+                "dec_deg": -20.01,
+                "phot_g_mean_mag": 13.0,
+            }
+        )
+        neighbors.append(
+            {
+                "source_id": "synthetic-neighbor",
+                "mass_solar": 0.7,
+                "radius_solar": 0.7,
+                "delta_mag": 3.0,
+                "separation_arcsec": 1.0,
+            }
+        )
+    archival_path = workspace.path / "outputs" / "archival_vetting_report.json"
+    archival_path.write_text(
+        json.dumps(
+            {
+                "candidate_id": workspace.candidate_id,
+                "target_coordinates": {"ra_deg": 10.0, "dec_deg": -20.0},
+                "gaia_astrometry": {
+                    "validated": True,
+                    "query_status": "ok",
+                    "target_source_id": "synthetic-target",
+                    "nearby_sources_count": len(sources),
+                    "sources": sources,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+    manifest = {
+        "schema_version": 1,
+        "candidate_id": workspace.candidate_id,
+        "source": "candidate-data",
+        "target": {
+            "ra_deg": 10.0,
+            "dec_deg": -20.0,
+            "mass_solar": 1.0,
+            "radius_solar": 1.0,
+            "teff_k": 5700.0,
+            "parallax_mas": 2.0,
+            "tess_mag": 10.0,
+        },
+        "archival_gaia": {
+            "path": "outputs/archival_vetting_report.json",
+            "sha256": digest(archival_path),
+            "target_source_id": "synthetic-target",
+            "neighbor_source_ids": [neighbor["source_id"] for neighbor in neighbors],
+        },
+        "contrast_curve": {
+            "path": "data/external/synthetic_contrast_curve.csv",
+            "sha256": digest(contrast_path),
+            "separations_arcsec": [0.1, 1.0],
+            "delta_magnitudes": [2.0, 5.0],
+        },
+        "background": {
+            "path": "data/external/synthetic_trilegal.csv",
+            "sha256": digest(background_path),
+            "model": "trilegal",
+            "star_count": 2,
+        },
+        "resolved_neighbors": neighbors,
+    }
+    manifest_path = external / "trex_scene.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    return manifest_path
+
+
 def test_prepare_observed_transit_input_uses_measured_candidate_photometry(tmp_path, monkeypatch):
     from exonym.vetting.tricera_parse import _prepare_observed_transit_input
 
@@ -500,6 +591,7 @@ def test_run_triceratops_passes_measured_exposure_to_trex(tmp_path, monkeypatch)
 
     workspace, _ = _vet_workspace_stub(tmp_path, tic="123456789")
     observed = _observed_input_stub(tmp_path)
+    _write_trex_scene_manifest(workspace)
     observed["exposure_days"] = 600.0 / 86400.0
     captured = {}
 
@@ -511,8 +603,9 @@ def test_run_triceratops_passes_measured_exposure_to_trex(tmp_path, monkeypatch)
         def top_scenarios(_count):
             return []
 
-    def fake_run_trex_vetting(*_args, **kwargs):
+    def fake_run_trex_vetting(*args, **kwargs):
         captured.update(kwargs)
+        captured["scene"] = args[0]
         return Result()
 
     monkeypatch.setattr(
@@ -525,11 +618,72 @@ def test_run_triceratops_passes_measured_exposure_to_trex(tmp_path, monkeypatch)
     )
     monkeypatch.setattr("exonym.engines.check_engine", lambda _name: (True, "available"))
     monkeypatch.setattr("exonym.vetting.trex.run_trex_vetting", fake_run_trex_vetting)
-    monkeypatch.setattr("exonym.inputs.load_stellar_parameters", lambda *_args: {})
 
     run_triceratops_simulation(workspace)
 
     assert captured["exptime_days"] == pytest.approx(observed["exposure_days"])
+    assert captured["scene"].Teff_K == pytest.approx(5700.0)
+
+
+def test_run_triceratops_marks_missing_scene_evidence_unavailable(tmp_path, monkeypatch):
+    from exonym.vetting.tricera_parse import run_triceratops_simulation
+
+    workspace, _ = _vet_workspace_stub(tmp_path, tic="123456789")
+    attempted = False
+
+    def fake_run_trex_vetting(*_args, **_kwargs):
+        nonlocal attempted
+        attempted = True
+
+    monkeypatch.setattr(
+        "exonym.statistical_vetting.require_vetting_readiness",
+        lambda *_args, **_kwargs: tmp_path / "outputs" / "statistical_vetting_evidence.json",
+    )
+    monkeypatch.setattr(
+        "exonym.vetting.tricera_parse._prepare_observed_transit_input",
+        lambda *_args, **_kwargs: _observed_input_stub(tmp_path),
+    )
+    monkeypatch.setattr("exonym.engines.check_engine", lambda _name: (True, "available"))
+    monkeypatch.setattr("exonym.vetting.trex.run_trex_vetting", fake_run_trex_vetting)
+
+    report_path = run_triceratops_simulation(workspace, allow_fallback=True)
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    decision = json.loads(
+        (tmp_path / "decisions" / "triceratops_vetting_decision.json").read_text(encoding="utf-8")
+    )
+    assert attempted is False
+    assert report["FPP"] is None
+    assert report["claim_eligible"] is False
+    assert decision["execution_status"] == "unavailable"
+    assert decision["result_status"] == "unresolved"
+    assert decision["error"]["code"] == "trex-scene-unavailable"
+
+
+def test_trex_scene_requires_all_archival_gaia_neighbors(tmp_path):
+    from exonym.vetting.tricera_parse import TrexSceneUnavailableError, _load_trex_scene
+
+    workspace, _ = _vet_workspace_stub(tmp_path, tic="123456789")
+    manifest_path = _write_trex_scene_manifest(workspace)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["archival_gaia"]["neighbor_source_ids"] = []
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(TrexSceneUnavailableError, match="every archival Gaia neighbor"):
+        _load_trex_scene(workspace, 123456789, [1])
+
+
+def test_trex_scene_requires_all_finite_target_parameters(tmp_path):
+    from exonym.vetting.tricera_parse import TrexSceneUnavailableError, _load_trex_scene
+
+    workspace, _ = _vet_workspace_stub(tmp_path, tic="123456789")
+    manifest_path = _write_trex_scene_manifest(workspace)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["target"]["teff_k"] = None
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(TrexSceneUnavailableError, match="target.teff_k"):
+        _load_trex_scene(workspace, 123456789, [1])
 
 
 def test_run_triceratops_requires_readiness_inside_public_function(tmp_path, monkeypatch):
@@ -665,11 +819,18 @@ def test_load_transit_ephemeris_signal_takes_precedence(tmp_path):
     }
 
     fallback = load_transit_ephemeris(workspace, signal=".99")
-    assert fallback["source"] == "synthetic-demo"
-    assert fallback["field_sources"]["epoch_btjd"] == "synthetic-demo"
+    assert fallback["source"] == "unavailable"
+    assert fallback["period_days"] is None
+    assert fallback["epoch_btjd"] is None
+    assert fallback["duration_days"] is None
+    assert fallback["depth_ppm"] is None
 
     default = load_transit_ephemeris(workspace)
-    assert default["source"] == "synthetic-demo"
+    assert default["source"] == "unavailable"
+    assert default["period_days"] is None
+    assert default["epoch_btjd"] is None
+    assert default["duration_days"] is None
+    assert default["depth_ppm"] is None
 
 
 @pytest.mark.parametrize("signal", [".1", ".001", "01", "../escape", ".0/"])
@@ -697,9 +858,9 @@ def test_load_transit_ephemeris_keeps_partial_config_provenance_explicit(tmp_pat
     assert ephemeris["source"] == "partial-candidate-config"
     assert ephemeris["field_sources"] == {
         "period_days": "candidate-config",
-        "epoch_btjd": "synthetic-demo",
-        "duration_days": "synthetic-demo",
-        "depth_ppm": "synthetic-demo",
+        "epoch_btjd": None,
+        "duration_days": None,
+        "depth_ppm": None,
     }
 
 
@@ -3013,20 +3174,32 @@ def test_activity_reconciles_harmonic_segment_peaks_before_summary(tmp_path, mon
 
 
 def test_dilution_contamination_factor_sums_neighbors():
-    from exonym.dilution import gaia_contamination_factor
+    from exonym.dilution import gaia_contamination_factor, gaia_g_to_tess_mag
 
     rows = [
         {"separation_arcsec": 10.0, "flux_ratio": 0.02, "is_target": False},
         {"separation_arcsec": 100.0, "flux_ratio": 0.5, "is_target": False},
-        {"separation_arcsec": 5.0, "flux_ratio": None, "is_target": False, "g_mag": 14.0},
+        {
+            "separation_arcsec": 5.0,
+            "flux_ratio": None,
+            "is_target": False,
+            "g_mag": 14.0,
+            "bp_rp_color": 1.5,
+        },
     ]
-    result = gaia_contamination_factor(rows, search_radius_arcsec=60.0, target_g_mag=10.0)
-    expected = 0.02 + 10.0 ** (-0.4 * (14.0 - 10.0))
+    result = gaia_contamination_factor(
+        rows, search_radius_arcsec=60.0, target_g_mag=10.0, target_bp_rp_color=0.8
+    )
+    target_t_mag = gaia_g_to_tess_mag(10.0, 0.8)
+    neighbor_t_mag = gaia_g_to_tess_mag(14.0, 1.5)
+    assert target_t_mag is not None
+    assert neighbor_t_mag is not None
+    expected = 0.02 + 10.0 ** (-0.4 * (neighbor_t_mag - target_t_mag))
     assert result["contamination_factor"] == pytest.approx(expected, abs=1e-6)
     assert result["n_neighbors_included"] == 2
 
 
-def test_dilution_ignores_nonfinite_neighbor_measurements():
+def test_dilution_marks_nonfinite_neighbor_measurements_unavailable():
     from exonym.dilution import gaia_contamination_factor
 
     # Arrange
@@ -3039,7 +3212,8 @@ def test_dilution_ignores_nonfinite_neighbor_measurements():
     result = gaia_contamination_factor(rows)
 
     # Assert
-    assert result["contamination_factor"] == 0.0
+    assert result["availability"] == "unavailable"
+    assert result["contamination_factor"] is None
     assert result["n_neighbors_included"] == 0
 
 

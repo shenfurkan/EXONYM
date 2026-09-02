@@ -17,7 +17,13 @@ import math
 from typing import Optional, Tuple
 
 import numpy as np
+from astropy.constants import c, h, k_B
 from scipy.interpolate import InterpolatedUnivariateSpline
+
+
+# TESS's published pivot wavelength is used for the Planck surface-brightness
+# ratio; common prefactors cancel when comparing two stellar photospheres.
+_TESS_PIVOT_WAVELENGTH_M = 786.5e-9
 
 # ---------------------------------------------------------------------------
 # Torres (2010) + Chabrier CDWRF mass-radius-Teff splines
@@ -102,10 +108,17 @@ def J_Ks_to_Tmag(J_mags: np.ndarray, Ks_mags: np.ndarray) -> np.ndarray:
     m2 = (0.7 < JK) & (JK <= 1.0)
     m3 = JK < -0.1
     m4 = JK > 1.0
-    Tmags[m1] = J[m1] + 1.22163 * JK[m1] ** 3 - 1.74299 * JK[m1] ** 2 + 1.89115 * JK[m1] + 0.0563
-    Tmags[m2] = J[m2] - 269.372 * JK[m2] ** 3 + 668.453 * JK[m2] ** 2 - 545.64 * JK[m2] + 147.811
-    Tmags[m3] = J[m3] + 0.5
-    Tmags[m4] = J[m4] + 1.75
+    first_relation = lambda colour: (
+        1.22163 * colour ** 3 - 1.74299 * colour ** 2 + 1.89115 * colour + 0.0563
+    )
+    second_relation = lambda colour: (
+        -269.372 * colour ** 3 + 668.453 * colour ** 2 - 545.64 * colour + 147.811
+    )
+    second_offset = first_relation(0.70) - second_relation(0.70)
+    Tmags[m1] = J[m1] + first_relation(JK[m1])
+    Tmags[m2] = J[m2] + second_relation(JK[m2]) + second_offset
+    Tmags[m3] = J[m3] + first_relation(-0.1)
+    Tmags[m4] = J[m4] + second_relation(1.0) + second_offset
     return Tmags
 
 
@@ -180,6 +193,29 @@ def flux_ratio_to_delta_mag(flux_ratio: np.ndarray) -> np.ndarray:
     return -2.5 * np.log10(np.maximum(flux_ratio, 1e-30))
 
 
+def tess_surface_brightness_ratio(
+    numerator_teff_k: np.ndarray,
+    denominator_teff_k: np.ndarray,
+) -> np.ndarray:
+    """Return the TESS-band Planck surface-brightness ratio of two stars.
+
+    The ratio is evaluated at the TESS pivot wavelength.  This preserves the
+    temperature dependence of the observed band while cancelling the Planck
+    prefactor shared by the two photospheres.
+    """
+    numerator = np.asarray(numerator_teff_k, dtype=float)
+    denominator = np.asarray(denominator_teff_k, dtype=float)
+    if (
+        not np.all(np.isfinite(numerator))
+        or not np.all(np.isfinite(denominator))
+        or np.any(numerator <= 0.0)
+        or np.any(denominator <= 0.0)
+    ):
+        raise ValueError("effective temperatures must be finite and positive")
+    exponent_factor = (h.value * c.value) / (_TESS_PIVOT_WAVELENGTH_M * k_B.value)
+    return np.expm1(exponent_factor / denominator) / np.expm1(exponent_factor / numerator)
+
+
 # ---------------------------------------------------------------------------
 # Keplerian orbital mechanics
 # ---------------------------------------------------------------------------
@@ -216,6 +252,27 @@ def impact_parameter(
     return a_Rs * abs(cos_i) * (1.0 - ecc ** 2) / (1.0 + ecc * sin_w)
 
 
+def secondary_eclipse_phase(ecc: float, argp_deg: float) -> float:
+    """Return the secondary-eclipse phase from Keplerian mean anomalies."""
+    if not math.isfinite(ecc) or not 0.0 <= ecc < 1.0:
+        raise ValueError("eccentricity must be finite and in [0, 1)")
+    if not math.isfinite(argp_deg):
+        raise ValueError("argument of periastron must be finite")
+
+    argp = math.radians(argp_deg)
+
+    def mean_anomaly(true_anomaly: float) -> float:
+        eccentric_anomaly = 2.0 * math.atan2(
+            math.sqrt(1.0 - ecc) * math.sin(0.5 * true_anomaly),
+            math.sqrt(1.0 + ecc) * math.cos(0.5 * true_anomaly),
+        )
+        return eccentric_anomaly - ecc * math.sin(eccentric_anomaly)
+
+    transit_mean_anomaly = mean_anomaly(0.5 * math.pi - argp)
+    occultation_mean_anomaly = mean_anomaly(1.5 * math.pi - argp)
+    return (occultation_mean_anomaly - transit_mean_anomaly) % (2.0 * math.pi) / (2.0 * math.pi)
+
+
 __all__ = [
     "stellar_relations",
     "J_Ks_to_Tmag",
@@ -224,7 +281,9 @@ __all__ = [
     "separation_at_contrast",
     "delta_mag_to_flux_ratio",
     "flux_ratio_to_delta_mag",
+    "tess_surface_brightness_ratio",
     "semi_major_axis_cgs",
     "a_over_Rs",
     "impact_parameter",
+    "secondary_eclipse_phase",
 ]

@@ -24,6 +24,7 @@ photometry and calibrated scene-model integration.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Callable, Dict, Optional
 
 import numpy as np
@@ -41,12 +42,12 @@ def run_trex_vetting(
     sigma: float,
     period_days: float,
     depth_ppm: float,
+    exptime_days: float,
     u1: float = 0.4,
     u2: float = 0.2,
     n_draws: int = 2000,
     random_seed: Optional[int] = None,
     progress_callback: Optional[Callable] = None,
-    exptime_days: float = 0.00139,
     nsamples: int = 20,
 ) -> TrexResult:
     """Run a complete TREX false-positive probability calculation.
@@ -68,6 +69,12 @@ def run_trex_vetting(
     Returns:
         TrexResult with FPP, NFPP, per-scenario probabilities, and diagnostics.
     """
+    if not isinstance(exptime_days, (int, float, np.number)) or not math.isfinite(exptime_days) or exptime_days <= 0.0:
+        raise ValueError("exptime_days must be finite and positive")
+    if not isinstance(scene, TargetScene):
+        raise TypeError("scene must be a validated TargetScene")
+    scene.verify_background()
+
     # Build companion data
     companion_delta_mags = scene.companion_delta_mags()
     nearby_stars = scene.neighbor_dicts_for_evidence()
@@ -82,6 +89,7 @@ def run_trex_vetting(
         R_s_Rsun=scene.R_s_Rsun,
         u1=u1,
         u2=u2,
+        exptime_days=exptime_days,
         n_draws=n_draws,
         contrast_separations=scene.contrast_separations,
         contrast_values=scene.contrast_values,
@@ -91,7 +99,6 @@ def run_trex_vetting(
         nearby_stars=nearby_stars if nearby_stars else None,
         random_seed=random_seed,
         progress_callback=progress_callback,
-        exptime_days=exptime_days,
         nsamples=nsamples,
     )
 

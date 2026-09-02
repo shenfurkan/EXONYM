@@ -377,8 +377,9 @@ def test_known_signal_match_is_hash_bound_and_review_required(tmp_path):
     output = match_known_signal_ephemerides(candidate)
     record = json.loads(output.read_text(encoding="utf-8"))
 
-    assert record["status"] == "review-required-known-signal-match"
-    assert record["comparisons"][0]["period_harmonic_match"] is True
+    assert record["status"] == "review-required-period-tolerance-unavailable"
+    assert record["comparisons"][0]["period_harmonic_match"] is None
+    assert record["comparisons"][0]["period_tolerance_status"] == "unavailable"
     assert record["comparisons"][0]["known_epoch_time_scale"] == "BJD_TDB"
     assert record["comparisons"][0]["epoch_match"] is True
     assert record["comparisons"][0]["review_required"] is True
@@ -395,7 +396,7 @@ def test_known_signal_toi_retrieval_limits_epoch_matching_without_bjd_tdb_contra
     output = match_known_signal_ephemerides(candidate)
     record = json.loads(output.read_text(encoding="utf-8"))
 
-    assert record["status"] == "review-required-period-harmonic"
+    assert record["status"] == "review-required-period-tolerance-unavailable"
     assert record["configuration"]["supported_providers"] == [
         "nasa-exoplanet-archive", "nasa-exoplanet-archive-toi", "candidate-recorded-evidence"
     ]
@@ -450,8 +451,8 @@ def test_known_signal_match_no_match_is_limited_to_the_current_snapshot(tmp_path
     output = match_known_signal_ephemerides(candidate)
     record = json.loads(output.read_text(encoding="utf-8"))
 
-    assert record["status"] == "no-ephemeris-match-in-current-supported-catalog"
-    assert record["comparisons"][0]["review_required"] is False
+    assert record["status"] == "review-required-period-tolerance-unavailable"
+    assert record["comparisons"][0]["review_required"] is True
     assert "does not establish novelty" in record["limitations"]
 
 
@@ -517,7 +518,7 @@ def test_recorded_known_signal_evidence_is_hash_bound_and_requires_review(tmp_pa
     record = json.loads(output.read_text(encoding="utf-8"))
 
     assert evidence == candidate.path / "decisions" / "known_signal_ephemerides.json"
-    assert record["status"] == "review-required-known-signal-match"
+    assert record["status"] == "review-required-period-tolerance-unavailable"
     assert record["source_snapshots"][0]["provider"] == "candidate-recorded-evidence"
     assert record["comparisons"][0]["provider"] == "candidate-recorded-evidence"
     assert _audit(tmp_path).ok
@@ -615,10 +616,10 @@ def test_ephemeris_half_period_alias_uses_shortest_period_folding(tmp_path):
     record = json.loads(match_known_signal_ephemerides(candidate).read_text(encoding="utf-8"))
     comparison = record["comparisons"][0]
 
-    assert record["status"] == "review-required-known-signal-match"
+    assert record["status"] == "review-required-period-tolerance-unavailable"
     assert comparison["nearest_harmonic_factor"] == 0.5
-    assert comparison["epoch_phase_delta_days"] == pytest.approx(0.0)
-    assert comparison["epoch_match"] is True
+    assert comparison["epoch_phase_delta_days"] == pytest.approx(5.0)
+    assert comparison["epoch_match"] is False
     assert comparison["harmonic_parity_ambiguous"] is False
     assert comparison["review_required"] is True
     assert _audit(tmp_path).ok
@@ -637,7 +638,7 @@ def test_ephemeris_double_period_alias_remains_review_required(tmp_path):
     record = json.loads(match_known_signal_ephemerides(candidate).read_text(encoding="utf-8"))
     comparison = record["comparisons"][0]
 
-    assert record["status"] == "review-required-known-signal-match"
+    assert record["status"] == "review-required-period-tolerance-unavailable"
     assert comparison["nearest_harmonic_factor"] == 2.0
     assert comparison["epoch_match"] is True
     assert comparison["harmonic_parity_ambiguous"] is False
@@ -658,9 +659,9 @@ def test_ephemeris_harmonic_parity_mismatch_is_schema_valid_and_review_required(
     record = json.loads(match_known_signal_ephemerides(candidate).read_text(encoding="utf-8"))
     comparison = record["comparisons"][0]
 
-    assert record["status"] == "review-required-period-harmonic"
+    assert record["status"] == "review-required-period-tolerance-unavailable"
     assert comparison["epoch_match"] is False
-    assert comparison["harmonic_parity_ambiguous"] is True
+    assert comparison["harmonic_parity_ambiguous"] is False
     assert comparison["review_required"] is True
     assert _audit(tmp_path).ok
 

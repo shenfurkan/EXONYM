@@ -26,8 +26,11 @@ loaded dynamically from candidate-local workspace files.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import math
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -37,6 +40,7 @@ import numpy as np
 from .archive import load_validated_archival_gaia_sources
 from .inputs import load_tpf_cubes, load_transit_ephemeris
 from .lightcurve import phase_hours
+from .resources import read_schema_text
 from .workspace import CandidateWorkspace
 
 # TESS pixel-plate scale: 21.0 arcsec/pixel (Ricker et al. 2015, JATIS 1, 014003).
@@ -156,6 +160,233 @@ def gaussian_prf_kernel(
     )
     total = float(np.sum(kernel))
     return kernel / total if total > 0 else kernel
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
+    """Write strict JSON with an atomic same-directory replacement."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".tmp", dir=str(path.parent)
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True, allow_nan=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(str(temporary_path), str(path))
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+
+
+def _strict_json(path: Path) -> Dict[str, Any]:
+    """Read a finite, unambiguous JSON object from a candidate-owned asset."""
+    def reject_constant(value: str) -> object:
+        raise ValueError("non-finite JSON constant: {0}".format(value))
+
+    def parse_float(value: str) -> float:
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            raise ValueError("non-finite JSON number")
+        return numeric
+
+    def reject_duplicates(pairs: Sequence[Tuple[str, object]]) -> Dict[str, Any]:
+        parsed: Dict[str, Any] = {}
+        for key, value in pairs:
+            if key in parsed:
+                raise ValueError("duplicate JSON key: {0}".format(key))
+            parsed[key] = value
+        return parsed
+
+    payload = json.loads(
+        path.read_text(encoding="utf-8-sig"),
+        parse_constant=reject_constant,
+        parse_float=parse_float,
+        object_pairs_hook=reject_duplicates,
+    )
+    if not isinstance(payload, dict):
+        raise ValueError("JSON asset must be an object")
+    return payload
+
+
+def _validate_candidate_artifact(
+    workspace: CandidateWorkspace, artifact: object, label: str
+) -> Dict[str, str]:
+    """Validate one hash-bound, candidate-local calibration source artifact."""
+    if not isinstance(artifact, dict):
+        raise ValueError("{0} must be an object".format(label))
+    path_value = artifact.get("path")
+    digest = artifact.get("sha256")
+    role = artifact.get("role")
+    if not all(isinstance(value, str) and value for value in (path_value, digest, role)):
+        raise ValueError("{0} must declare path, sha256, and role".format(label))
+    relative = Path(path_value)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("{0} must remain inside the candidate workspace".format(label))
+    path = workspace.path / relative
+    if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(workspace.path.resolve()):
+        raise ValueError("{0} must reference a regular candidate-owned file".format(label))
+    if _sha256(path) != digest:
+        raise ValueError("{0} SHA-256 does not match its candidate-owned file".format(label))
+    return {"path": relative.as_posix(), "sha256": digest, "role": role}
+
+
+def calibrated_prf_assets(workspace: CandidateWorkspace) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Verify the candidate-owned PRF template, provenance manifest, and recovery calibration."""
+    external = workspace.path / "data" / "external"
+    template = external / "tess_prf.fits"
+    manifest = external / "tess_prf.manifest.json"
+    recovery = external / "tess_prf.recovery_calibration.json"
+    for path in (template, manifest, recovery):
+        if not path.is_file() or path.is_symlink():
+            return None, "missing required mission-calibrated PRF asset: {0}".format(path.name)
+    try:
+        digest = _sha256(template)
+        manifest_data = _strict_json(manifest)
+        recovery_data = _strict_json(recovery)
+        import jsonschema
+
+        manifest_schema = json.loads(
+            read_schema_text(workspace.repository_root, "tess-prf-manifest.schema.json")
+        )
+        recovery_schema = json.loads(
+            read_schema_text(workspace.repository_root, "tess-prf-recovery-calibration.schema.json")
+        )
+        format_checker = jsonschema.FormatChecker()
+        jsonschema.validate(manifest_data, manifest_schema, format_checker=format_checker)
+        jsonschema.validate(recovery_data, recovery_schema, format_checker=format_checker)
+    except (ImportError, OSError, UnicodeError, ValueError, json.JSONDecodeError, jsonschema.ValidationError) as exc:
+        return None, "unreadable mission-calibrated PRF asset: {0}".format(exc)
+    if manifest_data.get("candidate_id") != workspace.candidate_id or recovery_data.get("candidate_id") != workspace.candidate_id:
+        return None, "mission-calibrated PRF assets do not match the candidate workspace"
+    if manifest_data.get("prf_sha256") != digest:
+        return None, "PRF template SHA-256 does not match its manifest"
+    if recovery_data.get("prf_sha256") != digest:
+        return None, "PRF template SHA-256 does not match its recovery calibration"
+    if recovery_data.get("recovery_passed") is not True:
+        return None, "PRF recovery calibration has not passed"
+    provenance = manifest_data["provenance"]
+    if str(provenance.get("source", "")).strip().lower() == "synthetic":
+        return None, "synthetic PRF provenance cannot establish mission calibration"
+    detector_bounds = manifest_data.get("detector_bounds")
+    if isinstance(detector_bounds, dict) and (
+        detector_bounds["column_min"] > detector_bounds["column_max"]
+        or detector_bounds["row_min"] > detector_bounds["row_max"]
+    ):
+        return None, "PRF detector bounds are not ordered"
+    try:
+        source_artifacts = [
+            _validate_candidate_artifact(workspace, artifact, "PRF recovery source artifact")
+            for artifact in recovery_data["source_artifacts"]
+        ]
+    except ValueError as exc:
+        return None, str(exc)
+    return {
+        "prf_template": {"path": "data/external/tess_prf.fits", "sha256": digest},
+        "prf_manifest": {"path": "data/external/tess_prf.manifest.json", "sha256": _sha256(manifest)},
+        "recovery_calibration": {"path": "data/external/tess_prf.recovery_calibration.json", "sha256": _sha256(recovery)},
+        "applicability": {
+            key: manifest_data[key] for key in ("mission", "sector", "camera", "ccd", "detector_bounds", "field_position")
+            if key in manifest_data
+        },
+        "recovery_source_artifacts": source_artifacts,
+    }, None
+
+
+def _prf_applies_to_cube(calibration_assets: Dict[str, Any], cube: Dict[str, Any]) -> bool:
+    """Require the calibrated PRF's declared detector assignment to match one TPF."""
+    applicability = calibration_assets.get("applicability")
+    header = cube.get("header")
+    if not isinstance(applicability, dict) or not isinstance(header, dict):
+        return False
+    expected = {
+        "sector": applicability.get("sector"),
+        "camera": applicability.get("camera"),
+        "ccd": applicability.get("ccd"),
+    }
+    observed = {
+        "sector": cube.get("sector", header.get("SECTOR")),
+        "camera": header.get("CAMERA"),
+        "ccd": header.get("CCD"),
+    }
+    try:
+        return all(int(observed[name]) == int(expected[name]) for name in expected)
+    except (TypeError, ValueError):
+        return False
+
+
+def load_calibrated_prf_template(path: Path) -> np.ndarray:
+    """Load one finite, non-negative empirical PRF image from a FITS asset."""
+    try:
+        from astropy.io import fits
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError("astropy is required to read the calibrated PRF FITS template") from exc
+    try:
+        with fits.open(path, memmap=False) as hdul:
+            template = np.asarray(hdul[0].data, dtype=float)
+    except (OSError, ValueError, IndexError) as exc:
+        raise RuntimeError("calibrated PRF template FITS is unreadable") from exc
+    if template.ndim != 2 or template.size == 0 or not np.all(np.isfinite(template)) or np.any(template < 0.0):
+        raise RuntimeError("calibrated PRF template must be a finite non-negative 2-D image")
+    total = float(np.sum(template))
+    if total <= 0.0:
+        raise RuntimeError("calibrated PRF template has zero total response")
+    return template / total
+
+
+def calibrated_prf_kernel(
+    x_grid: np.ndarray, y_grid: np.ndarray, x0: float, y0: float, template: np.ndarray
+) -> np.ndarray:
+    """Sample an empirical PRF template at a source's sub-pixel detector position."""
+    from scipy.ndimage import map_coordinates
+
+    centre_y = (template.shape[0] - 1.0) / 2.0
+    centre_x = (template.shape[1] - 1.0) / 2.0
+    kernel = map_coordinates(
+        template,
+        [y_grid - float(y0) + centre_y, x_grid - float(x0) + centre_x],
+        order=1,
+        mode="constant",
+        cval=0.0,
+    )
+    total = float(np.sum(kernel))
+    return kernel / total if total > 0.0 else kernel
+
+
+def fit_calibrated_difference_image_prf(
+    difference_image: np.ndarray,
+    pixel_mask: np.ndarray,
+    x_positions: Sequence[float],
+    y_positions: Sequence[float],
+    template: np.ndarray,
+) -> Tuple[Optional[np.ndarray], Optional[float], int]:
+    """Fit all finite footprint pixels with candidate-owned empirical PRFs and NNLS."""
+    from scipy.optimize import nnls
+
+    valid_mask = np.asarray(pixel_mask, dtype=bool) & np.isfinite(difference_image)
+    if not np.any(valid_mask) or not x_positions or len(x_positions) != len(y_positions):
+        return None, None, 0
+    yy, xx = np.indices(difference_image.shape, dtype=float)
+    design = np.column_stack([
+        calibrated_prf_kernel(xx[valid_mask], yy[valid_mask], x0, y0, template)
+        for x0, y0 in zip(x_positions, y_positions)
+    ])
+    try:
+        amplitudes, residual = nnls(design, np.asarray(difference_image[valid_mask], dtype=float), maxiter=max(5000, 10 * len(x_positions)))
+    except (ValueError, RuntimeError) as exc:
+        logging.warning("empirical PRF NNLS convergence failure: %s", exc)
+        return None, None, 0
+    return amplitudes, float(residual), int(valid_mask.sum())
 
 
 def fit_difference_image_prf(
@@ -358,6 +589,7 @@ def localize_difference_image(
     pixel_scale_arcsec: float = PIXEL_SCALE_ARCSEC,
     cos_dec: float = 1.0,
     core_fraction: float = 0.2,
+    wcs: Any = None,
 ) -> Dict[str, float]:
     """Compute the flux-weighted centroid of the difference-image core
     and its astrometric offset from the target position.
@@ -450,6 +682,8 @@ def localize_difference_image(
     if differences.size < 3 or float(np.max(differences)) <= 0:
         return {
             "ra_offset_arcsec": float("nan"),
+            "ra_cosdec_offset_arcsec": float("nan"),
+            "ra_coordinate_offset_arcsec": float("nan"),
             "dec_offset_arcsec": float("nan"),
             "offset_arcsec": float("nan"),
             "n_difference_pixels": 0,
@@ -462,6 +696,8 @@ def localize_difference_image(
     if core_differences.size < MIN_DIFFERENCE_CORE_PIXELS:
         return {
             "ra_offset_arcsec": float("nan"),
+            "ra_cosdec_offset_arcsec": float("nan"),
+            "ra_coordinate_offset_arcsec": float("nan"),
             "dec_offset_arcsec": float("nan"),
             "offset_arcsec": float("nan"),
             "n_difference_pixels": int(core_differences.size),
@@ -470,6 +706,37 @@ def localize_difference_image(
     weights = core_differences / float(np.sum(core_differences))
     centroid_x = float(np.sum(xx[core_mask] * weights))
     centroid_y = float(np.sum(yy[core_mask] * weights))
+    # Prefer the WCS spherical tangent-plane transformation. Pixel axes can be
+    # rotated, so detector columns are not inherently projected right ascension.
+    if wcs is not None:
+        try:
+            target_ra, target_dec = wcs.pixel_to_world_values(float(target_x), float(target_y))
+            centroid_ra, centroid_dec = wcs.pixel_to_world_values(centroid_x, centroid_y)
+            target_ra, target_dec, centroid_ra, centroid_dec = (
+                float(np.asarray(value)) for value in (target_ra, target_dec, centroid_ra, centroid_dec)
+            )
+            ra0 = math.radians(target_ra)
+            dec0 = math.radians(target_dec)
+            ra = math.radians(centroid_ra)
+            dec = math.radians(centroid_dec)
+            delta_ra = math.atan2(math.sin(ra - ra0), math.cos(ra - ra0))
+            denominator = math.sin(dec0) * math.sin(dec) + math.cos(dec0) * math.cos(dec) * math.cos(delta_ra)
+            if not math.isfinite(denominator) or denominator <= 0.0:
+                raise ValueError("invalid tangent-plane projection")
+            ra_cosdec_offset = math.degrees(math.cos(dec) * math.sin(delta_ra) / denominator) * 3600.0
+            dec_offset = math.degrees((math.cos(dec0) * math.sin(dec) - math.sin(dec0) * math.cos(dec) * math.cos(delta_ra)) / denominator) * 3600.0
+            ra_coordinate_offset = math.degrees(delta_ra) * 3600.0
+            return {
+                "ra_offset_arcsec": round(ra_cosdec_offset, 4),
+                "ra_cosdec_offset_arcsec": round(ra_cosdec_offset, 4),
+                "ra_coordinate_offset_arcsec": round(ra_coordinate_offset, 4),
+                "dec_offset_arcsec": round(dec_offset, 4),
+                "offset_arcsec": round(math.hypot(ra_cosdec_offset, dec_offset), 4),
+                "n_difference_pixels": int(np.count_nonzero(core_mask)),
+                "coordinate_method": "fits-wcs-spherical-tangent-offset",
+            }
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            pass
     # Convert pixel offsets to on-sky projected equatorial arcseconds.
     # ASTROPHYSICAL_GUARD: the pixel X-axis already measures the projected
     # displacement Δα·cos(δ); multiplying again by cos(δ) here (and again in
@@ -477,12 +744,16 @@ def localize_difference_image(
     # suppressing centroid-shift significance for high-declination targets.
     ra_offset = (centroid_x - float(target_x)) * pixel_scale_arcsec
     dec_offset = (centroid_y - float(target_y)) * pixel_scale_arcsec
+    coordinate_ra_offset = ra_offset / cos_dec if math.isfinite(cos_dec) and abs(cos_dec) > np.finfo(float).eps else ra_offset
     return {
         "ra_offset_arcsec": round(ra_offset, 4),
+        "ra_cosdec_offset_arcsec": round(ra_offset, 4),
+        "ra_coordinate_offset_arcsec": round(coordinate_ra_offset, 4),
         "dec_offset_arcsec": round(dec_offset, 4),
         # Total separation Δr = √(Δα²cos²δ + Δδ²) (Perryman §4.3.2, Eq. 4.8).
         "offset_arcsec": round(math.hypot(ra_offset, dec_offset), 4),
         "n_difference_pixels": int(np.count_nonzero(core_mask)),
+        "coordinate_method": "pixel-scale-projected-offset",
     }
 
 
@@ -757,6 +1028,7 @@ def _load_archival_gaia_neighbors(
             "g_mag": target_g_mag,
             "separation_arcsec": _finite_float(target.get("separation_arcsec")) or 0.0,
             "flux_ratio": 1.0,  # target relative to itself
+            "tess_flux_ratio": 1.0,
             "is_target": True,
         }
     ]
@@ -767,7 +1039,17 @@ def _load_archival_gaia_neighbors(
         separation_arcsec = _finite_float(source.get("separation_arcsec"))
         if None in (ra_deg, dec_deg, g_mag, separation_arcsec):
             continue
-        # Flux ratio via Pogson's law: F₂/F₁ = 10^(-0.4 × Δmag).
+        target_bp = _finite_float(target.get("phot_bp_mean_mag"))
+        target_rp = _finite_float(target.get("phot_rp_mean_mag"))
+        source_bp = _finite_float(source.get("phot_bp_mean_mag"))
+        source_rp = _finite_float(source.get("phot_rp_mean_mag"))
+        tess_ratio: Optional[float] = None
+        if None not in (target_bp, target_rp, source_bp, source_rp):
+            target_t_mag = _gaia_to_tess_mag(target_g_mag, target_bp - target_rp)
+            source_t_mag = _gaia_to_tess_mag(g_mag, source_bp - source_rp)
+            tess_ratio = 10.0 ** (-0.4 * (source_t_mag - target_t_mag))
+        # Gaia G is retained as a catalog context ratio; a TESS-band estimate is
+        # present only where BP/RP colors make the transform applicable.
         rows.append(
             {
                 "source_id": str(source.get("source_id", "archival-neighbor")),
@@ -776,12 +1058,18 @@ def _load_archival_gaia_neighbors(
                 "g_mag": g_mag,
                 "separation_arcsec": separation_arcsec,
                 "flux_ratio": 10.0 ** (-0.4 * (g_mag - target_g_mag)),
+                "tess_flux_ratio": tess_ratio,
                 "is_target": False,
             }
         )
     metadata["position_availability"] = "available"
     metadata["n_catalog_neighbors"] = len(rows) - 1
     return rows, metadata
+
+
+def _gaia_to_tess_mag(g_mag: float, bp_rp: float) -> float:
+    """Apply the Stassun et al. Gaia BP/RP to TESS magnitude relation."""
+    return g_mag + (-0.00522555 * bp_rp**3 + 0.0891337 * bp_rp**2 - 0.633923 * bp_rp + 0.0324473)
 
 
 def _select_sources(
@@ -842,17 +1130,8 @@ def _select_sources(
     pixel_scale : float
         ``PIXEL_SCALE_ARCSEC`` (21.0).
     """
-    shape = pipeline.shape
     sources: List[Dict[str, Any]] = []
     for row in neighbors:
-        # ASTROPHYSICAL_HEURISTIC: skip sources beyond the search radius;
-        # beyond ~60 arcsec the PRF wings are negligible.
-        if float(row.get("separation_arcsec", 0.0)) > search_radius_arcsec:
-            continue
-        # ASTROPHYSICAL_HEURISTIC: flux ratio < 1e-5 corresponds to a source
-        # ~12.5 mag fainter than the target — below the confusion limit.
-        if float(row.get("flux_ratio", 0.0)) < 1e-5:
-            continue
         try:
             # astropy WCS: world (RA, Dec) → pixel (column, row).
             sx, sy = wcs.world_to_pixel_values(float(row["ra"]), float(row["dec"]))
@@ -860,18 +1139,17 @@ def _select_sources(
             sy = float(np.asarray(sy))
         except Exception:
             continue
-        # NUMERICAL_GUARD: allow ±2 px beyond the TPF edge to avoid rejecting
-        # sources whose centroid lies just outside the raster.
-        if not (-3 <= sx < shape[1] + 2 and -3 <= sy < shape[0] + 2):
-            continue
+        # The archive cone limits the scene. Retain every successfully projected
+        # Gaia source; NNLS evaluates its empirical template over all finite
+        # footprint pixels, including sources whose PRF wings are negligible.
         sources.append(
             {
                 "source_id": row.get("source_id", "neighbor"),
                 "x_pix": sx,
                 "y_pix": sy,
-                "g_mag": float(row.get("g_mag", 20.0)),
-                "flux_ratio": float(row.get("flux_ratio", 0.0)),
-                "separation_arcsec": float(row.get("separation_arcsec", 0.0)),
+                "g_mag": _finite_float(row.get("g_mag")),
+                "flux_ratio": _finite_float(row.get("flux_ratio")),
+                "separation_arcsec": _finite_float(row.get("separation_arcsec")),
                 "is_target": bool(row.get("is_target", False)),
             }
         )
@@ -892,12 +1170,7 @@ def _select_sources(
     # not the WCS projection, to avoid sub-pixel WCS jitter.
     target_entry["x_pix"] = float(target_x)
     target_entry["y_pix"] = float(target_y)
-    # Keep only the five brightest non-target neighbours for the NNLS fit.
-    non_target = sorted(
-        (src for src in sources if not src["is_target"]),
-        key=lambda src: src["g_mag"],
-    )[:5]
-    return [target_entry] + non_target, cos_dec, PIXEL_SCALE_ARCSEC
+    return [target_entry] + [src for src in sources if not src["is_target"]], cos_dec, PIXEL_SCALE_ARCSEC
 
 
 def _fit_one_difference_image(
@@ -910,6 +1183,8 @@ def _fit_one_difference_image(
     n_in: int,
     n_out: int,
     sector: int,
+    template: np.ndarray,
+    wcs: Any = None,
 ) -> Dict[str, Any]:
     """Orchestrate PRF decomposition and centroid localisation for one sector.
 
@@ -946,11 +1221,8 @@ def _fit_one_difference_image(
     - If a neighbour dominates the NNLS fit OR the centroid offset is
       large, the signal may originate from a blended background eclipsing
       binary (BEB/NEB).
-    - This screening is UNCALIBRATED: the Gaussian PRF approximation,
-      lack of covariance modelling, and absence of injected-source
-      calibration mean the source-assignment status is always
-      ``"screening_only_uncalibrated_prf"`` when adequate core pixels
-      exist, and ``"unresolved_insufficient_difference_core"`` otherwise.
+    - A missing WCS prevents catalogue-neighbour projection, so that sector
+      remains inconclusive and cannot make a source-assignment statement.
 
     Returns
     -------
@@ -960,15 +1232,16 @@ def _fit_one_difference_image(
     """
     pixel_mask = pipeline & np.isfinite(difference_image)
     # NNLS PRF decomposition on the pipeline aperture pixels.
-    amplitudes, residual, n_pixels = fit_difference_image_prf(
+    amplitudes, residual, n_pixels = fit_calibrated_difference_image_prf(
         difference_image,
         pixel_mask,
         [src["x_pix"] for src in sources],
         [src["y_pix"] for src in sources],
+        template,
     )
     # Flux-weighted centroid of the difference-image core.
     centroid = localize_difference_image(
-        difference_image, pipeline, target_x, target_y, cos_dec=cos_dec
+        difference_image, pipeline, target_x, target_y, cos_dec=cos_dec, wcs=wcs
     )
     if amplitudes is None:
         return {
@@ -1006,14 +1279,13 @@ def _fit_one_difference_image(
     difference_core_resolved = (
         int(centroid["n_difference_pixels"]) >= MIN_DIFFERENCE_CORE_PIXELS
     )
-    if not difference_core_resolved:
+    if wcs is None:
+        source_assignment_status = "inconclusive_wcs_unavailable"
+    elif not difference_core_resolved:
         source_assignment_status = "unresolved_insufficient_difference_core"
     else:
-        # SCIENTIFIC_BOUNDARY: even with adequate core pixels, the Gaussian PRF
-        # approximation lacks calibration; automated source assignment is not
-        # validated (see output caveats).
-        source_assignment_status = "screening_only_uncalibrated_prf"
-    source_assignment_interpretable = False
+        source_assignment_status = "calibrated_empirical_prf"
+    source_assignment_interpretable = difference_core_resolved and wcs is not None
     # Target-to-max-other amplitude ratio: high values favour on-target origin.
     ratio = target_amplitude / max_other if max_other is not None and max_other > 0.0 else None
     return {
@@ -1090,14 +1362,10 @@ def run_prf_localization(
 
     SCIENTIFIC_BOUNDARY
     -------------------
-    The output ``calibration_status`` is always ``"uncalibrated"`` and
-    ``validation_eligible`` is always ``False``.  The Gaussian PRF
-    approximation, absence of covariance modelling, and lack of
-    injected-source calibration mean this engine cannot independently
-    validate or exclude a planetary origin.  Its role is to provide
-    diagnostic evidence for the vetting triage layer (routing score
-    ``s_localization``), where results are combined with odd-even depth,
-    ellipsoidal variation, activity, and dilution diagnostics.
+    ``calibrated`` is true only when hash-bound mission PRF and recovery
+    assets apply to every completed TPF sector and every sector has usable
+    WCS for source projection. ``validation_eligible`` remains false: this
+    diagnostic cannot independently validate or exclude a planetary origin.
 
     Parameters
     ----------
@@ -1115,15 +1383,16 @@ def run_prf_localization(
     """
     outputs_dir = workspace.path / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
-    # A nominal Gaussian is not a mission-calibrated PRF. Do not create
-    # source-competition evidence until official, position-aware PRF assets and
-    # their recovery calibration are supplied as candidate-owned inputs.
-    payload = {
+    output_path = outputs_dir / "prf_localization_results.json"
+    calibration_assets, calibration_error = calibrated_prf_assets(workspace)
+    if calibration_assets is None:
+        payload = {
         "schema_version": "1.0",
         "work_package": "PRF_SOURCE_LOCALIZATION",
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "candidate_id": workspace.candidate_id,
         "source": "not-run-mission-calibrated-prf-required",
+        "calibrated": False,
         "calibration_status": "uncalibrated",
         "validation_eligible": False,
         "method": "not-run: mission-calibrated PRF assets are required",
@@ -1143,13 +1412,28 @@ def run_prf_localization(
             "conclusion": "inconclusive_mission_calibrated_prf_required",
         },
         "caveats": [
-            "Localization did not run because no mission-calibrated, position-aware PRF library and recovery calibration are available.",
+            "Localization did not run because required mission-calibrated PRF assets did not verify: {0}".format(calibration_error),
             "The nominal Gaussian screening model is prohibited from producing localization evidence.",
         ],
-    }
-    output_path = outputs_dir / "prf_localization_results.json"
-    output_path.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-    return output_path
+        }
+        _write_json_atomic(output_path, payload)
+        return output_path
+    try:
+        template = load_calibrated_prf_template(workspace.path / calibration_assets["prf_template"]["path"])
+    except RuntimeError as exc:
+        payload = {
+            "schema_version": "1.0", "work_package": "PRF_SOURCE_LOCALIZATION",
+            "generated_utc": datetime.now(timezone.utc).isoformat(), "candidate_id": workspace.candidate_id,
+            "source": "not-run-invalid-mission-calibrated-prf", "calibrated": False,
+            "calibration_status": "uncalibrated", "validation_eligible": False,
+            "method": "not-run: verified empirical PRF template was unreadable", "prf_model": None,
+            "search_radius_arcsec": float(search_radius_arcsec), "source_catalog": "not-read",
+            "skipped_tpf_products": [], "sector_results": [],
+            "summary": {"n_sectors": 0, "n_completed": 0, "sectors_with_competing_sources_modeled": 0, "sectors_with_unresolved_difference_core": 0, "sectors_with_uncalibrated_prf": 0, "median_target_to_other_difference_ratio": None, "median_difference_image_offset_arcsec": None, "conclusion": "inconclusive_invalid_mission_calibrated_prf"},
+            "caveats": ["The hash-bound PRF template could not be read: {0}".format(exc)],
+        }
+        _write_json_atomic(output_path, payload)
+        return output_path
 
     ephemeris = load_transit_ephemeris(workspace)
     required_ephemeris_fields = ("period_days", "epoch_btjd", "duration_days")
@@ -1176,6 +1460,7 @@ def run_prf_localization(
         source = "candidate-data"
 
     sector_results: List[Dict[str, Any]] = []
+    inapplicable_calibration_assets = False
     if source == "candidate-data":
         try:
             from astropy.wcs import WCS
@@ -1183,6 +1468,16 @@ def run_prf_localization(
             WCS = None  # type: ignore[assignment]
         # Per-sector loop: difference image → source selection → PRF fit + centroid.
         for cube in cubes:
+            if not _prf_applies_to_cube(calibration_assets, cube):
+                inapplicable_calibration_assets = True
+                sector_results.append(
+                    {
+                        "sector": int(cube["sector"]),
+                        "skipped": True,
+                        "reason": "mission-calibrated PRF does not match TPF sector, camera, and CCD",
+                    }
+                )
+                continue
             difference_image, pipeline, target_x, target_y, n_in, n_out = extract_tpf_difference_image(
                 cube, ephemeris
             )
@@ -1246,6 +1541,8 @@ def run_prf_localization(
                     n_in,
                     n_out,
                     cube["sector"],
+                    template,
+                    wcs,
                 )
             )
 
@@ -1258,6 +1555,11 @@ def run_prf_localization(
         1
         for row in completed
         if row.get("source_assignment_status") == "unresolved_insufficient_difference_core"
+    )
+    wcs_unavailable = sum(
+        1
+        for row in completed
+        if row.get("source_assignment_status") == "inconclusive_wcs_unavailable"
     )
     offsets = [
         row["difference_centroid_offset_arcsec"]
@@ -1276,26 +1578,34 @@ def run_prf_localization(
     ]
     median_ratio = float(np.median(ratios)) if ratios else None
     # --- Triage routing (see methods/engine-execution-and-triage.md) ---
+    localization_calibrated = (
+        bool(completed)
+        and not inapplicable_calibration_assets
+        and not wcs_unavailable
+        and not unresolved_difference_core
+    )
     if source == "not-run-no-candidate-tpf":
         status = "inconclusive_no_candidate_tpf"
     elif source == "not-run-no-candidate-ephemeris":
         status = "inconclusive_no_candidate_ephemeris"
+    elif inapplicable_calibration_assets:
+        status = "inconclusive_prf_asset_not_applicable"
     elif not completed:
         status = "inconclusive_no_complete_depth_maps"
+    elif wcs_unavailable:
+        status = "inconclusive_wcs_unavailable"
     elif unresolved_difference_core:
         status = "inconclusive_insufficient_difference_core"
     else:
-        # SCIENTIFIC_BOUNDARY: even a "complete" run is uncalibrated;
-        # this status is the best possible outcome and still yields
-        # validation_eligible = False.
-        status = "inconclusive_uncalibrated_prf"
+        status = "localized_calibrated_empirical_prf"
     payload = {
         "schema_version": "1.0",
         "work_package": "PRF_SOURCE_LOCALIZATION",
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "candidate_id": workspace.candidate_id,
         "source": source,
-        "calibration_status": "uncalibrated",
+        "calibrated": localization_calibrated,
+        "calibration_status": "calibrated" if localization_calibrated else "uncalibrated",
         "validation_eligible": False,
         "ephemeris_provenance": {
             "source": ephemeris.get("source"),
@@ -1303,11 +1613,9 @@ def run_prf_localization(
                 field: field_sources.get(field) for field in required_ephemeris_fields
             },
         },
-        "method": (
-            "Gaussian-PRF non-negative least-squares screening of absolute "
-            "out-of-transit minus in-transit difference images"
-        ),
-        "prf_model": "isotropic Gaussian, nominal FWHM=2.0 TESS pixels",
+        "method": "candidate-owned empirical TESS PRF non-negative least-squares fit of absolute out-of-transit minus in-transit difference images",
+        "prf_model": "candidate-owned empirical TESS PRF FITS template",
+        "calibration_assets": calibration_assets,
         "search_radius_arcsec": float(search_radius_arcsec),
         "source_catalog": source_catalog,
         "skipped_tpf_products": skipped_tpf_products,
@@ -1317,21 +1625,22 @@ def run_prf_localization(
             "n_completed": len(completed),
             "sectors_with_competing_sources_modeled": len(sectors_with_neighbors),
             "sectors_with_unresolved_difference_core": int(unresolved_difference_core),
-            "sectors_with_uncalibrated_prf": int(len(completed)),
+            "sectors_with_uncalibrated_prf": 0,
             "median_target_to_other_difference_ratio": median_ratio,
             "median_difference_image_offset_arcsec": median_offset,
             "conclusion": status,
         },
         "caveats": [
-            "Gaussian PRF approximation; formal TESS PRF library templates are not used.",
             "Absolute difference-flux amplitudes are in native TPF units, not transit depths or ppm.",
-            "No covariance, pixel-response, or injected-source calibration supports an automated source assignment.",
-            "Gaia G-band flux ratios are retained only as catalog context, not eclipse-depth constraints.",
-            "PRF wings beyond the modeled core cannot exclude a deeply eclipsed distant neighbor.",
-        ],
+            "The empirical PRF template and recovery calibration are hash-bound candidate-owned assets.",
+            "All Gaia sources projected into the finite TPF footprint are fitted simultaneously.",
+            "Gaia BP/RP-derived TESS ratios are catalog context, not eclipse-depth constraints.",
+        ] + (
+            []
+            if localization_calibrated
+            else ["The localization result is inconclusive because a calibrated source assignment was not supported for every analyzed sector."]
+        ),
     }
     output_path = outputs_dir / "prf_localization_results.json"
-    output_path.write_text(
-        json.dumps(_json_safe(payload), indent=2, allow_nan=False) + "\n", encoding="utf-8"
-    )
+    _write_json_atomic(output_path, _json_safe(payload))
     return output_path

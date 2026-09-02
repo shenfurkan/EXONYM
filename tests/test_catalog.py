@@ -483,7 +483,12 @@ def test_perryman_spectroscopic_and_atmospheric_calculations():
     assert p_val == pytest.approx(np.exp(-2.0), rel=1e-4)
 
     amp_ppm = ellipsoidal_variation_amplitude_ppm(
-        m_companion_solar=0.001, m_host_solar=1.0, r_host_solar=1.0, semi_major_axis_au=0.05
+        m_companion_solar=0.001,
+        m_host_solar=1.0,
+        r_host_solar=1.0,
+        semi_major_axis_au=0.05,
+        teff_k=5772.0,
+        u_linear=0.6,
     )
     passed, _ = ellipsoidal_gate(amp_ppm)
     assert passed

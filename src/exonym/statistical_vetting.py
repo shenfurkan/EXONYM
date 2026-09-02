@@ -498,7 +498,7 @@ def _dilution_record(workspace: CandidateWorkspace) -> Dict[str, Any]:
         "Aperture-depth comparison and Gaia G-band flux-ratio sensitivity bound.",
         "Candidate TPF aperture light curves and validated archival neighbor photometry.",
         "contamination_factor", contamination_factor, "dimensionless", stability,
-        ["Gaia G-band flux ratios are not exact TESS-band dilution corrections."],
+        ["Gaia-derived TESS flux ratios are not exact aperture dilution corrections."],
     )
 
 

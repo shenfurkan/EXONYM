@@ -49,7 +49,10 @@ PYPPLUSS_HYPOTHESIS_TEST_SCHEMA = "pyppluss-hypothesis-test.schema.json"
 ASYMMETRIC_TRANSIT_HYPOTHESIS_SCHEMA = "asymmetric-transit-hypothesis.schema.json"
 TERMINATOR_ASYMMETRY_TEST_SCHEMA = "terminator-asymmetry-test.schema.json"
 MIST_MAIN_SEQUENCE_INPUT_SCHEMA = "mist-main-sequence-input.schema.json"
+SED_INPUT_MANIFEST_SCHEMA = "sed-input-manifest.schema.json"
 SED_FIT_SCHEMA = "sed-fit-results.schema.json"
+TESS_PRF_MANIFEST_SCHEMA = "tess-prf-manifest.schema.json"
+TESS_PRF_RECOVERY_CALIBRATION_SCHEMA = "tess-prf-recovery-calibration.schema.json"
 TTV_ANALYSIS_SCHEMA = "ttv-analysis.schema.json"
 STATISTICAL_VETTING_EVIDENCE_SCHEMA = "statistical-vetting-evidence.schema.json"
 DECISIVE_REJECTION_SCHEMA = "decisive-rejection.schema.json"
@@ -446,11 +449,14 @@ def _validate_localization_scientific_evidence(report: IsolationReport, workspac
         if not isinstance(conclusion, str) or not conclusion.startswith("inconclusive_"):
             report.add(report_path, "scientific-localization-overclaim", "uncalibrated localization must retain an inconclusive conclusion")
     elif calibration_status == "calibrated":
-        report.add(
-            report_path,
-            "scientific-localization-calibration-unsupported",
-            "the current Gaussian PRF implementation has no mission-calibrated scene-model contract",
-        )
+        assets = instance.get("calibration_assets")
+        if not isinstance(assets, dict) or not all(
+            isinstance(assets.get(name), dict)
+            and isinstance(assets[name].get("sha256"), str)
+            and len(assets[name]["sha256"]) == 64
+            for name in ("prf_template", "prf_manifest", "recovery_calibration")
+        ):
+            report.add(report_path, "scientific-localization-calibration-unsupported", "calibrated localization requires hash-bound PRF template, manifest, and recovery calibration assets")
     else:
         report.add(report_path, "scientific-localization-calibration-invalid", "localization calibration_status must be uncalibrated")
 
@@ -666,7 +672,10 @@ def _load_schemas(root: Path, report: IsolationReport) -> Dict[str, object]:
         ASYMMETRIC_TRANSIT_HYPOTHESIS_SCHEMA,
         TERMINATOR_ASYMMETRY_TEST_SCHEMA,
         MIST_MAIN_SEQUENCE_INPUT_SCHEMA,
+        SED_INPUT_MANIFEST_SCHEMA,
         SED_FIT_SCHEMA,
+        TESS_PRF_MANIFEST_SCHEMA,
+        TESS_PRF_RECOVERY_CALIBRATION_SCHEMA,
         TTV_ANALYSIS_SCHEMA,
         STATISTICAL_VETTING_EVIDENCE_SCHEMA,
         DECISIVE_REJECTION_SCHEMA,
@@ -1069,7 +1078,10 @@ def validate_schemas(
     asymmetric_transit_hypothesis_schema = schemas.get(ASYMMETRIC_TRANSIT_HYPOTHESIS_SCHEMA)
     terminator_asymmetry_test_schema = schemas.get(TERMINATOR_ASYMMETRY_TEST_SCHEMA)
     mist_main_sequence_input_schema = schemas.get(MIST_MAIN_SEQUENCE_INPUT_SCHEMA)
+    sed_input_manifest_schema = schemas.get(SED_INPUT_MANIFEST_SCHEMA)
     sed_fit_schema = schemas.get(SED_FIT_SCHEMA)
+    tess_prf_manifest_schema = schemas.get(TESS_PRF_MANIFEST_SCHEMA)
+    tess_prf_recovery_calibration_schema = schemas.get(TESS_PRF_RECOVERY_CALIBRATION_SCHEMA)
     ttv_analysis_schema = schemas.get(TTV_ANALYSIS_SCHEMA)
     statistical_vetting_schema = schemas.get(STATISTICAL_VETTING_EVIDENCE_SCHEMA)
     decisive_rejection_schema = schemas.get(DECISIVE_REJECTION_SCHEMA)
@@ -1942,6 +1954,17 @@ def validate_schemas(
                         candidate_id = sed_fit_instance.get("candidate_id")
                         if candidate_id is not None and candidate_id != workspace_dir.name:
                             report.add(sed_fit_path, "schema-violation", "SED result candidate_id does not match its workspace")
+                        calibration_assets = sed_fit_instance.get("calibration_assets")
+                        if sed_fit_instance.get("calibrated") is True and isinstance(calibration_assets, dict):
+                            input_artifacts = calibration_assets.get("input_artifacts")
+                            if isinstance(input_artifacts, list):
+                                _validate_artifacts(
+                                    report,
+                                    sed_fit_path,
+                                    workspace_dir,
+                                    input_artifacts,
+                                    "SED response-integrated inputs",
+                                )
                         mist_check = sed_fit_instance.get("mist_main_sequence_check")
                         if isinstance(mist_check, dict):
                             artifacts = [
@@ -2047,6 +2070,24 @@ def validate_schemas(
                 "frozen MIST main-sequence input",
                 None,
             ),
+            (
+                workspace_dir / "data" / "external" / "sed_input_manifest.json",
+                sed_input_manifest_schema,
+                "response-integrated SED input",
+                None,
+            ),
+            (
+                workspace_dir / "data" / "external" / "tess_prf.manifest.json",
+                tess_prf_manifest_schema,
+                "TESS PRF calibration manifest",
+                None,
+            ),
+            (
+                workspace_dir / "data" / "external" / "tess_prf.recovery_calibration.json",
+                tess_prf_recovery_calibration_schema,
+                "TESS PRF recovery calibration",
+                None,
+            ),
         ]
         for filename_pattern, record_schema, label, engine in (
             ("planetsynth_interpretation.*.json", planetsynth_interpretation_schema, "PlanetSynth interpretation", "planetsynth"),
@@ -2071,6 +2112,20 @@ def validate_schemas(
                 continue
             if instance.get("candidate_id") != workspace_dir.name:
                 report.add(record_path, "schema-violation", "{0} candidate_id does not match its workspace".format(label))
+            if record_path.name == "sed_input_manifest.json":
+                for field, artifact_label in (
+                    ("photometry_artifact", "SED photometry"),
+                    ("stellar_parameters_artifact", "SED stellar parameters"),
+                ):
+                    _validate_artifacts(report, record_path, workspace_dir, [instance.get(field)], artifact_label)
+                _validate_artifacts(report, record_path, workspace_dir, instance.get("atmosphere_spectra"), "SED atmosphere")
+                _validate_artifacts(report, record_path, workspace_dir, instance.get("filter_responses"), "SED filter response")
+            elif record_path.name == "tess_prf.manifest.json":
+                template_path = workspace_dir / "data" / "external" / "tess_prf.fits"
+                if not template_path.is_file() or instance.get("prf_sha256") != _file_sha256(template_path):
+                    report.add(record_path, "artifact-hash-mismatch", "TESS PRF template SHA-256 does not match its manifest")
+            elif record_path.name == "tess_prf.recovery_calibration.json":
+                _validate_artifacts(report, record_path, workspace_dir, instance.get("source_artifacts"), "TESS PRF recovery source")
             if record_path.name == "asymmetric_transit_hypothesis.json":
                 provenance = instance.get("provenance")
                 if isinstance(provenance, dict) and isinstance(provenance.get("input_artifacts"), list):

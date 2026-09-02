@@ -519,7 +519,11 @@ def test_synthetic_bls_result_cannot_seed_an_ephemeris(tmp_path):
 
     ephemeris = load_transit_ephemeris(workspace)
 
-    assert ephemeris["source"] == "synthetic-demo"
+    assert ephemeris["source"] == "unavailable"
+    assert ephemeris["period_days"] is None
+    assert ephemeris["epoch_btjd"] is None
+    assert ephemeris["duration_days"] is None
+    assert ephemeris["depth_ppm"] is None
 
 
 def test_no_detection_bls_result_cannot_seed_an_ephemeris(tmp_path):
@@ -545,7 +549,11 @@ def test_no_detection_bls_result_cannot_seed_an_ephemeris(tmp_path):
 
     ephemeris = load_transit_ephemeris(workspace)
 
-    assert ephemeris["source"] == "synthetic-demo"
+    assert ephemeris["source"] == "unavailable"
+    assert ephemeris["period_days"] is None
+    assert ephemeris["epoch_btjd"] is None
+    assert ephemeris["duration_days"] is None
+    assert ephemeris["depth_ppm"] is None
 
 
 def test_unbound_bls_result_cannot_seed_an_ephemeris(tmp_path):
@@ -571,7 +579,11 @@ def test_unbound_bls_result_cannot_seed_an_ephemeris(tmp_path):
 
     ephemeris = load_transit_ephemeris(workspace)
 
-    assert ephemeris["source"] == "synthetic-demo"
+    assert ephemeris["source"] == "unavailable"
+    assert ephemeris["period_days"] is None
+    assert ephemeris["epoch_btjd"] is None
+    assert ephemeris["duration_days"] is None
+    assert ephemeris["depth_ppm"] is None
 
 
 def test_bls_manifest_requires_candidate_photometry_inputs(tmp_path):
@@ -618,7 +630,12 @@ def test_bls_manifest_requires_candidate_photometry_inputs(tmp_path):
         encoding="utf-8",
     )
 
-    assert load_transit_ephemeris(workspace)["source"] == "synthetic-demo"
+    ephemeris = load_transit_ephemeris(workspace)
+    assert ephemeris["source"] == "unavailable"
+    assert ephemeris["period_days"] is None
+    assert ephemeris["epoch_btjd"] is None
+    assert ephemeris["duration_days"] is None
+    assert ephemeris["depth_ppm"] is None
 
 
 def test_bls_binding_rejects_a_changed_detrending_product(tmp_path):
@@ -834,7 +851,12 @@ def test_bls_binding_rejects_legacy_unmasked_preprocessing_for_ephemeris_resolut
     )
 
     assert not is_manifest_bound_bls_result(workspace, result_path, result, None)
-    assert load_transit_ephemeris(workspace)["source"] == "synthetic-demo"
+    ephemeris = load_transit_ephemeris(workspace)
+    assert ephemeris["source"] == "unavailable"
+    assert ephemeris["period_days"] is None
+    assert ephemeris["epoch_btjd"] is None
+    assert ephemeris["duration_days"] is None
+    assert ephemeris["depth_ppm"] is None
 
 
 def test_run_bls_on_candidate_with_real_data(tmp_path):

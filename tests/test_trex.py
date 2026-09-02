@@ -6,6 +6,7 @@ Target-neutral synthetic tests exercising all TREX modules.
 from __future__ import annotations
 
 import math
+import inspect
 
 import numpy as np
 import pytest
@@ -15,7 +16,8 @@ from exonym.vetting.trex._numerics import _log_mean_exp, _normalize_probabilitie
 from exonym.vetting.trex.funcs import (
     stellar_relations, J_Ks_to_Tmag, companion_flux_ratio, dilute_flux,
     separation_at_contrast, delta_mag_to_flux_ratio, semi_major_axis_cgs,
-    a_over_Rs, impact_parameter,
+    a_over_Rs, impact_parameter, secondary_eclipse_phase,
+    tess_surface_brightness_ratio,
 )
 from exonym.vetting.trex.priors import (
     sample_rp, sample_inc, sample_ecc, sample_w, sample_q,
@@ -23,7 +25,8 @@ from exonym.vetting.trex.priors import (
 )
 from exonym.vetting.trex.target import TargetScene
 from exonym.vetting.trex.diagnostics import TrexResult, generate_diagnostics
-from exonym.vetting.trex.marginal_likelihoods import _eval_scenario
+from exonym.vetting.trex.marginal_likelihoods import _eval_scenario, calc_target_evidences
+from exonym.vetting.trex.likelihoods import simulate_EB
 
 
 # ============================================================================
@@ -111,6 +114,19 @@ def test_tmag_conversion():
     assert tmag[0] == pytest.approx(expected)
 
 
+@pytest.mark.parametrize("colour", [-0.1, 0.7, 1.0])
+def test_tmag_relation_is_continuous_at_piecewise_edges(colour):
+    epsilon = 1e-9
+    lower = J_Ks_to_Tmag(np.array([colour - epsilon]), np.array([0.0]))[0]
+    upper = J_Ks_to_Tmag(np.array([colour + epsilon]), np.array([0.0]))[0]
+    assert lower == pytest.approx(upper, abs=1e-7)
+
+
+def test_tess_surface_brightness_uses_temperature():
+    ratio = tess_surface_brightness_ratio(np.array([4000.0]), np.array([6000.0]))
+    assert 0.0 < ratio[0] < 1.0
+
+
 def test_flux_helpers():
     assert companion_flux_ratio(np.array([0.5]))[0] == pytest.approx(1.0)
     diluted = dilute_flux(np.array([0.99, 0.98, 1.0]), 0.0)
@@ -188,7 +204,7 @@ def test_eb_scenarios_use_empirical_companion_radii(monkeypatch):
     monkeypatch.setattr(
         marginal_likelihoods,
         "lnL_EB",
-        lambda *_args, **kwargs: captured.append(_args[3]) or 0.0,
+        lambda *_args, **kwargs: captured.append((_args[3], _args[4])) or 0.0,
     )
     monkeypatch.setattr(marginal_likelihoods, "sample_q", lambda draws, _mass: np.full(draws.size, 0.2))
     monkeypatch.setattr(marginal_likelihoods, "sample_inc", lambda draws: np.full(draws.size, 90.0))
@@ -197,13 +213,82 @@ def test_eb_scenarios_use_empirical_companion_radii(monkeypatch):
 
     _eval_scenario(
         np.array([0.0]), np.array([1.0]), 0.01, 5.0, 1.0, 1.0, 0.4, 0.2,
-        2, is_planet=False, is_EB=True, use_2xP=False,
+        2, is_planet=False, is_EB=True, use_2xP=False, exptime_days=0.01,
         rng=np.random.default_rng(1),
     )
 
     expected_radius, _ = stellar_relations(np.array([0.2]))
-    assert captured == pytest.approx([float(expected_radius[0])] * 2)
-    assert captured[0] != pytest.approx(0.2)
+    assert [item[0] for item in captured] == pytest.approx([float(expected_radius[0])] * 2)
+    assert captured[0][0] != pytest.approx(0.2)
+    assert 0.0 < captured[0][1] < 1.0
+
+
+@pytest.mark.parametrize("exptime_days", [0.0, -0.01, np.nan, np.inf])
+def test_evidence_requires_finite_positive_exptime(exptime_days):
+    with pytest.raises(ValueError, match="exptime_days"):
+        calc_target_evidences(
+            np.array([0.0]), np.array([1.0]), 0.01, 5.0, 1000.0, 1.0, 1.0,
+            0.4, 0.2, exptime_days=exptime_days,
+        )
+
+
+def test_evidence_forwards_exptime_to_every_scenario(monkeypatch):
+    import exonym.vetting.trex.marginal_likelihoods as marginal_likelihoods
+
+    captured = []
+    monkeypatch.setattr(
+        marginal_likelihoods,
+        "_eval_scenario",
+        lambda *_args, **kwargs: captured.append(_args[12]) or -1.0,
+    )
+    calc_target_evidences(
+        np.array([0.0]), np.array([1.0]), 0.01, 5.0, 1000.0, 1.0, 1.0,
+        0.4, 0.2, exptime_days=0.01,
+    )
+    assert captured
+    assert all(value == pytest.approx(0.01) for value in captured)
+
+
+def test_exptime_is_required_at_each_trex_layer():
+    from exonym.vetting.trex import run_trex_vetting
+    from exonym.vetting.trex.likelihoods import _batman_transit, lnL_EB, lnL_TP, simulate_TP
+
+    for function in (
+        run_trex_vetting,
+        calc_target_evidences,
+        _eval_scenario,
+        _batman_transit,
+        simulate_TP,
+        simulate_EB,
+        lnL_TP,
+        lnL_EB,
+    ):
+        assert inspect.signature(function).parameters["exptime_days"].default is inspect.Parameter.empty
+
+
+def test_secondary_eclipse_phase_uses_keplerian_mean_anomalies():
+    assert secondary_eclipse_phase(0.0, 0.0) == pytest.approx(0.5)
+    assert secondary_eclipse_phase(0.3, 0.0) != pytest.approx(0.5)
+
+
+def test_eb_model_evaluates_secondary_at_observed_times(monkeypatch):
+    import exonym.vetting.trex.likelihoods as likelihoods
+
+    calls = []
+    observed_time = np.array([-0.2, 0.0, 0.2])
+    monkeypatch.setattr(
+        likelihoods,
+        "_batman_transit",
+        lambda time, *_args, **kwargs: calls.append((time, kwargs.get("t0_days", 0.0))) or np.full_like(time, 0.8),
+    )
+
+    _, phase = simulate_EB(
+        observed_time, 0.6, 0.25, 5.0, 89.0, 1.0e12, 1.0, 0.4, 0.2,
+        0.01, ecc=0.3, argp_deg=0.0,
+    )
+    assert len(calls) == 2
+    np.testing.assert_array_equal(calls[1][0], observed_time)
+    assert calls[1][1] == pytest.approx(phase * 5.0)
 
 
 def test_lnprior_bound_finite():
@@ -220,21 +305,60 @@ def test_lnprior_background_finite():
 # TargetScene
 # ============================================================================
 
-def test_target_scene_basic():
-    scene = TargetScene(tic_id=123, ra_deg=90.0, dec_deg=-60.0)
+def _target_scene_kwargs(tmp_path):
+    background = tmp_path / "synthetic_trilegal.csv"
+    background.write_text("synthetic background population\n", encoding="utf-8")
+    import hashlib
+
+    return {
+        "tic_id": 123,
+        "ra_deg": 90.0,
+        "dec_deg": -60.0,
+        "M_s_Msun": 1.0,
+        "R_s_Rsun": 1.0,
+        "Teff_K": 5700.0,
+        "Tmag": 10.0,
+        "plx_mas": 2.0,
+        "sectors": [1],
+        "contrast_separations": np.array([0.1, 1.0]),
+        "contrast_values": np.array([2.0, 5.0]),
+        "resolved_neighbors": [],
+        "N_background": 1,
+        "trilegal_cache": background,
+        "background_sha256": hashlib.sha256(background.read_bytes()).hexdigest(),
+    }
+
+
+def test_target_scene_basic(tmp_path):
+    scene = TargetScene(**_target_scene_kwargs(tmp_path))
     assert scene.tic_id == 123
     assert scene.n_neighbors == 0
 
 
-def test_target_scene_neighbors():
-    scene = TargetScene(
-        tic_id=123, ra_deg=90.0, dec_deg=-60.0,
-        resolved_neighbors=[{"M_s": 0.5, "R_s": 0.45, "delta_mag": 2.0}],
-    )
+def test_target_scene_neighbors(tmp_path):
+    kwargs = _target_scene_kwargs(tmp_path)
+    kwargs["resolved_neighbors"] = [
+        {
+            "source_id": "synthetic-neighbor",
+            "M_s": 0.5,
+            "R_s": 0.45,
+            "delta_mag": 2.0,
+            "separation_arcsec": 1.0,
+        }
+    ]
+    scene = TargetScene(**kwargs)
     assert scene.n_neighbors == 1
     m, r, _ = scene.neighbor_masses_radii()
     assert m[0] == 0.5
     assert r[0] == 0.45
+
+
+def test_target_scene_rejects_changed_background(tmp_path):
+    scene = TargetScene(**_target_scene_kwargs(tmp_path))
+    scene.trilegal_cache.write_text("changed background population\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="changed after scene construction"):
+        scene.verify_background()
 
 
 # ============================================================================

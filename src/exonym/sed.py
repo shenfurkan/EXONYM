@@ -32,6 +32,8 @@ import hashlib
 import json
 import logging
 import math
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -53,6 +55,7 @@ from .workspace import CandidateWorkspace
 MAG_SYSTEMATIC_FLOOR = 0.05             # Minimum systematic magnitude uncertainty floor
 MIST_MAIN_SEQUENCE_INPUT = Path("data/external/mist_main_sequence_input.json")
 MIST_ISOCHRONE_GRID = Path("data/external/mist_isochrone_grid.csv")
+SED_FREE_PARAMETER_COUNT = 5
 MIST_ABSOLUTE_MAGNITUDE_COLUMNS = {
     "gaia_g": "gaia_g_abs_mag",
     "gaia_bp": "gaia_bp_abs_mag",
@@ -297,6 +300,25 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(65536), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
+    """Write strict JSON with an atomic same-directory replacement."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".tmp", dir=str(path.parent)
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True, allow_nan=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(str(temporary_path), str(path))
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
 
 
 def _reject_nonfinite_json_constant(value: str) -> object:
@@ -884,6 +906,275 @@ def _synthetic_photometry(stellar: Dict[str, Any]) -> List[Tuple[str, float, flo
     return rows
 
 
+def _read_response_integrated_sed_inputs(
+    workspace: CandidateWorkspace,
+) -> Tuple[List[Tuple[str, float, float]], Dict[str, float], List[Dict[str, str]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Load the complete, hash-bound response-integrated SED input set."""
+    manifest_path = workspace.path / "data" / "external" / "sed_input_manifest.json"
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        raise RuntimeError("response-integrated SED input manifest is missing")
+    try:
+        manifest = json.loads(
+            manifest_path.read_text(encoding="utf-8-sig"),
+            parse_constant=_reject_nonfinite_json_constant,
+            parse_float=_parse_finite_json_float,
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("response-integrated SED input manifest is invalid: {0}".format(exc)) from exc
+    if not isinstance(manifest, dict) or manifest.get("candidate_id") != workspace.candidate_id:
+        raise RuntimeError("response-integrated SED input manifest candidate_id does not match the workspace")
+    try:
+        import jsonschema
+
+        schema = json.loads(
+            read_schema_text(workspace.repository_root, "sed-input-manifest.schema.json")
+        )
+        jsonschema.validate(manifest, schema, format_checker=jsonschema.FormatChecker())
+    except ImportError as exc:
+        raise RuntimeError("jsonschema is required to validate response-integrated SED inputs") from exc
+    except (OSError, ValueError, jsonschema.ValidationError) as exc:
+        raise RuntimeError("response-integrated SED input manifest schema violation: {0}".format(exc)) from exc
+
+    photometry_artifact = _candidate_artifact(
+        workspace, manifest.get("photometry_artifact", {}), "SED photometry artifact"
+    )
+    stellar_artifact = _candidate_artifact(
+        workspace, manifest.get("stellar_parameters_artifact", {}), "SED stellar-parameters artifact"
+    )
+    spectra = manifest.get("atmosphere_spectra")
+    responses = manifest.get("filter_responses")
+    if not isinstance(spectra, list) or len(spectra) < 4 or not isinstance(responses, list) or not responses:
+        raise RuntimeError("response-integrated SED manifest requires atmosphere spectra and filter responses")
+    spectrum_artifacts = [
+        {**_candidate_artifact(workspace, item, "SED atmosphere spectrum"), **{
+            key: item.get(key) for key in ("teff_k", "logg_cgs", "feh")
+        }}
+        for item in spectra
+        if isinstance(item, dict)
+    ]
+    response_artifacts = [
+        {**_candidate_artifact(workspace, item, "SED filter response"), **{
+            key: item.get(key) for key in ("band", "zero_point_flux_jy")
+        }}
+        for item in responses
+        if isinstance(item, dict)
+    ]
+    if len(spectrum_artifacts) != len(spectra) or len(response_artifacts) != len(responses):
+        raise RuntimeError("response-integrated SED manifest contains invalid asset records")
+    try:
+        photometry = json.loads((workspace.path / photometry_artifact["path"]).read_text(encoding="utf-8"))
+        stellar = json.loads((workspace.path / stellar_artifact["path"]).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("response-integrated SED photometry or stellar parameters are unreadable") from exc
+    observations, source = _collect_observations(photometry if isinstance(photometry, dict) else None)
+    if observations is None or source != "candidate-data":
+        raise RuntimeError("response-integrated SED photometry has no readable candidate measurements")
+    required_stellar = ("teff_k", "logg_cgs", "feh", "radius_solar", "parallax_mas")
+    try:
+        stellar_values = {key: float(stellar[key]) for key in required_stellar}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("response-integrated SED stellar parameters are incomplete") from exc
+    if not all(math.isfinite(value) for value in stellar_values.values()) or stellar_values["radius_solar"] <= 0.0 or stellar_values["parallax_mas"] <= 0.0:
+        raise RuntimeError("response-integrated SED stellar parameters are not physical")
+    return observations, stellar_values, [photometry_artifact, stellar_artifact], spectrum_artifacts, response_artifacts
+
+
+def _read_spectrum(path: Path) -> Tuple[np.ndarray, np.ndarray]:
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    wavelengths = np.asarray([float(row["wavelength_angstrom"]) for row in rows], dtype=float)
+    fluxes = np.asarray([float(row["surface_flux_w_m2_per_angstrom"]) for row in rows], dtype=float)
+    if wavelengths.size < 2 or not np.all(np.isfinite(wavelengths)) or not np.all(np.isfinite(fluxes)):
+        raise RuntimeError("atmosphere spectrum requires at least two finite wavelength and flux rows")
+    if np.any(wavelengths <= 0.0) or np.any(fluxes <= 0.0) or np.any(np.diff(wavelengths) <= 0.0):
+        raise RuntimeError("atmosphere spectrum wavelengths and surface fluxes must be positive and increasing")
+    return wavelengths, fluxes
+
+
+def _read_response(path: Path) -> Tuple[np.ndarray, np.ndarray]:
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    wavelengths = np.asarray([float(row["wavelength_angstrom"]) for row in rows], dtype=float)
+    response = np.asarray([float(row["response"]) for row in rows], dtype=float)
+    if wavelengths.size < 2 or not np.all(np.isfinite(wavelengths)) or not np.all(np.isfinite(response)):
+        raise RuntimeError("filter response requires at least two finite wavelength and response rows")
+    if np.any(wavelengths <= 0.0) or np.any(response < 0.0) or np.any(np.diff(wavelengths) <= 0.0):
+        raise RuntimeError("filter response wavelengths must increase and response must be non-negative")
+    if float(np.trapz(response, wavelengths)) <= 0.0:
+        raise RuntimeError("filter response has zero integrated throughput")
+    return wavelengths, response
+
+
+def _fit_response_integrated_sed(
+    workspace: CandidateWorkspace,
+    observations: Sequence[Tuple[str, float, float]],
+    stellar: Mapping[str, float],
+    spectra: Sequence[Mapping[str, Any]],
+    responses: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Fit a response-integrated atmosphere grid with Fitzpatrick (1999) extinction."""
+    spectrum_rows = []
+    for artifact in spectra:
+        try:
+            parameters = np.asarray([artifact["teff_k"], artifact["logg_cgs"], artifact["feh"]], dtype=float)
+            wavelength, surface_flux = _read_spectrum(workspace.path / str(artifact["path"]))
+        except (KeyError, TypeError, ValueError, OSError, csv.Error) as exc:
+            raise RuntimeError("candidate atmosphere spectrum is invalid") from exc
+        if not np.all(np.isfinite(parameters)):
+            raise RuntimeError("candidate atmosphere spectrum has non-finite grid parameters")
+        spectrum_rows.append((parameters, wavelength, surface_flux))
+    response_by_band: Dict[str, Tuple[np.ndarray, np.ndarray, float]] = {}
+    for artifact in responses:
+        try:
+            band = str(artifact["band"])
+            zero_point = float(artifact["zero_point_flux_jy"])
+            wavelength, response = _read_response(workspace.path / str(artifact["path"]))
+        except (KeyError, TypeError, ValueError, OSError, csv.Error) as exc:
+            raise RuntimeError("candidate filter response is invalid") from exc
+        if not math.isfinite(zero_point) or zero_point <= 0.0:
+            raise RuntimeError("filter response zero point must be finite and positive")
+        if band in response_by_band:
+            raise RuntimeError("response-integrated SED manifest has duplicate filter bands")
+        response_by_band[band] = (wavelength, response, zero_point)
+    used = [row for row in observations if row[0] in response_by_band]
+    if len(used) < SED_FREE_PARAMETER_COUNT or len({row[0] for row in used}) != len(used):
+        raise RuntimeError(
+            "response-integrated SED requires at least {0} independent measurements with "
+            "verified manifest-bound filter responses".format(SED_FREE_PARAMETER_COUNT)
+        )
+
+    points = np.asarray([row[0] for row in spectrum_rows], dtype=float)
+    if np.unique(points, axis=0).shape[0] != points.shape[0]:
+        raise RuntimeError("atmosphere grid contains duplicate parameter nodes")
+    try:
+        from scipy.spatial import Delaunay
+
+        interpolation_hull = Delaunay(points)
+    except Exception as exc:
+        raise RuntimeError("atmosphere grid does not define a finite three-dimensional interpolation hull") from exc
+
+    spectral_interpolators: Dict[str, LinearNDInterpolator] = {}
+    for band, _, _ in used:
+        wavelength, _, _ = response_by_band[band]
+        fluxes = np.asarray(
+            [
+                np.interp(wavelength, row_wavelength, row_flux, left=np.nan, right=np.nan)
+                for _, row_wavelength, row_flux in spectrum_rows
+            ],
+            dtype=float,
+        )
+        if not np.all(np.isfinite(fluxes)):
+            raise RuntimeError("filter response extends beyond the verified atmosphere spectra")
+        spectral_interpolators[band] = LinearNDInterpolator(points, fluxes)
+
+    def model(theta: np.ndarray) -> np.ndarray:
+        teff, logg, feh, log_scale, av = (float(value) for value in theta)
+        if not all(math.isfinite(value) for value in (teff, logg, feh, log_scale, av)) or av < 0.0:
+            raise ValueError("response-integrated SED parameters are not physical")
+        target = np.asarray([teff, logg, feh], dtype=float)
+        if interpolation_hull.find_simplex(target) < 0:
+            raise ValueError("atmosphere-grid query lies outside the finite interpolation hull")
+        magnitudes = []
+        for band, _, _ in used:
+            wavelength, response, zero_point = response_by_band[band]
+            surface_flux = np.asarray(spectral_interpolators[band](target), dtype=float).reshape(-1)
+            if not np.all(np.isfinite(surface_flux)):
+                raise ValueError("atmosphere-grid query lies outside the finite interpolation hull")
+            extinction = _fitzpatrick99_rv31(wavelength) * av
+            attenuated_flux = surface_flux * np.exp(-0.4 * math.log(10.0) * extinction) * math.exp(2.0 * log_scale)
+            wavelength_m = wavelength * 1e-10
+            flux_nu_jy = attenuated_flux * 1e10 * wavelength_m**2 / c / 1e-26
+            average_flux_nu_jy = np.trapz(flux_nu_jy * response, wavelength) / np.trapz(response, wavelength)
+            if not math.isfinite(float(average_flux_nu_jy)) or average_flux_nu_jy <= 0.0:
+                raise ValueError("response-integrated atmosphere model produced an invalid flux")
+            magnitudes.append(-2.5 * math.log10(float(average_flux_nu_jy) / zero_point))
+        return np.asarray(magnitudes, dtype=float)
+
+    observed = np.asarray([row[1] for row in used], dtype=float)
+    errors = np.asarray([row[2] for row in used], dtype=float)
+    if not np.all(np.isfinite(observed)) or not np.all(np.isfinite(errors)) or np.any(errors <= 0.0):
+        raise RuntimeError("response-integrated SED photometric values must be finite with positive errors")
+    distance_pc = 1000.0 / stellar["parallax_mas"]
+    initial_scale = stellar["radius_solar"] * RSUN_M / (distance_pc * PC_M)
+    start = np.asarray([stellar["teff_k"], stellar["logg_cgs"], stellar["feh"], math.log(initial_scale), 0.0])
+    if interpolation_hull.find_simplex(start[:3]) < 0:
+        raise RuntimeError("candidate stellar prior lies outside the finite atmosphere-grid interpolation hull")
+
+    def log_probability(theta: np.ndarray) -> float:
+        if theta[4] < 0.0:
+            return -np.inf
+        try:
+            predicted = model(theta)
+        except ValueError:
+            return -np.inf
+        likelihood = -0.5 * np.sum(((observed - predicted) / errors) ** 2 + np.log(2.0 * np.pi * errors**2))
+        priors = -0.5 * (
+            ((theta[0] - stellar["teff_k"]) / 200.0) ** 2
+            + ((theta[1] - stellar["logg_cgs"]) / 0.25) ** 2
+            + ((theta[2] - stellar["feh"]) / 0.2) ** 2
+        )
+        return float(likelihood + priors)
+
+    samples, sampler = _run_emcee(log_probability, start, 32, 200, 500, 7)
+    samples = np.asarray(samples, dtype=float)
+    if samples.ndim != 2 or samples.shape[1] != 5 or samples.shape[0] == 0 or not np.all(np.isfinite(samples)):
+        raise RuntimeError("response-integrated SED sampler returned no finite samples")
+    median = np.median(samples, axis=0)
+    predicted = model(median)
+    residuals = observed - predicted
+    return {
+        "posterior": {
+            "teff_k": percentile_summary(samples[:, 0]),
+            "logg_cgs": percentile_summary(samples[:, 1]),
+            "feh": percentile_summary(samples[:, 2]),
+            "rstar_over_distance": percentile_summary(np.exp(samples[:, 3])),
+            "av_mag": percentile_summary(samples[:, 4]),
+        },
+        "photometry": [
+            {
+                "band": band,
+                "observed_mag": float(observed_mag),
+                "total_error_mag": float(error),
+                "model_mag_at_posterior_median": float(model_mag),
+                "residual_mag": float(residual),
+            }
+            for (band, observed_mag, error), model_mag, residual in zip(used, predicted, residuals)
+        ],
+        "fit_quality": {
+            "chi_square_at_posterior_median": float(np.sum((residuals / errors) ** 2)),
+            "degrees_of_freedom": int(len(used) - SED_FREE_PARAMETER_COUNT),
+            "acceptance_fraction_mean": float(np.mean(sampler.acceptance_fraction)),
+            "retained_samples": int(samples.shape[0]),
+        },
+        "input_photometry": [
+            {"band": band, "mag": float(magnitude), "error": float(error)}
+            for band, magnitude, error in used
+        ],
+    }
+
+
+def _fitzpatrick99_rv31(wavelength_angstrom: np.ndarray) -> np.ndarray:
+    """Evaluate the Fitzpatrick (1999) R_V=3.1 optical/IR extinction spline."""
+    from scipy.interpolate import CubicSpline
+
+    x = 1e4 / np.asarray(wavelength_angstrom, dtype=float)
+    if np.any(~np.isfinite(x)) or np.any(x <= 0.0) or np.any(x > 3.3):
+        raise ValueError("Fitzpatrick 1999 R_V=3.1 is unavailable for the supplied response wavelengths")
+    rv = 3.1
+    spline_x = np.asarray([0.0, 1e4 / 26500.0, 1e4 / 12200.0, 1e4 / 6000.0, 1e4 / 5470.0, 1e4 / 4670.0, 1e4 / 4110.0])
+    spline_y = np.asarray([
+        0.0,
+        0.26469 * rv / 3.1,
+        0.82925 * rv / 3.1,
+        -0.422809 + 1.00270 * rv + 2.13572e-4 * rv**2,
+        -0.051354 + 1.00216 * rv - 7.35778e-5 * rv**2,
+        0.700127 + 1.00184 * rv - 3.32598e-5 * rv**2,
+        1.19456 + 1.01707 * rv - 5.46959e-3 * rv**2,
+    ])
+    return np.asarray(CubicSpline(spline_x, spline_y)(x) / rv, dtype=float)
+
+
 def run_sed_fit(workspace: CandidateWorkspace) -> Path:
     """Run the candidate-local exploratory broadband SED fit.
 
@@ -896,7 +1187,7 @@ def run_sed_fit(workspace: CandidateWorkspace) -> Path:
             photometry, stellar parameters, optional grid data, and outputs.
 
     Returns:
-        Path: Reserved for a future response-integrated fit artifact.
+        Path: Candidate-local SED result artifact.
 
     Raises:
         RuntimeError: Candidate-owned photometry or the required
@@ -907,14 +1198,50 @@ def run_sed_fit(workspace: CandidateWorkspace) -> Path:
         calibrated atmosphere posterior, a validation constraint, or a
         lifecycle decision.
     """
-    photometry = load_photometry(workspace)
-    observations, _ = _collect_observations(photometry)
-    if observations is None:
-        raise RuntimeError("SED fitting requires candidate-owned broadband photometry")
-    raise RuntimeError(
-        "SED fitting requires a candidate-owned, provenance-bound response-integrated "
-        "stellar-atmosphere grid; blackbody and unmanifested grid fallbacks are disabled."
-    )
+    outputs_dir = workspace.path / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    output_path = outputs_dir / "sed_fit_results.json"
+    base = {
+        "schema_version": "1.0",
+        "candidate_id": workspace.candidate_id,
+        "work_package": "SED_FIT",
+        "generated_utc": datetime.now(timezone.utc).isoformat(),
+        "source": "candidate-data",
+        "scientific_status": "exploratory-response-integrated-fit",
+        "validation_eligible": False,
+        "method": "response-integrated stellar-atmosphere SED with Fitzpatrick 1999 R_V=3.1 extinction",
+        "caveats": [
+            "This candidate-owned SED result is exploratory diagnostic evidence and is not a validation claim.",
+        ],
+    }
+    try:
+        observations, stellar, input_artifacts, spectra, responses = _read_response_integrated_sed_inputs(workspace)
+        fit = _fit_response_integrated_sed(workspace, observations, stellar, spectra, responses)
+    except (RuntimeError, ValueError, OSError, csv.Error) as exc:
+        payload = {
+            **base,
+            "calibrated": False,
+            "calibration_status": "uncalibrated",
+            "calibration_assets": {"reason": str(exc)},
+            "caveats": base["caveats"] + ["No posterior was produced because the required response-integrated assets did not verify."],
+        }
+    else:
+        payload = {
+            **base,
+            **fit,
+            "calibrated": True,
+            "calibration_status": "verified-response-integrated-fitzpatrick99-rv31",
+            "calibration_assets": {
+                "extinction_law": "Fitzpatrick 1999 R_V=3.1",
+                "independent_filter_count": len(fit["input_photometry"]),
+                "input_artifacts": input_artifacts + [
+                    {key: artifact[key] for key in ("path", "sha256", "role")}
+                    for artifact in spectra + responses
+                ],
+            },
+        }
+    _write_json_atomic(output_path, payload)
+    return output_path
 
 
 def cross_match_isochrone_evolution(

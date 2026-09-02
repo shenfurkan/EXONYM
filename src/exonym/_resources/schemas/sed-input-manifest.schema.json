@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/sed-input-manifest-1.0.json",
+  "title": "Candidate-local response-integrated SED calibration input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "candidate_id", "purpose", "photometry_artifact", "stellar_parameters_artifact", "atmosphere_spectra", "filter_responses"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "candidate_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+    "purpose": {"const": "response-integrated-sed-calibration"},
+    "photometry_artifact": {"$ref": "#/$defs/artifact"},
+    "stellar_parameters_artifact": {"$ref": "#/$defs/artifact"},
+    "atmosphere_spectra": {"type": "array", "minItems": 4, "items": {"$ref": "#/$defs/spectrum"}},
+    "filter_responses": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/filter"}}
+  },
+  "$defs": {
+    "artifact": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "role"], "properties": {"path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "role": {"type": "string", "minLength": 1}}},
+    "spectrum": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "role", "teff_k", "logg_cgs", "feh"], "properties": {"path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "role": {"type": "string", "minLength": 1}, "teff_k": {"type": "number"}, "logg_cgs": {"type": "number"}, "feh": {"type": "number"}}},
+    "filter": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "role", "band", "zero_point_flux_jy"], "properties": {"path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "role": {"type": "string", "minLength": 1}, "band": {"type": "string", "minLength": 1}, "zero_point_flux_jy": {"type": "number", "exclusiveMinimum": 0}}}
+  }
+}

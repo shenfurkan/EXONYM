@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/tess-prf-manifest-1.0.json",
+  "title": "Candidate-local TESS PRF calibration manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "candidate_id", "mission", "sector", "camera", "ccd", "prf_sha256", "provenance"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "candidate_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+    "mission": {"const": "TESS"},
+    "sector": {"type": "integer", "minimum": 1},
+    "camera": {"type": "integer", "minimum": 1, "maximum": 4},
+    "ccd": {"type": "integer", "minimum": 1, "maximum": 4},
+    "detector_bounds": {"$ref": "#/$defs/detector-bounds"},
+    "field_position": {"$ref": "#/$defs/field-position"},
+    "prf_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "provenance": {"type": "object", "additionalProperties": false, "required": ["source", "official_uri", "retrieved_utc"], "properties": {"source": {"type": "string", "minLength": 1}, "official_uri": {"type": "string", "format": "uri", "pattern": "^https://"}, "retrieved_utc": {"type": "string", "format": "date-time"}}}
+  },
+  "oneOf": [{"required": ["detector_bounds"]}, {"required": ["field_position"]}],
+  "$defs": {
+    "detector-bounds": {"type": "object", "additionalProperties": false, "required": ["column_min", "column_max", "row_min", "row_max"], "properties": {"column_min": {"type": "number"}, "column_max": {"type": "number"}, "row_min": {"type": "number"}, "row_max": {"type": "number"}}},
+    "field-position": {"type": "object", "additionalProperties": false, "required": ["column", "row"], "properties": {"column": {"type": "number"}, "row": {"type": "number"}}}
+  }
+}

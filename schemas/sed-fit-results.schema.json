@@ -1,62 +1,36 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.invalid/schemas/sed-fit-results-1.0.json",
-  "title": "Candidate-local exploratory SED fit result",
+  "title": "Candidate-local response-integrated exploratory SED result",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "candidate_id", "work_package", "generated_utc", "source", "scientific_status", "validation_eligible", "grid_used", "grid_load_failed", "grid_source", "method", "input_photometry", "posterior", "photometry", "fit_quality", "caveats"],
+  "required": ["schema_version", "candidate_id", "work_package", "generated_utc", "source", "scientific_status", "validation_eligible", "method", "calibrated", "calibration_status", "calibration_assets", "caveats"],
   "properties": {
     "schema_version": {"const": "1.0"},
     "candidate_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
     "work_package": {"const": "SED_FIT"},
     "generated_utc": {"type": "string", "format": "date-time"},
     "source": {"type": "string", "minLength": 1},
-    "scientific_status": {"const": "exploratory-color-fit"},
+    "scientific_status": {"const": "exploratory-response-integrated-fit"},
     "validation_eligible": {"const": false},
-    "grid_used": {"type": "boolean"},
-    "grid_load_failed": {"type": "boolean"},
-    "grid_source": {"type": "string", "minLength": 1},
     "method": {"type": "string", "minLength": 1},
-    "input_photometry": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/input-photometry"}},
-    "posterior": {"type": "object", "minProperties": 1, "additionalProperties": {"$ref": "#/$defs/summary"}},
-    "photometry": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/photometry-row"}},
+    "calibrated": {"type": "boolean"},
+    "calibration_status": {"enum": ["verified-response-integrated-fitzpatrick99-rv31", "uncalibrated"]},
+    "calibration_assets": {"type": "object", "additionalProperties": false, "properties": {"extinction_law": {"const": "Fitzpatrick 1999 R_V=3.1"}, "independent_filter_count": {"type": "integer", "minimum": 5}, "input_artifacts": {"type": "array", "minItems": 11, "items": {"$ref": "#/$defs/artifact"}}, "reason": {"type": "string", "minLength": 1}}},
+    "input_photometry": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/input-photometry"}},
+    "posterior": {"type": "object", "additionalProperties": false, "required": ["teff_k", "logg_cgs", "feh", "rstar_over_distance", "av_mag"], "properties": {"teff_k": {"$ref": "#/$defs/summary"}, "logg_cgs": {"$ref": "#/$defs/summary"}, "feh": {"$ref": "#/$defs/summary"}, "rstar_over_distance": {"$ref": "#/$defs/summary"}, "av_mag": {"$ref": "#/$defs/summary"}}},
+    "photometry": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/photometry-row"}},
     "fit_quality": {"type": "object", "minProperties": 1, "additionalProperties": true},
-    "metadata": {"type": "object", "additionalProperties": true},
-    "mist_main_sequence_check": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/mist-check"}]},
     "caveats": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
   },
+  "allOf": [
+    {"if": {"properties": {"calibrated": {"const": true}}}, "then": {"required": ["input_photometry", "posterior", "photometry", "fit_quality"], "properties": {"calibration_status": {"const": "verified-response-integrated-fitzpatrick99-rv31"}, "calibration_assets": {"required": ["extinction_law", "independent_filter_count", "input_artifacts"]}}}},
+    {"if": {"properties": {"calibrated": {"const": false}}}, "then": {"properties": {"calibration_status": {"const": "uncalibrated"}, "calibration_assets": {"required": ["reason"]}}}}
+  ],
   "$defs": {
     "summary": {"type": "object", "additionalProperties": false, "required": ["p16", "median", "p84", "plus", "minus"], "properties": {"p16": {"type": "number"}, "median": {"type": "number"}, "p84": {"type": "number"}, "plus": {"type": "number", "minimum": 0}, "minus": {"type": "number", "minimum": 0}}},
     "input-photometry": {"type": "object", "additionalProperties": false, "required": ["band", "mag", "error"], "properties": {"band": {"type": "string", "minLength": 1}, "mag": {"type": "number"}, "error": {"type": "number", "exclusiveMinimum": 0}}},
     "photometry-row": {"type": "object", "additionalProperties": false, "required": ["band", "observed_mag", "total_error_mag", "model_mag_at_posterior_median", "residual_mag"], "properties": {"band": {"type": "string", "minLength": 1}, "observed_mag": {"type": "number"}, "total_error_mag": {"type": "number", "exclusiveMinimum": 0}, "model_mag_at_posterior_median": {"type": "number"}, "residual_mag": {"type": "number"}}},
-    "artifact": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "role"], "properties": {"path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "role": {"type": "string", "minLength": 1}}},
-    "mist-input-artifact": {"allOf": [{"$ref": "#/$defs/artifact"}, {"properties": {"path": {"const": "data/external/mist_main_sequence_input.json"}, "role": {"const": "mist-main-sequence-input"}}}]},
-    "mist-grid-artifact": {"allOf": [{"$ref": "#/$defs/artifact"}, {"properties": {"path": {"const": "data/external/mist_isochrone_grid.csv"}, "role": {"const": "mist-isochrone-grid"}}}]},
-    "stellar-parameters-artifact": {"allOf": [{"$ref": "#/$defs/artifact"}, {"properties": {"path": {"const": "data/external/stellar_params.json"}, "role": {"const": "stellar-parameters"}}}]},
-    "mist-check": {
-      "type": "object",
-      "additionalProperties": true,
-      "required": ["status", "validation_eligible", "claim_eligible", "interpretation"],
-      "properties": {
-        "status": {"enum": ["not-configured", "insufficient-input", "outside-grid", "evaluated"]},
-        "input_artifact": {"$ref": "#/$defs/mist-input-artifact"},
-        "grid_artifact": {"$ref": "#/$defs/mist-grid-artifact"},
-        "stellar_parameters_artifact": {"$ref": "#/$defs/stellar-parameters-artifact"},
-        "source_artifacts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/artifact"}},
-        "validation_eligible": {"const": false},
-        "claim_eligible": {"const": false},
-        "interpretation": {"type": "string", "minLength": 1}
-      },
-      "allOf": [
-        {
-          "if": {"properties": {"status": {"enum": ["insufficient-input", "outside-grid", "evaluated"]}}},
-          "then": {"required": ["input_artifact", "grid_artifact", "source_artifacts"]}
-        },
-        {
-          "if": {"properties": {"status": {"enum": ["outside-grid", "evaluated"]}}},
-          "then": {"required": ["stellar_parameters_artifact"]}
-        }
-      ]
-    }
+    "artifact": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "role"], "properties": {"path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "role": {"type": "string", "minLength": 1}}}
   }
 }

@@ -10,8 +10,8 @@
     "generated_at": {"type": "string", "format": "date-time"},
     "source": {"const": "candidate-data"},
     "signal": {"type": ["string", "null"], "pattern": "^\\.[0-9]{2}$"},
-    "method": {"enum": ["nea-pscomppars-period-epoch-duration-harmonic-v1", "known-signal-ephemeris-period-epoch-duration-harmonic-v2", "known-signal-ephemeris-period-epoch-duration-harmonic-v3", "known-signal-ephemeris-period-epoch-duration-harmonic-v4"]},
-    "status": {"enum": ["review-required-known-signal-match", "review-required-period-harmonic", "no-ephemeris-match-in-current-supported-catalog", "insufficient-current-supported-catalog-evidence"]},
+    "method": {"enum": ["nea-pscomppars-period-epoch-duration-harmonic-v1", "known-signal-ephemeris-period-epoch-duration-harmonic-v2", "known-signal-ephemeris-period-epoch-duration-harmonic-v3", "known-signal-ephemeris-period-epoch-duration-harmonic-v4", "known-signal-ephemeris-period-epoch-duration-harmonic-v5", "known-signal-ephemeris-period-epoch-duration-harmonic-v6"]},
+    "status": {"enum": ["review-required-known-signal-match", "review-required-period-harmonic", "review-required-period-tolerance-unavailable", "no-ephemeris-match-in-current-supported-catalog", "insufficient-current-supported-catalog-evidence"]},
     "candidate_ephemeris": {"$ref": "#/$defs/candidate_ephemeris"},
     "configuration": {"$ref": "#/$defs/configuration"},
     "source_snapshots": {"type": "array", "items": {"$ref": "#/$defs/source_snapshot"}},
@@ -23,6 +23,10 @@
     {
       "if": {"properties": {"method": {"const": "known-signal-ephemeris-period-epoch-duration-harmonic-v4"}}},
       "then": {"properties": {"comparisons": {"items": {"required": ["harmonic_parity_ambiguous"]}}}}
+    },
+    {
+      "if": {"properties": {"method": {"const": "known-signal-ephemeris-period-epoch-duration-harmonic-v6"}}},
+      "then": {"properties": {"candidate_ephemeris": {"required": ["period_uncertainty_days"]}, "configuration": {"required": ["period_comparison_method"]}, "comparisons": {"items": {"required": ["harmonic_parity_ambiguous", "known_period_uncertainty_days", "candidate_period_uncertainty_days", "period_difference_days", "period_tolerance_days", "period_tolerance_status"], "properties": {"nearest_harmonic_factor": {"enum": [0.5, 0.6667, 0.75, 0.8, 1.0, 1.25, 1.3333, 1.5, 2.0]}}}}}}
     }
   ],
   "$defs": {
@@ -41,6 +45,7 @@
         "source": {"enum": ["candidate-config", "partial-candidate-config", "candidate-config-signal", "partial-candidate-config-signal", "bls-search"]},
         "signal": {"type": ["string", "null"], "pattern": "^\\.[0-9]{2}$"},
         "period_days": {"type": "number", "exclusiveMinimum": 0},
+        "period_uncertainty_days": {"type": ["number", "null"], "exclusiveMinimum": 0},
         "epoch_btjd": {"type": "number"},
         "duration_hours": {"type": "number", "exclusiveMinimum": 0},
         "time_system": {"const": "BTJD_TDB"},
@@ -49,13 +54,14 @@
     },
     "configuration": {
       "type": "object", "additionalProperties": false,
-      "required": ["supported_providers", "period_relative_tolerance", "epoch_tolerance_duration_multiplier", "duration_relative_tolerance", "harmonic_factors"],
+       "required": ["supported_providers", "epoch_tolerance_duration_multiplier", "duration_relative_tolerance", "harmonic_factors"],
       "properties": {
         "supported_providers": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["nasa-exoplanet-archive", "nasa-exoplanet-archive-toi", "candidate-recorded-evidence"]}},
         "period_relative_tolerance": {"const": 0.001},
+        "period_comparison_method": {"const": "reported-period-uncertainty-quadrature-v1"},
         "epoch_tolerance_duration_multiplier": {"const": 1.0},
         "duration_relative_tolerance": {"const": 0.5},
-        "harmonic_factors": {"const": [0.5, 1.0, 2.0, 3.0]}
+        "harmonic_factors": {"enum": [[0.3333, 0.5, 0.6667, 0.75, 0.8, 1.0, 1.25, 1.3333, 1.5, 2.0, 3.0], [0.5, 0.6667, 0.75, 0.8, 1.0, 1.25, 1.3333, 1.5, 2.0]]}
       }
     },
     "source_snapshot": {
@@ -88,13 +94,18 @@
         "source_record_index": {"type": "integer", "minimum": 0},
         "source_name": {"type": ["string", "null"]},
         "known_period_days": {"type": "number", "exclusiveMinimum": 0},
+        "known_period_uncertainty_days": {"type": ["number", "null"], "exclusiveMinimum": 0},
         "known_epoch_bjd_tdb": {"type": ["number", "null"]},
         "known_epoch_time_scale": {"enum": ["BJD_TDB", "BJD_UNSPECIFIED"]},
         "known_duration_hours": {"type": ["number", "null"], "exclusiveMinimum": 0},
         "period_ratio_known_over_candidate": {"type": "number", "exclusiveMinimum": 0},
-        "nearest_harmonic_factor": {"enum": [0.5, 1.0, 2.0, 3.0]},
+        "nearest_harmonic_factor": {"enum": [0.3333, 0.5, 0.6667, 0.75, 0.8, 1.0, 1.25, 1.3333, 1.5, 2.0, 3.0]},
         "period_relative_difference": {"type": "number", "minimum": 0},
-        "period_harmonic_match": {"type": "boolean"},
+        "period_difference_days": {"type": "number", "minimum": 0},
+        "candidate_period_uncertainty_days": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "period_tolerance_days": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "period_tolerance_status": {"enum": ["available", "unavailable"]},
+        "period_harmonic_match": {"type": ["boolean", "null"]},
         "epoch_phase_delta_days": {"type": ["number", "null"], "minimum": 0},
         "epoch_tolerance_days": {"type": ["number", "null"], "exclusiveMinimum": 0},
         "epoch_match": {"type": ["boolean", "null"]},

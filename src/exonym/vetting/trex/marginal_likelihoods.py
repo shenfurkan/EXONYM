@@ -27,6 +27,7 @@ from .funcs import (
     impact_parameter,
     delta_mag_to_flux_ratio,
     companion_flux_ratio,
+    tess_surface_brightness_ratio,
 )
 from .priors import (
     sample_rp,
@@ -105,6 +106,7 @@ def _eval_scenario(
     is_planet: bool,
     is_EB: bool,
     use_2xP: bool,
+    exptime_days: float,
     companion_is_host: bool = False,
     companion_fluxratio: float = 0.0,
     lnprior_comp: float = 0.0,
@@ -112,7 +114,6 @@ def _eval_scenario(
     M_s_neighbor: Optional[float] = None,
     R_s_neighbor: Optional[float] = None,
     rng: Optional[np.random.Generator] = None,
-    exptime_days: float = 0.00139,
     nsamples: int = 20,
 ) -> float:
     """Estimate lnZ for one astrophysical scenario via Monte Carlo integration.
@@ -120,6 +121,8 @@ def _eval_scenario(
     Returns:
         Log-evidence lnZ (float; -inf if no draws transit).
     """
+    if not isinstance(exptime_days, (int, float, np.number)) or not math.isfinite(exptime_days) or exptime_days <= 0.0:
+        raise ValueError("exptime_days must be finite and positive")
     if rng is None:
         rng = np.random.default_rng()
 
@@ -149,10 +152,15 @@ def _eval_scenario(
         q = sample_q(x_q, M_host)
         M_EB = q * M_host
         M_total = (M_host + M_EB) * Msun
-        # Use the empirical Torres/CDWRF relation mirrored from TRICERATOPS,
-        # rather than assuming stellar radius scales linearly with mass ratio.
-        R_EB, _ = stellar_relations(M_EB)
-        EB_fluxratio_arr = R_EB ** 2 / (R_host ** 2 + R_EB ** 2)
+        # Stellar radii and temperatures determine the physical TESS-band
+        # component fluxes, rather than assuming equal surface brightness.
+        R_EB, teff_EB = stellar_relations(M_EB)
+        _, teff_host = stellar_relations(M_host_arr)
+        EB_flux_ratio = (
+            (R_EB / R_host) ** 2
+            * tess_surface_brightness_ratio(teff_EB, teff_host)
+        )
+        EB_fluxratio_arr = EB_flux_ratio / (1.0 + EB_flux_ratio)
     else:
         M_total = M_host * Msun
         R_EB = None
@@ -179,9 +187,11 @@ def _eval_scenario(
                     float(R_EB[i]) if R_EB is not None else float(R_host * 0.3),
                     float(EB_fluxratio_arr[i]) if EB_fluxratio_arr is not None else 0.5,
                     eff_period, float(inc[i]), a_cm_val, R_host,
-                    u1, u2, float(ecc[i]), float(w[i]),
-                    companion_fluxratio, companion_is_host,
-                    exptime_days, nsamples,
+                    u1, u2, exptime_days,
+                    ecc=float(ecc[i]), argp_deg=float(w[i]),
+                    companion_fluxratio=companion_fluxratio,
+                    companion_is_host=companion_is_host,
+                    nsamples=nsamples,
                 )
         else:
             for i in idx:
@@ -189,9 +199,11 @@ def _eval_scenario(
                 lnL[i] = lnL_TP(
                     time, flux, sigma,
                     float(R_p[i]), eff_period, float(inc[i]), a_cm_val,
-                    R_host, u1, u2, float(ecc[i]), float(w[i]),
-                    companion_fluxratio, companion_is_host,
-                    exptime_days, nsamples,
+                    R_host, u1, u2, exptime_days,
+                    ecc=float(ecc[i]), argp_deg=float(w[i]),
+                    companion_fluxratio=companion_fluxratio,
+                    companion_is_host=companion_is_host,
+                    nsamples=nsamples,
                 )
 
     # Evidence = log(mean(exp(lnL))) + lnprior_comp for companion scenarios
@@ -217,6 +229,7 @@ def calc_target_evidences(
     R_s_Rsun: float,
     u1: float,
     u2: float,
+    exptime_days: float,
     n_draws: int = 2000,
     contrast_separations: Optional[np.ndarray] = None,
     contrast_values: Optional[np.ndarray] = None,
@@ -226,7 +239,6 @@ def calc_target_evidences(
     nearby_stars: Optional[list] = None,
     random_seed: Optional[int] = None,
     progress_callback: Optional[callable] = None,
-    exptime_days: float = 0.00139,
     nsamples: int = 20,
 ) -> Tuple[np.ndarray, str]:
     """Compute log-evidences for all target-star and neighbour scenarios.
@@ -234,6 +246,8 @@ def calc_target_evidences(
     Returns:
         (lnZ, status): lnZ array of shape (n_scenarios,) and status string.
     """
+    if not isinstance(exptime_days, (int, float, np.number)) or not math.isfinite(exptime_days) or exptime_days <= 0.0:
+        raise ValueError("exptime_days must be finite and positive")
     rng = np.random.default_rng(random_seed)
     n_scenarios = N_TARGET_SCENARIOS
     if nearby_stars:
@@ -296,10 +310,10 @@ def calc_target_evidences(
             continue
         lnZ[idx] = _eval_scenario(
             time, flux, sigma, period_days, M_s_Msun, R_s_Rsun,
-            u1, u2, n_draws, is_pl, is_eb, x2p,
+            u1, u2, n_draws, is_pl, is_eb, x2p, exptime_days,
             companion_is_host=cih, companion_fluxratio=cfr,
             lnprior_comp=lnp_c, use_flat_priors=flat,
-            rng=rng, exptime_days=exptime_days, nsamples=nsamples,
+            rng=rng, nsamples=nsamples,
         )
 
     # Neighbour scenarios
@@ -317,10 +331,10 @@ def calc_target_evidences(
                     progress_callback(f"Neighbor {ni}", done=si, total=n_scenarios)
                 lnZ[si] = _eval_scenario(
                     time, flux, sigma, period_days, M_s_Msun, R_s_Rsun,
-                    u1, u2, n_draws, is_pl, is_eb, x2p,
+                    u1, u2, n_draws, is_pl, is_eb, x2p, exptime_days,
                     use_flat_priors=True,
                     M_s_neighbor=M_n, R_s_neighbor=R_n,
-                    rng=rng, exptime_days=exptime_days, nsamples=nsamples,
+                    rng=rng, nsamples=nsamples,
                 )
 
     return lnZ, "ok"

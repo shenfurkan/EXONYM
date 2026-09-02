@@ -423,17 +423,17 @@ def load_transit_ephemeris(
     """
     signal = validate_signal_suffix(signal)
     result: Dict[str, Any] = {
-        "period_days": DEMO_PERIOD_DAYS,
-        "epoch_btjd": DEMO_EPOCH_BTJD,
-        "duration_days": DEMO_DURATION_DAYS,
-        "depth_ppm": DEMO_DEPTH_PPM,
-        "time_system": "synthetic-demo",
-        "source": "synthetic-demo",
+        "period_days": None,
+        "epoch_btjd": None,
+        "duration_days": None,
+        "depth_ppm": None,
+        "time_system": None,
+        "source": "unavailable",
         "field_sources": {
-            "period_days": "synthetic-demo",
-            "epoch_btjd": "synthetic-demo",
-            "duration_days": "synthetic-demo",
-            "depth_ppm": "synthetic-demo",
+            "period_days": None,
+            "epoch_btjd": None,
+            "duration_days": None,
+            "depth_ppm": None,
         },
     }
 
@@ -546,7 +546,7 @@ def load_transit_ephemeris(
             )
             break
 
-    if result["source"] == "synthetic-demo":
+    if result["source"] == "unavailable":
         suffix = signal if signal is not None else ""
         bls_path = workspace.path / "outputs" / ("bls_search_results" + suffix + ".json")
         payload = _read_json(bls_path)
@@ -588,20 +588,20 @@ def load_transit_ephemeris(
             ):
                 result["source"] = "bls-search"
 
-    if result["period_days"] <= 0 or result["duration_days"] <= 0:
-        result["period_days"] = DEMO_PERIOD_DAYS
-        result["duration_days"] = DEMO_DURATION_DAYS
-        result["source"] = "synthetic-demo"
+    if result["period_days"] is not None and (result["period_days"] <= 0 or (result["duration_days"] is not None and result["duration_days"] <= 0)):
+        result["period_days"] = None
+        result["duration_days"] = None
+        result["source"] = "unavailable"
     return result
 
 
 def load_stellar_parameters(workspace: CandidateWorkspace) -> Dict[str, Any]:
     """Load stellar parameters with field availability and source labels.
 
-    Missing files yield generic solar-reference demonstration values labelled
-    synthetic-demo. A partly populated candidate file yields
-    partial-candidate-data; callers that require complete observed stellar
-    physics must require the candidate-data source label.
+    Missing files yield unavailable source labels with None fields.
+    A partly populated candidate file yields partial-candidate-data; callers
+    that require complete observed stellar physics must require the
+    candidate-data source label.
 
     Args:
         workspace: Candidate workspace containing optional external stellar
@@ -621,13 +621,13 @@ def load_stellar_parameters(workspace: CandidateWorkspace) -> Dict[str, Any]:
     """
     _PHYSICS_FIELDS = ("teff_k", "logg_cgs", "feh", "mass_solar", "radius_solar")
     result: Dict[str, Any] = {
-        "teff_k": DEMO_TEFF_K,
-        "logg_cgs": DEMO_LOGG_CGS,
-        "feh": DEMO_FEH,
-        "mass_solar": DEMO_MASS_SOLAR,
-        "radius_solar": DEMO_RADIUS_SOLAR,
-        "parallax_mas": DEMO_PARALLAX_MAS,
-        "source": "synthetic-demo",
+        "teff_k": None,
+        "logg_cgs": None,
+        "feh": None,
+        "mass_solar": None,
+        "radius_solar": None,
+        "parallax_mas": None,
+        "source": "unavailable",
     }
     params_path = workspace.path / "data" / "external" / "stellar_params.json"
     payload = _read_json(params_path)
@@ -672,7 +672,6 @@ def load_stellar_parameters(workspace: CandidateWorkspace) -> Dict[str, Any]:
         result["source"] = "candidate-data"
     elif physics_present > 0:
         result["source"] = "partial-candidate-data"
-    # else: no physics field found -> source stays "synthetic-demo"
     return result
 
 

@@ -131,19 +131,29 @@ def _extract_cube_light_curves(
     return {"time": time, "light_curves": light_curves}
 
 
-def gaia_g_to_tess_mag(g_mag: float, bp_rp_color: Optional[float]) -> float:
+STASSUN_BP_RP_MIN = -0.1
+STASSUN_BP_RP_MAX = 4.5
+
+
+def gaia_g_to_tess_mag(g_mag: float, bp_rp_color: Optional[float]) -> Optional[float]:
     """Convert a Gaia G magnitude to the approximate TESS T magnitude.
 
     Uses the Stassun et al. (2019) cubic polynomial in ``G_BP - G_RP`` when a
-    color is available; otherwise applies the mean FGK offset ``T - G ~ -0.4``.
+    color is available within its calibrated color range. Returns ``None``
+    when either magnitude, color, or calibration applicability is unavailable.
     """
-    if bp_rp_color is None or not math.isfinite(bp_rp_color):
-        return g_mag - 0.4
-    c = float(bp_rp_color)
+    magnitude = _finite_float(g_mag)
+    color = _finite_float(bp_rp_color)
+    if (
+        magnitude is None
+        or color is None
+        or not STASSUN_BP_RP_MIN <= color <= STASSUN_BP_RP_MAX
+    ):
+        return None
     delta_t_g = (
-        -0.00522555 * c**3 + 0.0891337 * c**2 - 0.633923 * c + 0.0324473
+        -0.00522555 * color**3 + 0.0891337 * color**2 - 0.633923 * color + 0.0324473
     )
-    return g_mag + delta_t_g
+    return magnitude + delta_t_g
 
 
 def gaia_contamination_factor(
@@ -161,13 +171,15 @@ def gaia_contamination_factor(
 
     Args:
         neighbors: Archival neighbor rows with separation, target marker, and
-            either flux-ratio or magnitude information.
+        either a direct TESS-band flux ratio or Gaia magnitude and BP/RP color
+        information.
         search_radius_arcsec: Maximum retained angular separation in arcsec.
         target_g_mag: Optional target catalog magnitude used to derive ratios.
 
     Returns:
-        A mapping with the dimensionless summed contamination factor, number
-        of included neighbors, and the requested search radius in arcsec.
+        A mapping with an available dimensionless summed contamination factor,
+        or explicit unavailable fields when any retained neighbor cannot be
+        converted within the Stassun calibration.
 
     Notes:
         Catalog-band ratios are retained as sensitivity context, not exact
@@ -175,8 +187,10 @@ def gaia_contamination_factor(
     """
     total_ratio = 0.0
     included = 0
+    omitted: List[Dict[str, Any]] = []
     valid_target_g_mag = _finite_float(target_g_mag)
     valid_target_bp_rp = _finite_float(target_bp_rp_color)
+    target_t_mag = gaia_g_to_tess_mag(valid_target_g_mag, valid_target_bp_rp)
     for row in neighbors:
         separation_arcsec = _finite_float(row.get("separation_arcsec"))
         if separation_arcsec is None or separation_arcsec > search_radius_arcsec:
@@ -184,24 +198,42 @@ def gaia_contamination_factor(
         if row.get("is_target"):
             continue
         ratio = _finite_float(row.get("flux_ratio"))
-        if ratio is None and valid_target_g_mag is not None:
-            g_mag = _finite_float(row.get("g_mag"))
-            if g_mag is not None:
-                # Bandpass-aware ratio: convert both magnitudes to the TESS
-                # T band when BP-RP colors are available (Stassun et al.
-                # 2019); otherwise retain the conservative Gaia G-band ratio.
+        if ratio is None:
+            g_mag = _finite_float(row.get("phot_g_mean_mag"))
+            if g_mag is None:
+                g_mag = _finite_float(row.get("g_mag"))
+            neighbor_bp_rp = _finite_float(row.get("bp_rp"))
+            if neighbor_bp_rp is None:
                 neighbor_bp_rp = _finite_float(row.get("bp_rp_color"))
-                target_t_mag = gaia_g_to_tess_mag(valid_target_g_mag, valid_target_bp_rp)
-                neighbor_t_mag = gaia_g_to_tess_mag(g_mag, neighbor_bp_rp)
+            neighbor_t_mag = gaia_g_to_tess_mag(g_mag, neighbor_bp_rp)
+            if target_t_mag is not None and neighbor_t_mag is not None:
                 ratio = 10.0 ** (-0.4 * (neighbor_t_mag - target_t_mag))
+            else:
+                omitted.append(
+                    {
+                        "separation_arcsec": separation_arcsec,
+                        "reason": "stassun-gaia-to-tess-input-or-calibration-unavailable",
+                    }
+                )
+                continue
         if ratio is None or ratio < 0.0:
+            omitted.append(
+                {"separation_arcsec": separation_arcsec, "reason": "invalid-flux-ratio"}
+            )
             continue
         total_ratio += ratio
         included += 1
+    available = not omitted
     return {
-        "contamination_factor": round(total_ratio, 6),
+        "availability": "available" if available else "unavailable",
+        "contamination_factor": round(total_ratio, 6) if available else None,
         "n_neighbors_included": int(included),
+        "n_neighbors_omitted": len(omitted),
+        "omitted_neighbors": omitted,
         "search_radius_arcsec": float(search_radius_arcsec),
+        "contamination_ratio": round(total_ratio, 6) if available else None,
+        "n_neighbors_in_aperture": int(included),
+        "target_g_mag": valid_target_g_mag,
     }
 
 
@@ -238,7 +270,7 @@ def _load_archival_gaia_neighbor_rows(
             continue
         separation_arcsec = _finite_float(source.get("separation_arcsec"))
         g_mag = _finite_float(source.get("phot_g_mean_mag"))
-        if separation_arcsec is None or g_mag is None:
+        if separation_arcsec is None:
             continue
         neighbor_bp_rp_color: Optional[float] = None
         neighbor_bp = _finite_float(source.get("phot_bp_mean_mag"))
@@ -398,7 +430,7 @@ def run_dilution_sensitivity(workspace: CandidateWorkspace) -> Path:
         "scientific_status": "exploratory-aperture-sensitivity-diagnostic",
         "validation_eligible": False,
         "validation_reason": (
-            "Gaia-band neighbor context and aperture-depth variation are not a "
+            "Gaia-derived neighbor context and aperture-depth variation are not a "
             "calibrated TESS-band dilution correction or validation constraint."
         ),
         "apertures": aperture_rows,
@@ -422,8 +454,8 @@ def run_dilution_sensitivity(workspace: CandidateWorkspace) -> Path:
         },
         "contamination": contamination,
         "caveat": (
-            "Gaia G-band neighbor flux sums are conservative sensitivity "
-            "bounds rather than exact TESS-band aperture corrections."
+            "Gaia-to-TESS color conversions are catalog context rather than "
+            "exact TESS-band aperture corrections."
         ),
     }
     output_path = outputs_dir / "dilution_sensitivity_results.json"

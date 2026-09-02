@@ -9,14 +9,33 @@ constructor arguments or loaded from candidate-owned files.
 
 from __future__ import annotations
 
-import json
+import hashlib
+import math
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 
-from .constants import Msun, Rsun, pi, G, au
-from .funcs import stellar_relations, delta_mag_to_flux_ratio
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _finite_number(value: object, name: str, *, positive: bool = False) -> float:
+    if isinstance(value, bool):
+        raise ValueError("{0} must be a finite number".format(name))
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("{0} must be a finite number".format(name)) from exc
+    if not math.isfinite(number) or (positive and number <= 0.0):
+        qualifier = "positive finite" if positive else "finite"
+        raise ValueError("{0} must be a {1} number".format(name, qualifier))
+    return number
 
 
 class TargetScene:
@@ -36,6 +55,7 @@ class TargetScene:
         resolved_neighbors: List of dicts with M_s, R_s, delta_mag, separation.
         N_background: Number of background stars from TRILEGAL.
         trilegal_cache: Path to cached TRILEGAL CSV.
+        background_sha256: Digest binding the retained background population.
     """
 
     def __init__(
@@ -43,40 +63,93 @@ class TargetScene:
         tic_id: int,
         ra_deg: float,
         dec_deg: float,
-        M_s_Msun: float = 1.0,
-        R_s_Rsun: float = 1.0,
-        Teff_K: float = 5772.0,
-        Tmag: float = 10.0,
-        plx_mas: float = 1.0,
-        sectors: Optional[List[int]] = None,
-        contrast_separations: Optional[np.ndarray] = None,
-        contrast_values: Optional[np.ndarray] = None,
-        resolved_neighbors: Optional[List[Dict[str, float]]] = None,
-        N_background: int = 0,
-        trilegal_cache: Optional[Path] = None,
+        M_s_Msun: float,
+        R_s_Rsun: float,
+        Teff_K: float,
+        Tmag: float,
+        plx_mas: float,
+        sectors: List[int],
+        contrast_separations: np.ndarray,
+        contrast_values: np.ndarray,
+        resolved_neighbors: List[Dict[str, float]],
+        N_background: int,
+        trilegal_cache: Path,
+        background_sha256: str,
     ) -> None:
+        if isinstance(tic_id, bool) or not isinstance(tic_id, int) or tic_id <= 0:
+            raise ValueError("tic_id must be a positive integer")
         self.tic_id = tic_id
-        self.ra_deg = ra_deg
-        self.dec_deg = dec_deg
-        self.M_s_Msun = M_s_Msun
-        self.R_s_Rsun = R_s_Rsun
-        self.Teff_K = Teff_K
-        self.Tmag = Tmag
-        self.plx_mas = plx_mas
-        self.sectors = sectors or []
-        self.contrast_separations = (
-            np.asarray(contrast_separations, dtype=float)
-            if contrast_separations is not None
-            else None
-        )
-        self.contrast_values = (
-            np.asarray(contrast_values, dtype=float)
-            if contrast_values is not None
-            else None
-        )
-        self.resolved_neighbors = resolved_neighbors or []
+        self.ra_deg = _finite_number(ra_deg, "ra_deg")
+        self.dec_deg = _finite_number(dec_deg, "dec_deg")
+        if not 0.0 <= self.ra_deg < 360.0:
+            raise ValueError("ra_deg must be in [0, 360)")
+        if not -90.0 <= self.dec_deg <= 90.0:
+            raise ValueError("dec_deg must be in [-90, 90]")
+        self.M_s_Msun = _finite_number(M_s_Msun, "M_s_Msun", positive=True)
+        self.R_s_Rsun = _finite_number(R_s_Rsun, "R_s_Rsun", positive=True)
+        self.Teff_K = _finite_number(Teff_K, "Teff_K", positive=True)
+        self.Tmag = _finite_number(Tmag, "Tmag")
+        self.plx_mas = _finite_number(plx_mas, "plx_mas", positive=True)
+
+        if not isinstance(sectors, list) or any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in sectors
+        ):
+            raise ValueError("sectors must be a list of positive integers")
+        self.sectors = list(sectors)
+
+        self.contrast_separations = np.asarray(contrast_separations, dtype=float)
+        self.contrast_values = np.asarray(contrast_values, dtype=float)
+        if (
+            self.contrast_separations.ndim != 1
+            or self.contrast_values.ndim != 1
+            or self.contrast_separations.size < 2
+            or self.contrast_separations.shape != self.contrast_values.shape
+            or not np.all(np.isfinite(self.contrast_separations))
+            or not np.all(np.isfinite(self.contrast_values))
+            or np.any(self.contrast_separations <= 0.0)
+            or np.any(np.diff(self.contrast_separations) <= 0.0)
+        ):
+            raise ValueError(
+                "contrast curves require at least two finite, increasing positive separations"
+            )
+
+        if not isinstance(resolved_neighbors, list):
+            raise ValueError("resolved_neighbors must be a list")
+        self.resolved_neighbors = []
+        source_ids = set()
+        for index, neighbor in enumerate(resolved_neighbors):
+            if not isinstance(neighbor, dict):
+                raise ValueError("resolved neighbor {0} must be an object".format(index))
+            source_id = neighbor.get("source_id")
+            if not isinstance(source_id, str) or not source_id or source_id in source_ids:
+                raise ValueError("resolved neighbors must have unique source_id values")
+            source_ids.add(source_id)
+            self.resolved_neighbors.append(
+                {
+                    "source_id": source_id,
+                    "M_s": _finite_number(neighbor.get("M_s"), "neighbor M_s", positive=True),
+                    "R_s": _finite_number(neighbor.get("R_s"), "neighbor R_s", positive=True),
+                    "delta_mag": _finite_number(neighbor.get("delta_mag"), "neighbor delta_mag"),
+                    "separation_arcsec": _finite_number(
+                        neighbor.get("separation_arcsec"),
+                        "neighbor separation_arcsec",
+                        positive=True,
+                    ),
+                }
+            )
+
+        if isinstance(N_background, bool) or not isinstance(N_background, int) or N_background < 0:
+            raise ValueError("N_background must be a non-negative integer")
         self.N_background = N_background
-        self.trilegal_cache = trilegal_cache
+        self.trilegal_cache = Path(trilegal_cache)
+        if self.trilegal_cache.is_symlink() or not self.trilegal_cache.is_file():
+            raise ValueError("trilegal_cache must be an available regular file")
+        if not isinstance(background_sha256, str) or len(background_sha256) != 64:
+            raise ValueError("background_sha256 must be a SHA-256 digest")
+        if _sha256(self.trilegal_cache) != background_sha256:
+            raise ValueError("trilegal_cache does not match background_sha256")
+        self.background_sha256 = background_sha256
 
     @property
     def n_neighbors(self) -> int:
@@ -84,16 +157,19 @@ class TargetScene:
 
     @property
     def has_contrast_data(self) -> bool:
-        return (
-            self.contrast_separations is not None
-            and self.contrast_values is not None
-            and len(self.contrast_separations) > 1
-        )
+        return True
+
+    def verify_background(self) -> None:
+        """Reject a background population that changed after scene construction."""
+        if self.trilegal_cache.is_symlink() or not self.trilegal_cache.is_file():
+            raise ValueError("trilegal_cache is no longer an available regular file")
+        if _sha256(self.trilegal_cache) != self.background_sha256:
+            raise ValueError("trilegal_cache changed after scene construction")
 
     def neighbor_masses_radii(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Return (masses, radii, delta_mags) for resolved neighbors.
 
-        If neighbours have no mass/radius, estimate from delta_mag.
+        All neighbour properties were explicitly supplied in the scene manifest.
         """
         n = len(self.resolved_neighbors)
         masses = np.full(n, np.nan)
@@ -101,17 +177,9 @@ class TargetScene:
         delta_mags = np.full(n, np.nan)
 
         for i, nb in enumerate(self.resolved_neighbors):
-            delta_mags[i] = float(nb.get("delta_mag", 0.0))
-            if "M_s" in nb and "R_s" in nb:
-                masses[i] = float(nb["M_s"])
-                radii[i] = float(nb["R_s"])
-            else:
-                # Crude estimate from delta_mag and main-sequence relation
-                dm = delta_mags[i]
-                est_mass = max(0.1, self.M_s_Msun * 10 ** (-0.2 * dm))
-                masses[i] = est_mass
-                r_est, _ = stellar_relations(np.array([est_mass]))
-                radii[i] = float(r_est[0])
+            delta_mags[i] = float(nb["delta_mag"])
+            masses[i] = float(nb["M_s"])
+            radii[i] = float(nb["R_s"])
 
         return masses, radii, delta_mags
 
@@ -120,7 +188,7 @@ class TargetScene:
         if not self.resolved_neighbors:
             return np.array([])
         return np.array(
-            [float(nb.get("delta_mag", 0.0)) for nb in self.resolved_neighbors],
+            [float(nb["delta_mag"]) for nb in self.resolved_neighbors],
             dtype=float,
         )
 

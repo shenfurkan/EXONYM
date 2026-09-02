@@ -362,7 +362,7 @@ def _request_for(spec: ProviderSpec, candidate: CandidateWorkspace) -> CatalogRe
     if spec.name == "nasa-exoplanet-archive":
         tic = identifier.split()[1]
         query = (
-            "SELECT pl_name,pl_orbper,pl_tranmid,pl_trandur,pl_tranmid_systemref "
+            "SELECT pl_name,pl_orbper,pl_orbpererr1,pl_orbpererr2,pl_tranmid,pl_trandur,pl_tranmid_systemref "
             "FROM pscomppars WHERE tic_id = 'TIC {0}'"
         ).format(tic)
         params = {"query": query, "format": "csv"}
@@ -373,7 +373,7 @@ def _request_for(spec: ProviderSpec, candidate: CandidateWorkspace) -> CatalogRe
     if spec.name == "nasa-exoplanet-archive-toi":
         tic = identifier.split()[1]
         query = (
-            "SELECT toi,tid,pl_orbper,pl_tranmid,pl_trandurh "
+            "SELECT toi,tid,pl_orbper,pl_orbpererr1,pl_orbpererr2,pl_tranmid,pl_trandurh "
             "FROM toi WHERE tid = {0}"
         ).format(tic)
         params = {"query": query, "format": "csv"}

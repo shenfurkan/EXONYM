@@ -16,6 +16,7 @@ from typing import Tuple
 import numpy as np
 
 from .constants import Rsun, Rearth
+from .funcs import secondary_eclipse_phase
 
 
 # ---------------------------------------------------------------------------
@@ -24,22 +25,26 @@ from .constants import Rsun, Rearth
 
 def _batman_transit(
     time: np.ndarray,
+    period_days: float,
     rp_rs: float,
     a_rs: float,
     inc_deg: float,
     u1: float,
     u2: float,
+    exptime_days: float,
     ecc: float = 0.0,
     argp_deg: float = 90.0,
-    exptime_days: float = 0.00139,
     nsamples: int = 20,
+    t0_days: float = 0.0,
 ) -> np.ndarray:
     """Mandel-Agol quadratic transit flux via batman."""
     import batman
 
+    _validate_exptime_days(exptime_days)
+
     params = batman.TransitParams()
-    params.t0 = 0.0
-    params.per = 1.0  # dummy – time is phase-folded
+    params.t0 = float(t0_days)
+    params.per = float(period_days)
     params.rp = float(rp_rs)
     params.a = float(a_rs)
     params.inc = float(inc_deg)
@@ -57,6 +62,11 @@ def _batman_transit(
     return model.light_curve(params)
 
 
+def _validate_exptime_days(exptime_days: float) -> None:
+    if not isinstance(exptime_days, (int, float, np.number)) or not np.isfinite(exptime_days) or exptime_days <= 0.0:
+        raise ValueError("exptime_days must be finite and positive")
+
+
 # ---------------------------------------------------------------------------
 # Transit-eclipse simulators
 # ---------------------------------------------------------------------------
@@ -70,11 +80,11 @@ def simulate_TP(
     R_s_solar: float,
     u1: float,
     u2: float,
+    exptime_days: float,
     ecc: float = 0.0,
     argp_deg: float = 90.0,
     companion_fluxratio: float = 0.0,
     companion_is_host: bool = False,
-    exptime_days: float = 0.00139,
     nsamples: int = 20,
 ) -> np.ndarray:
     """Simulate a transiting planet light curve.
@@ -82,7 +92,7 @@ def simulate_TP(
     Args:
         time: Phase-folded times [days from transit midpoint].
         R_p_earth: Planet radius [R_earth].
-        P_orb: Orbital period [days] (unused; for API compatibility).
+        P_orb: Orbital period [days].
         inc_deg: Inclination [degrees].
         a_cm: Semi-major axis [cm].
         R_s_solar: Stellar radius [R_sun].
@@ -99,9 +109,10 @@ def simulate_TP(
     rp_rs = R_p_earth * Rearth / (R_s_solar * Rsun)
     a_rs = a_cm / (R_s_solar * Rsun)
 
+    _validate_exptime_days(exptime_days)
     flux = _batman_transit(
-        time, rp_rs, a_rs, inc_deg, u1, u2, ecc, argp_deg,
-        exptime_days, nsamples,
+        time, P_orb, rp_rs, a_rs, inc_deg, u1, u2, exptime_days,
+        ecc, argp_deg, nsamples,
     )
 
     if companion_fluxratio > 0.0:
@@ -123,18 +134,18 @@ def simulate_EB(
     R_s_solar: float,
     u1: float,
     u2: float,
+    exptime_days: float,
     ecc: float = 0.0,
     argp_deg: float = 90.0,
     companion_fluxratio: float = 0.0,
     companion_is_host: bool = False,
-    exptime_days: float = 0.00139,
     nsamples: int = 20,
 ) -> Tuple[np.ndarray, float]:
     """Simulate an eclipsing binary light curve.
 
-    Returns (primary-eclipse flux, secondary-eclipse depth).
+    Returns the full binary model and the secondary-eclipse phase.
     """
-    F_target = 1.0
+    _validate_exptime_days(exptime_days)
     F_comp = companion_fluxratio / (1.0 - companion_fluxratio) if companion_fluxratio > 0 else 0.0
     F_EB = EB_fluxratio / (1.0 - EB_fluxratio)
 
@@ -143,45 +154,25 @@ def simulate_EB(
         k *= 0.999
     a_rs = a_cm / (R_s_solar * Rsun)
 
-    # Primary eclipse
-    flux = _batman_transit(
-        time, k, a_rs, inc_deg, u1, u2, ecc, argp_deg,
-        exptime_days, nsamples,
+    primary_flux = _batman_transit(
+        time, P_orb, k, a_rs, inc_deg, u1, u2, exptime_days,
+        ecc, argp_deg, nsamples,
     )
-
-    # Secondary eclipse
-    sec_time = np.linspace(-0.05, 0.05, 25)
-    sec_flux = _batman_transit(
-        sec_time, 1.0 / k, a_rs, inc_deg, u1, u2, ecc, argp_deg + 180.0,
-        exptime_days, nsamples=1,
+    secondary_phase = secondary_eclipse_phase(ecc, argp_deg)
+    secondary_flux = _batman_transit(
+        time, P_orb, 1.0 / k, a_rs / k, inc_deg, u1, u2, exptime_days,
+        ecc, argp_deg + 180.0, nsamples, t0_days=secondary_phase * P_orb,
     )
-    sec_flux_min = float(np.min(sec_flux))
+    flux = (primary_flux + F_EB * secondary_flux) / (1.0 + F_EB)
 
-    # Dilution cascade
+    # The binary flux is normalized internally.  Only an unresolved third
+    # source dilutes it, depending on which source hosts the binary.
     if companion_is_host:
-        if F_comp > 0:
-            flux = (flux + F_EB / F_comp) / (1.0 + F_EB / F_comp)
-            sec_diluted = (sec_flux_min + F_comp / F_EB) / (1.0 + F_comp / F_EB) if F_EB > 0 else sec_flux_min
-            F_dilute = F_target / (F_comp + F_EB) if (F_comp + F_EB) > 0 else 0.0
-        else:
-            sec_diluted = sec_flux_min
-            F_dilute = 0.0
-        if F_dilute > 0:
-            flux = (flux + F_dilute) / (1.0 + F_dilute)
-            secdepth = 1.0 - (sec_diluted + F_dilute) / (1.0 + F_dilute)
-        else:
-            secdepth = 1.0 - sec_diluted
-    else:
-        flux = (flux + F_EB / F_target) / (1.0 + F_EB / F_target)
-        sec_diluted = (sec_flux_min + F_target / F_EB) / (1.0 + F_target / F_EB) if F_EB > 0 else sec_flux_min
-        F_dilute = F_comp / (F_target + F_EB) if companion_fluxratio > 0 else 0.0
-        if F_dilute > 0:
-            flux = (flux + F_dilute) / (1.0 + F_dilute)
-            secdepth = 1.0 - (sec_diluted + F_dilute) / (1.0 + F_dilute)
-        else:
-            secdepth = 1.0 - sec_diluted
+        flux = (F_comp * flux + 1.0) / (1.0 + F_comp)
+    elif F_comp > 0.0:
+        flux = (flux + F_comp) / (1.0 + F_comp)
 
-    return flux, secdepth
+    return flux, secondary_phase
 
 
 # ---------------------------------------------------------------------------
@@ -191,10 +182,11 @@ def simulate_EB(
 def lnL_TP(
     time: np.ndarray, flux: np.ndarray, sigma: float,
     R_p_earth: float, P_orb: float, inc_deg: float, a_cm: float,
-    R_s_solar: float, u1: float, u2: float, ecc: float = 0.0,
+    R_s_solar: float, u1: float, u2: float, exptime_days: float,
+    ecc: float = 0.0,
     argp_deg: float = 90.0,
     companion_fluxratio: float = 0.0, companion_is_host: bool = False,
-    exptime_days: float = 0.00139, nsamples: int = 20,
+    nsamples: int = 20,
 ) -> float:
     """Log-likelihood for a transiting planet scenario.
 
@@ -202,8 +194,8 @@ def lnL_TP(
     """
     model = simulate_TP(
         time, R_p_earth, P_orb, inc_deg, a_cm, R_s_solar, u1, u2,
-        ecc, argp_deg, companion_fluxratio, companion_is_host,
-        exptime_days, nsamples,
+        exptime_days, ecc, argp_deg, companion_fluxratio, companion_is_host,
+        nsamples,
     )
     return float(-0.5 * np.sum((flux - model) ** 2 / sigma ** 2))
 
@@ -212,21 +204,20 @@ def lnL_EB(
     time: np.ndarray, flux: np.ndarray, sigma: float,
     R_EB_solar: float, EB_fluxratio: float, P_orb: float,
     inc_deg: float, a_cm: float, R_s_solar: float,
-    u1: float, u2: float, ecc: float = 0.0, argp_deg: float = 90.0,
+    u1: float, u2: float, exptime_days: float,
+    ecc: float = 0.0, argp_deg: float = 90.0,
     companion_fluxratio: float = 0.0, companion_is_host: bool = False,
-    exptime_days: float = 0.00139, nsamples: int = 20,
+    nsamples: int = 20,
 ) -> float:
     """Log-likelihood for an eclipsing binary scenario.
 
-    Vetoes draws where secondary eclipse depth >= 1.5*sigma.
+    Both primary and secondary eclipses are evaluated at the observed times.
     """
-    model, secdepth = simulate_EB(
+    model, _ = simulate_EB(
         time, R_EB_solar, EB_fluxratio, P_orb, inc_deg, a_cm, R_s_solar,
-        u1, u2, ecc, argp_deg, companion_fluxratio, companion_is_host,
-        exptime_days, nsamples,
+        u1, u2, exptime_days, ecc, argp_deg, companion_fluxratio,
+        companion_is_host, nsamples,
     )
-    if secdepth >= 1.5 * sigma:
-        return -np.inf
     return float(-0.5 * np.sum((flux - model) ** 2 / sigma ** 2))
 
 

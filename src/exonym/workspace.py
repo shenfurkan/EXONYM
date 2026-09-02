@@ -218,7 +218,7 @@ _RESERVED_WINDOWS_NAMES = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class CandidateWorkspace:
     """A registered candidate and its workspace metadata.
 
@@ -245,6 +245,39 @@ class CandidateWorkspace:
     candidate_id: str
     path: Path
     metadata: Dict[str, Any]
+
+    def __init__(
+        self,
+        repository_root: Path,
+        candidate_id: Optional[str] = None,
+        path: Optional[Path] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Create a registered workspace record or a candidate-local path view.
+
+        The one-path form is limited to callers that already own a path below a
+        candidate collection, such as isolated artifact comparators. It does
+        not validate or synthesize candidate metadata.
+        """
+        if path is None:
+            workspace_path = Path(repository_root)
+            resolved_path = workspace_path.resolve()
+            if resolved_path.parent.name != CANDIDATE_DIRECTORY:
+                raise ValueError("candidate-local path views must be direct children of candidate")
+            normalized_id = validate_candidate_id(resolved_path.name)
+            resolved_root = resolved_path.parent.parent
+            workspace_metadata: Dict[str, Any] = {}
+        else:
+            if candidate_id is None or metadata is None:
+                raise ValueError("registered workspaces require candidate_id, path, and metadata")
+            resolved_root = Path(repository_root).resolve()
+            normalized_id = validate_candidate_id(candidate_id)
+            resolved_path = Path(path)
+            workspace_metadata = metadata
+        object.__setattr__(self, "repository_root", resolved_root)
+        object.__setattr__(self, "candidate_id", normalized_id)
+        object.__setattr__(self, "path", resolved_path)
+        object.__setattr__(self, "metadata", workspace_metadata)
 
 
 def validate_candidate_id(candidate_id: str) -> str:
