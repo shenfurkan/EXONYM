@@ -348,7 +348,11 @@ def resolve_secondary_eclipse_control(
     circular_report = {
         "mode": "circular-ephemeris-box-control",
         "phase": {"median": 0.5, "p16": 0.5, "p84": 0.5, "credible_interval_wraps_phase_zero": False, "half_width_phase": 0.0},
-        "duration_hours": {"median": round(duration_days * 24.0, 8), "p16": round(duration_days * 24.0, 8), "p84": round(duration_days * 24.0, 8)},
+        "duration_hours": {
+            "median": float(duration_days * 24.0),
+            "p16": float(duration_days * 24.0),
+            "p84": float(duration_days * 24.0),
+        },
         "caveat": "No compatible candidate-local eccentric posterior was available; the secondary box is a circular-orbit control.",
     }
     report_path = workspace.path / "outputs" / "mcmc_transit_fit.json"
@@ -460,12 +464,12 @@ def resolve_secondary_eclipse_control(
             "mode": "eccentric-posterior-marginalized-box-control",
             "phase": phase_summary,
             "duration_hours": {
-                "median": round(float(np.median(duration_hours)), 8),
-                "p16": round(float(np.quantile(duration_hours, 0.16)), 8),
-                "p84": round(float(np.quantile(duration_hours, 0.84)), 8),
+                "median": float(np.median(duration_hours)),
+                "p16": float(np.quantile(duration_hours, 0.16)),
+                "p84": float(np.quantile(duration_hours, 0.84)),
             },
-            "occultation_probability_from_sampled_posterior": round(
-                float(np.count_nonzero(occulting)) / float(sampled_chain.shape[0]), 8
+            "occultation_probability_from_sampled_posterior": float(
+                float(np.count_nonzero(occulting)) / float(sampled_chain.shape[0])
             ),
             "posterior_template_samples": int(sampled_chain.shape[0]),
             "transit_fit": {
@@ -831,15 +835,15 @@ def fit_phase_curve_components(
         error_ppm = float(errors[index] * PARTS_PER_MILLION)
         has_defined_error = math.isfinite(error_ppm) and error_ppm > 0.0
         components[name] = {
-            "value_ppm": round(value_ppm, 3),
-            "block_robust_error_ppm": round(error_ppm, 3),
+            "value_ppm": float(value_ppm),
+            "block_robust_error_ppm": float(error_ppm),
             # NUMERICAL_GUARD: a zero or invalid covariance error does not
             # represent a null detection significance or a finite upper bound.
             "significance_sigma": (
-                round(value_ppm / error_ppm, 2) if has_defined_error else None
+                float(value_ppm / error_ppm) if has_defined_error else None
             ),
             "three_sigma_absolute_upper_bound_ppm": (
-                round(abs(value_ppm) + 3.0 * error_ppm, 3)
+                float(abs(value_ppm) + 3.0 * error_ppm)
                 if has_defined_error
                 else None
             ),
@@ -876,9 +880,11 @@ def fit_phase_curve_components(
         "n_points_after_primary_transit_mask": int(time.size),
         "n_sectors": int(len(np.unique(sector_values))),
         "n_covariance_clusters": int(n_clusters),
-        "primary_mask_half_width_hours": round(primary_mask_half_durations * duration_days * 24.0, 3),
+        "primary_mask_half_width_hours": float(primary_mask_half_durations * duration_days * 24.0),
         "secondary_box_phase": _rounded_phase_fraction(secondary_eclipse_phase),
-        "secondary_box_duration_hours": round(float(secondary_eclipse_duration_days or duration_days) * 24.0, 3),
+        "secondary_box_duration_hours": float(
+            float(secondary_eclipse_duration_days or duration_days) * 24.0
+        ),
         "secondary_box_template_method": secondary_template_method,
         "orbital_geometry": {
             "eccentricity": float(orbital_eccentricity),
@@ -887,7 +893,7 @@ def fit_phase_curve_components(
         },
         "components": components,
         "maximum_absolute_significance_sigma": (
-            round(max_significance, 2) if max_significance is not None else None
+            float(max_significance) if max_significance is not None else None
         ),
     }
 

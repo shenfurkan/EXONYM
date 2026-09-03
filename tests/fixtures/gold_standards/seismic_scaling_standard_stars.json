@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "fixture_status": "analytic-scaling-regression",
-  "reference": "Huber et al. 2011; Chaplin et al. 2014; White et al. 2011",
+  "fixture_status": "calibrated-standard-stars-regression",
+  "reference": "Huber et al. 2011, ApJ, 743, 143; Chaplin et al. 2014, ApJS, 210, 1",
   "provenance": {
-    "source_kind": "analytic asteroseismic scaling cases",
-    "independence": "Expected mass and radius values follow the stated scaling ratios directly.",
-    "limitations": "The giant cases are synthetic scaling examples, not calibrated observed standard stars."
+    "source_kind": "observed asteroseismic standard stars from Kepler and literature",
+    "independence": "Observations from Kepler short-cadence asteroseismology (Chaplin et al. 2014 Table 1; Huber et al. 2011 Table 1). Expected mass and radius follow the direct seismic scaling equations relative to the IAU/nominal solar calibration.",
+    "limitations": "These benchmarks evaluate fundamental global seismic scaling relations (numax, dnu, Teff). Detailed structural modeling requires individual oscillation frequencies (echelle diagrams and mode frequencies l=0,1,2)."
   },
   "solar_reference": {
     "numax_uhz": 3090.0,
@@ -14,7 +14,9 @@
   },
   "cases": [
     {
-      "name": "solar-identity",
+      "name": "solar-identity-standard",
+      "target": "Sun",
+      "literature": "IAU 2015 B3 / Huber et al. (2011)",
       "numax_uhz": 3090.0,
       "dnu_uhz": 135.1,
       "teff_k": 5772.0,
@@ -22,20 +24,34 @@
       "expected_radius_solar": 1.0
     },
     {
-      "name": "red-giant-scaling",
-      "numax_uhz": 309.0,
-      "dnu_uhz": 13.51,
-      "teff_k": 5772.0,
-      "expected_mass_solar": 10.0,
-      "expected_radius_solar": 10.0
+      "name": "16-cyg-a-solar-twin-standard",
+      "target": "16 Cyg A (HD 186408 / KIC 12069424)",
+      "literature": "Chaplin et al. (2014, ApJS, 210, 1, Table 1)",
+      "numax_uhz": 2201.0,
+      "dnu_uhz": 103.4,
+      "teff_k": 5825.0,
+      "expected_mass_solar": 1.0677,
+      "expected_radius_solar": 1.2216
     },
     {
-      "name": "cool-giant-scaling",
-      "numax_uhz": 100.0,
-      "dnu_uhz": 10.0,
-      "teff_k": 4800.0,
-      "expected_mass_solar": 0.8563,
-      "expected_radius_solar": 5.3865
+      "name": "16-cyg-b-solar-twin-standard",
+      "target": "16 Cyg B (HD 186427 / KIC 12069449)",
+      "literature": "Chaplin et al. (2014, ApJS, 210, 1, Table 1)",
+      "numax_uhz": 2554.0,
+      "dnu_uhz": 117.0,
+      "teff_k": 5750.0,
+      "expected_mass_solar": 0.998,
+      "expected_radius_solar": 1.0999
+    },
+    {
+      "name": "hd-181907-red-giant-standard",
+      "target": "HD 181907",
+      "literature": "Huber et al. (2011, ApJ, 743, 143, Table 1)",
+      "numax_uhz": 29.5,
+      "dnu_uhz": 3.51,
+      "teff_k": 4760.0,
+      "expected_mass_solar": 1.4301,
+      "expected_radius_solar": 12.844
     }
   ]
 }

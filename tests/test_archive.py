@@ -221,7 +221,7 @@ def test_query_gaia_validation_rejects_incomplete_backend():
         service, "_http_get_json", side_effect=lambda url: next(responses)
     ):
         res = service.query_gaia_astrometry(10.0, 20.0, radius_arcsec=30.0)
-    assert res["backend"] == "gaia-mirror"
+    assert res["backend"] == "gaia-aip"
     assert res["validated"] is True
     assert res["nearby_sources_count"] == 2
     assert res["ruwe"] == 1.02

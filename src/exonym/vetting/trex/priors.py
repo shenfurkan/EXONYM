@@ -25,7 +25,7 @@ from scipy.special import ndtr as _standard_normal_cdf
 from scipy.stats import beta as _beta_dist
 from scipy.stats import powerlaw as _powerlaw_dist
 
-from .constants import Msun, Rsun, au, G, pi
+from .constants import Msun, Rsun, au, G, pi, SECONDS_PER_DAY
 from .funcs import separation_at_contrast
 
 # Winters et al. (2019), AJ, 157, 216, DOI:10.3847/1538-3881/ab05dc,
@@ -291,7 +291,7 @@ def lnprior_bound(
         np.asarray(contrasts, dtype=float),
     )
     seps_au = d_pc * seps_arcsec
-    max_Porbs = ((4.0 * pi ** 2) / (G * M_s * Msun) * (seps_au * au) ** 3) ** 0.5 / 86400.0
+    max_Porbs = ((4.0 * pi ** 2) / (G * M_s * Msun) * (seps_au * au) ** 3) ** 0.5 / SECONDS_PER_DAY
 
     if M_s <= WINTERS_2019_M_DWARF_MAXIMUM_MASS_SOLAR:
         return np.log(_winters2019_m_dwarf_companion_cdf(M_s, seps_au))

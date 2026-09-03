@@ -10,6 +10,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
+from exonym.constants import SECONDS_PER_DAY
 from exonym.vetting.centroid import centroid_gate, centroid_offset_z
 from exonym.vetting.oddeven import odd_even_gate, odd_even_z
 from exonym.vetting.tricera_parse import fpp_gate, load_fpp_report
@@ -2096,7 +2097,12 @@ def test_posterior_summaries_refuse_a_missing_batman_model(monkeypatch):
     chain = np.tile(_initial_fit_parameters(1200.0, 1.0, 1e-4, eccentric=False), (4, 1))
 
     with pytest.raises(RuntimeError, match="posterior-derived mid-transit depths"):
-        _posterior_summaries(chain, {"period_days": 3.2}, eccentric=False)
+        _posterior_summaries(
+            chain,
+            {"period_days": 3.2},
+            eccentric=False,
+            exposure_seconds=SECONDS_PER_DAY,
+        )
 
 
 def test_posterior_summaries_report_inclination_geometry_clipping(monkeypatch):
@@ -2110,7 +2116,12 @@ def test_posterior_summaries_report_inclination_geometry_clipping(monkeypatch):
     chain = np.tile(initial, (4, 1))
     chain[2:, 2] = 100.0
 
-    summaries = _posterior_summaries(chain, {"period_days": 3.2}, eccentric=False)
+    summaries = _posterior_summaries(
+        chain,
+        {"period_days": 3.2},
+        eccentric=False,
+        exposure_seconds=SECONDS_PER_DAY,
+    )
 
     assert summaries["inclination_deg"]["conjunction_distance_clip_fraction"] == pytest.approx(0.5)
 
@@ -2128,7 +2139,12 @@ def test_posterior_summaries_vectorize_kipping_limb_darkening_exactly(monkeypatc
     chain[:, 5] = q1
     chain[:, 6] = q2
 
-    summaries = _posterior_summaries(chain, {"period_days": 3.2}, eccentric=False)
+    summaries = _posterior_summaries(
+        chain,
+        {"period_days": 3.2},
+        eccentric=False,
+        exposure_seconds=SECONDS_PER_DAY,
+    )
 
     expected_u1, expected_u2 = kipping_to_quadratic_limb_darkening(q1, q2)
     assert summaries["u1"]["median"] == pytest.approx(expected_u1)

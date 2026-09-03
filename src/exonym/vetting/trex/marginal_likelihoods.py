@@ -180,12 +180,14 @@ def _eval_scenario(
     if np.any(transit_mask):
         idx = np.where(transit_mask)[0]
         if is_EB:
+            if R_EB is None or EB_fluxratio_arr is None:
+                raise RuntimeError("EB scenario requires evaluated R_EB and EB_fluxratio from stellar relations")
             for i in idx:
                 a_cm_val = float(a_cm[i]) if isinstance(a_cm, np.ndarray) else float(a_cm)
                 lnL[i] = lnL_EB(
                     time, flux, sigma,
-                    float(R_EB[i]) if R_EB is not None else float(R_host * 0.3),
-                    float(EB_fluxratio_arr[i]) if EB_fluxratio_arr is not None else 0.5,
+                    float(R_EB[i]),
+                    float(EB_fluxratio_arr[i]),
                     eff_period, float(inc[i]), a_cm_val, R_host,
                     u1, u2, exptime_days,
                     ecc=float(ecc[i]), argp_deg=float(w[i]),

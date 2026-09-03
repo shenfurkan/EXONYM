@@ -2073,7 +2073,11 @@ def _companion_periods(workspace: CandidateWorkspace) -> List[float]:
                         if float(value) > 0:
                             periods.append(float(value))
                         break
-    return sorted(set(round(value, 6) for value in periods))
+    unique_periods: List[float] = []
+    for value in sorted(periods):
+        if not any(math.isclose(value, existing, rel_tol=1e-12, abs_tol=1e-12) for existing in unique_periods):
+            unique_periods.append(float(value))
+    return unique_periods
 
 
 def enumerate_companion_super_periods(
@@ -2117,10 +2121,10 @@ def enumerate_companion_super_periods(
                 continue
             records.append(
                 {
-                    "companion_period_days": round(companion_period, 6),
+                    "companion_period_days": float(companion_period),
                     "companion_orbital_relation": relation,
                     "resonance_j": int(resonance),
-                    "super_period_days": round(super_period, 4)
+                    "super_period_days": float(super_period)
                     if math.isfinite(super_period)
                     else None,
                     "super_period_status": (

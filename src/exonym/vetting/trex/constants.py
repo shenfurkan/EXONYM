@@ -1,45 +1,54 @@
 """Cross-platform physical constants for the TREX statistical vetting engine.
 
 Constants are drawn from IAU 2015 Resolution B3 nominal values and
-CODATA 2018.  CGS units are used throughout to match the astrophysical
-literature conventions of Giacalone et al. (2021).
+CODATA 2018 through the official ``astropy.constants`` / ``astropy.units``
+interfaces; every exported value is the reference float64 quantity, never a
+hand-written or truncated literal (AGENTS.md Rules 5, 10 & 13).  CGS units
+are used throughout to match the astrophysical literature conventions of
+Giacalone et al. (2021).
 
 References
 ----------
 * IAU Resolution B3 (2015): nominal solar and planetary conversion constants.
 * CODATA 2018: Newtonian gravitational constant and related values.
+* IAU 2012 Resolution B2: astronomical unit (149 597 870 700 m, exact).
 """
 
 from __future__ import annotations
 
 import math as _math
 
-# ---- SI base constants (CODATA 2018) ----
-GRAVITATIONAL_CONSTANT_SI: float = 6.67430e-11          # m^3 kg^-1 s^-2
+import astropy.units as _u
+from astropy import constants as _const
+from astropy.constants import codata2018 as _codata
+from astropy.constants import iau2015 as _iau
 
-# ---- CGS constants (derived from SI) ----
-GRAVITATIONAL_CONSTANT_CGS: float = GRAVITATIONAL_CONSTANT_SI * 1.0e3  # cm^3 g^-1 s^-2
-SPEED_OF_LIGHT_CGS: float = 2.99792458e10                # cm s^-1 (exact)
+# ---- SI base constants (CODATA 2018) ----
+GRAVITATIONAL_CONSTANT_SI: float = float(_codata.G.value)          # m^3 kg^-1 s^-2
+
+# ---- CGS constants (official astropy conversions) ----
+GRAVITATIONAL_CONSTANT_CGS: float = float(_codata.G.cgs.value)     # cm^3 g^-1 s^-2
+SPEED_OF_LIGHT_CGS: float = float(_const.c.cgs.value)              # cm s^-1 (exact)
 
 # ---- IAU 2015 Resolution B3 nominal values ----
-NOMINAL_SOLAR_RADIUS_CM: float = 6.957e10                # cm
-NOMINAL_SOLAR_RADIUS_M: float = 6.957e8                  # m
-NOMINAL_SOLAR_MASS_G: float = 1.9884e33                  # g  (derived from GM / G)
-NOMINAL_SOLAR_MASS_PARAMETER_CGS: float = 1.3271244e26   # cm^3 s^-2 (GM_sun)
-NOMINAL_EARTH_EQUATORIAL_RADIUS_CM: float = 6.3781e8     # cm
-NOMINAL_EARTH_EQUATORIAL_RADIUS_KM: float = 6.3781e3     # km
-NOMINAL_EARTH_MASS_PARAMETER_CGS: float = 3.986004e20    # cm^3 s^-2 (GM_earth)
+NOMINAL_SOLAR_RADIUS_CM: float = float(_iau.R_sun.cgs.value)       # cm
+NOMINAL_SOLAR_RADIUS_M: float = float(_iau.R_sun.value)            # m
+NOMINAL_SOLAR_MASS_G: float = float((_iau.GM_sun / _codata.G).cgs.value)  # g (exact GM / G)
+NOMINAL_SOLAR_MASS_PARAMETER_CGS: float = float(_iau.GM_sun.cgs.value)    # cm^3 s^-2
+NOMINAL_EARTH_EQUATORIAL_RADIUS_CM: float = float(_iau.R_earth.cgs.value)  # cm
+NOMINAL_EARTH_EQUATORIAL_RADIUS_KM: float = float(_iau.R_earth.to_value(_u.km))
+NOMINAL_EARTH_MASS_PARAMETER_CGS: float = float(_iau.GM_earth.cgs.value)  # cm^3 s^-2
 
 # ---- Derived conversion ratios ----
 EARTH_TO_SOLAR_RADIUS_RATIO: float = (
     NOMINAL_EARTH_EQUATORIAL_RADIUS_CM / NOMINAL_SOLAR_RADIUS_CM
 )
 
-# ---- Astronomical unit ----
-ASTRONOMICAL_UNIT_CM: float = 1.49597870700e13           # cm (IAU 2012 exact)
+# ---- Astronomical unit (IAU 2012 Resolution B2) ----
+ASTRONOMICAL_UNIT_CM: float = float(_const.au.cgs.value)          # cm
 
 # ---- Time ----
-SECONDS_PER_DAY: float = 86_400.0
+SECONDS_PER_DAY: float = float(_u.day.to(_u.s))
 
 # ---- Solar mean density (CGS) ----
 SOLAR_MEAN_DENSITY_G_CM3: float = (

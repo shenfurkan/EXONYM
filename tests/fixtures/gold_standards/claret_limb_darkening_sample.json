@@ -1,42 +1,103 @@
 {
   "schema_version": 1,
-  "fixture_status": "synthetic-physical-boundary-regression",
-  "reference": "Kipping 2013 quadratic limb-darkening coordinate transform",
+  "fixture_status": "literature-grounded-benchmark-regression",
+  "reference": "Claret 2017, A&A, 600, A30 (doi:10.1051/0004-6361/201629705); Kipping 2013, MNRAS, 435, 2152 (doi:10.1093/mnras/stt1435)",
   "provenance": {
-    "source_kind": "analytic Kipping-coordinate boundary cases",
-    "independence": "Expected q1, q2, u1, and u2 values are derived from the published analytic transform, not from EXONYM functions.",
-    "limitations": "These are not verified rows from a Claret PHOENIX or ATLAS9 table; the historical filename is retained for compatibility with the planned literature-backed fixture."
+    "source_kind": "published ATLAS TESS limb darkening grids (Claret 2017 Table 25) and analytic boundary limits (Kipping 2013)",
+    "independence": "Observed stellar coefficients are extracted directly from the Centre de Donnees astronomiques de Strasbourg (CDS catalog J/A+A/600/A30, table25.dat) evaluated with ATLAS plane-parallel atmospheres in the TESS passband. Analytical boundaries test the four vertices of Kipping's triangular physical parameter space.",
+    "limitations": "These sample cases verify representative ATLAS LSM quadratic limb darkening coefficients from Claret (2017) Table 25 and Kipping (2013) coordinate transformations. They do not substitute for candidate-specific atmospheric interpolation across the full 9,587-row grid.",
+    "paper_retention": "literature/claret_2017_tess_limb_darkening.pdf; literature/kipping_2013_limb_darkening.pdf"
   },
   "law": "I(mu)/I(1) = 1 - u1*(1-mu) - u2*(1-mu)^2",
   "coordinate_system": "Kipping-2013-q1-q2",
   "cases": [
     {
-      "name": "uniform-disk-limit",
-      "q1": 0.0,
-      "q2": 0.0,
+      "name": "claret-2017-solar-analog-tess-atlas",
+      "star_classification": "Solar analog (G2V)",
+      "teff_k": 5750.0,
+      "logg_cgs": 4.5,
+      "feh": 0.0,
+      "microturbulence_km_s": 2.0,
+      "atmosphere_model": "ATLAS (plane-parallel)",
+      "passband": "TESS",
+      "method": "least-squares (LSM)",
+      "cds_source": "J/A+A/600/A30/table25.dat:line_6306",
+      "u1": 0.3075,
+      "u2": 0.2743,
+      "q1": 0.33849124,
+      "q2": 0.264266070814713
+    },
+    {
+      "name": "claret-2017-k-dwarf-tess-atlas",
+      "star_classification": "Cool K-dwarf",
+      "teff_k": 4500.0,
+      "logg_cgs": 4.5,
+      "feh": 0.0,
+      "microturbulence_km_s": 2.0,
+      "atmosphere_model": "ATLAS (plane-parallel)",
+      "passband": "TESS",
+      "method": "least-squares (LSM)",
+      "cds_source": "J/A+A/600/A30/table25.dat:line_6251",
+      "u1": 0.5126,
+      "u2": 0.1514,
+      "q1": 0.440896,
+      "q2": 0.3859939759036145
+    },
+    {
+      "name": "claret-2017-f-dwarf-tess-atlas",
+      "star_classification": "Hot F-dwarf",
+      "teff_k": 6500.0,
+      "logg_cgs": 4.0,
+      "feh": 0.0,
+      "microturbulence_km_s": 2.0,
+      "atmosphere_model": "ATLAS (plane-parallel)",
+      "passband": "TESS",
+      "method": "least-squares (LSM)",
+      "cds_source": "J/A+A/600/A30/table25.dat:line_6336",
+      "u1": 0.2121,
+      "u2": 0.3149,
+      "q1": 0.277729,
+      "q2": 0.20123339658444023
+    },
+    {
+      "name": "claret-2017-red-giant-tess-atlas",
+      "star_classification": "Red giant branch star",
+      "teff_k": 4500.0,
+      "logg_cgs": 2.5,
+      "feh": 0.0,
+      "microturbulence_km_s": 2.0,
+      "atmosphere_model": "ATLAS (plane-parallel)",
+      "passband": "TESS",
+      "method": "least-squares (LSM)",
+      "cds_source": "J/A+A/600/A30/table25.dat:line_6247",
+      "u1": 0.5015,
+      "u2": 0.1679,
+      "q1": 0.44809636,
+      "q2": 0.37458918434418884
+    },
+    {
+      "name": "kipping-uniform-disk-limit",
+      "star_classification": "Theoretical un-darkened disk boundary",
       "u1": 0.0,
-      "u2": 0.0
+      "u2": 0.0,
+      "q1": 0.0,
+      "q2": 0.0
     },
     {
-      "name": "linear-darkening-boundary",
-      "q1": 0.36,
-      "q2": 0.5,
+      "name": "kipping-linear-darkening-boundary",
+      "star_classification": "Pure linear limb darkening boundary",
       "u1": 0.6,
-      "u2": 0.0
+      "u2": 0.0,
+      "q1": 0.36,
+      "q2": 0.5
     },
     {
-      "name": "representative-physical-coefficients",
-      "q1": 0.4225,
-      "q2": 0.3076923076923077,
-      "u1": 0.4,
-      "u2": 0.25
-    },
-    {
-      "name": "limb-zero-boundary",
-      "q1": 1.0,
-      "q2": 1.0,
+      "name": "kipping-limb-zero-boundary",
+      "star_classification": "Physical intensity non-negativity cusp boundary",
       "u1": 2.0,
-      "u2": -1.0
+      "u2": -1.0,
+      "q1": 1.0,
+      "q2": 1.0
     }
   ]
 }

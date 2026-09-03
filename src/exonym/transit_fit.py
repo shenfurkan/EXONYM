@@ -130,7 +130,6 @@ BIN_MINUTES = 8.0           # Default phase-binning resolution (minutes)
 # analytic transit model with quadratic limb darkening at TESS cadence
 # (Kipping 2010 recommends >= 5 for precision better than 10 ppm).
 SUPERSAMPLE_FACTOR = 7      # Numerical exposure integration sub-sampling factor
-EXPTIME_SECONDS = 120.0     # Nominal TESS 2-minute SPOC cadence (seconds)
 # SCIENTIFIC_BOUNDARY: the folded/binned display uses a coarser effective
 # integration time; this is not the native-cadence posterior exposure.
 FITTED_BIN_EXPOSURE_SECONDS = BIN_MINUTES * 60.0
@@ -457,7 +456,7 @@ def fit_transit_light_curve(
     eccentric: bool = False,
     period_sigma_days: Optional[float] = None,
     t0_sigma_days: Optional[float] = None,
-    exposure_seconds: float = EXPTIME_SECONDS,
+    exposure_seconds: Optional[float] = None,
     num_warmup: int = GPU_NUTS_WARMUP,
     num_samples: int = GPU_NUTS_SAMPLES,
     target_accept_prob: float = GPU_NUTS_TARGET_ACCEPT_PROB,
@@ -553,7 +552,7 @@ def _validate_accelerated_transit_fit_data(
     *,
     period_sigma_days: Optional[float],
     t0_sigma_days: Optional[float],
-    exposure_seconds: float,
+    exposure_seconds: Optional[float],
     eccentric: bool,
 ) -> _AcceleratedTransitFitData:
     """Validate one normalized light curve before dispatching a sampler."""
@@ -565,7 +564,6 @@ def _validate_accelerated_transit_fit_data(
         epoch = float(t0_days)
         density = float(rho_star_g_cm3)
         density_sigma = float(rho_star_sigma_g_cm3)
-        integration_seconds = float(exposure_seconds)
     except (TypeError, ValueError) as exc:
         raise ValueError("transit-fit inputs must be numeric finite arrays and scalars") from exc
     if (
@@ -587,10 +585,20 @@ def _validate_accelerated_transit_fit_data(
         or density <= 0.0
         or not math.isfinite(density_sigma)
         or density_sigma <= 0.0
-        or not math.isfinite(integration_seconds)
-        or integration_seconds <= 0.0
     ):
-        raise ValueError("period, stellar-density prior, and exposure time must be finite and positive")
+        raise ValueError("period and stellar-density prior must be finite and positive")
+    try:
+        integration_seconds = float(exposure_seconds) if exposure_seconds is not None else None
+    except (TypeError, ValueError):
+        integration_seconds = None
+    if integration_seconds is None or not math.isfinite(integration_seconds) or integration_seconds <= 0.0:
+        cadence_steps = np.diff(np.sort(time))
+        positive_steps = cadence_steps[np.isfinite(cadence_steps) & (cadence_steps > 0.0)]
+        if positive_steps.size == 0:
+            raise ValueError("Cadence cannot be determined: light curve lacks positive time differences")
+        integration_seconds = float(np.median(positive_steps)) * SECONDS_PER_DAY
+    if not math.isfinite(integration_seconds) or integration_seconds <= 0.0:
+        raise ValueError("Cadence cannot be determined: light curve has an invalid positive cadence")
 
     def optional_positive(value: Optional[float], name: str) -> Optional[float]:
         if value is None:
@@ -915,13 +923,13 @@ def _accelerated_cpu_log_probability(
 def _accelerated_initial_theta(data: _AcceleratedTransitFitData) -> np.ndarray:
     """Build a finite CPU starting point from normalized flux statistics."""
     observed_depth = max(float(np.median(data.flux) - np.min(data.flux)), 1.0e-8)
-    rp_rstar = min(0.2, max(0.005, math.sqrt(observed_depth)))
+    rp_rstar = min(0.95, max(0.005, math.sqrt(observed_depth)))
     scatter = max(float(np.std(data.flux - np.median(data.flux))), float(np.median(data.flux_err)), 1.0e-6)
     values = [
         rp_rstar,
         math.log(data.rho_star_g_cm3),
         0.3,
-        float(np.clip(np.median(data.flux), 0.995, 1.005)),
+        float(np.median(data.flux)),
         float(np.clip(math.log(scatter), JITTER_LOG_LOWER + 0.1, JITTER_LOG_UPPER - 0.1)),
         0.5,
         0.5,
@@ -2400,6 +2408,19 @@ def _thin_joint_posterior(chain: np.ndarray, target_samples: int = 1000) -> np.n
     return samples[::step][:target_samples]
 
 
+def _require_observational_exposure_seconds(exposure_seconds: Optional[float]) -> float:
+    """Return a valid exposure time for numerical transit integration."""
+    try:
+        value = float(exposure_seconds) if exposure_seconds is not None else None
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Observational exposure time is required for numerical transit integration"
+        ) from exc
+    if value is None or not math.isfinite(value) or value <= 0.0:
+        raise ValueError("Observational exposure time is required for numerical transit integration")
+    return value
+
+
 def _posterior_summaries(
     chain: np.ndarray,
     ephemeris: Dict[str, Any],
@@ -2433,6 +2454,7 @@ def _posterior_summaries(
     names = _parameter_names(eccentric, n_sectors, sector_labels)
     if chain.ndim != 2 or chain.shape[1] != len(names):
         raise ValueError("transit posterior chain has an invalid sector layout")
+    integration_seconds = _require_observational_exposure_seconds(exposure_seconds)
     posteriors: Dict[str, Dict[str, float]] = {}
     for index, name in enumerate(names):
         posteriors[name] = _quantile_summary(chain[:, index])
@@ -2505,11 +2527,7 @@ def _posterior_summaries(
             omega_deg=float(median_omega),
             # ASTROPHYSICAL_GUARD: evaluate the instantaneous mid-transit depth
             # at candidate cadence.
-            exposure_seconds=(
-                float(exposure_seconds)
-                if exposure_seconds is not None and math.isfinite(exposure_seconds) and exposure_seconds > 0
-                else EXPTIME_SECONDS
-            ),
+            exposure_seconds=integration_seconds,
         )
         if model is None or model.shape != (1,) or not np.isfinite(model[0]):
             raise RuntimeError(
@@ -3668,6 +3686,7 @@ def _candidate_accelerated_posterior_summary(
     samples = np.asarray(chain, dtype=float)
     if samples.ndim != 2 or samples.shape[0] == 0:
         raise RuntimeError("candidate transit sampler returned an empty posterior chain")
+    integration_seconds = _require_observational_exposure_seconds(exposure_seconds)
     jitter_index = 3 + n_sectors
     q1_index = jitter_index + 1
     q2_index = jitter_index + 2
@@ -3699,11 +3718,7 @@ def _candidate_accelerated_posterior_summary(
         rho_star_sigma_g_cm3=float(density_sigma_cgs),
         period_sigma_days=None,
         t0_sigma_days=None,
-        exposure_seconds=(
-            float(exposure_seconds)
-            if exposure_seconds is not None and math.isfinite(exposure_seconds) and exposure_seconds > 0
-            else EXPTIME_SECONDS
-        ),
+        exposure_seconds=integration_seconds,
         eccentric=eccentric,
     )
     return _summarize_accelerated_samples(
@@ -4062,9 +4077,10 @@ def compute_bayesian_model_comparison(
     delta_ln_z = float(ln_z_eccentric - ln_z_circular)
     delta_ln_z_err = float(math.sqrt(float(ln_z_circular_err) ** 2 + float(ln_z_eccentric_err) ** 2))
 
-    # Guard against overflow when evaluating Bayes factor exp(Delta ln Z)
-    clipped_delta = float(np.clip(delta_ln_z, -700.0, 700.0))
-    bayes_factor = float(math.exp(clipped_delta))
+    try:
+        bayes_factor = float(math.exp(delta_ln_z))
+    except OverflowError:
+        bayes_factor = float("inf") if delta_ln_z > 0.0 else 0.0
 
     abs_delta = abs(delta_ln_z)
     if abs_delta < 1.0:

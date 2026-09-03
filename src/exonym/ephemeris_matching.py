@@ -25,6 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from astropy.constants import M_earth, M_jup, R_earth, R_jup
+
 from .inputs import (
     BTJD_TIME_SYSTEM,
     EPHEMERIS_CONFIG_NAMES,
@@ -46,9 +48,28 @@ RECORDED_EVIDENCE_SOURCE_KINDS = (
     "literature",
 )
 _RECORD_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-METHOD = "known-signal-ephemeris-period-epoch-duration-harmonic-v6"
+METHOD = "known-signal-ephemeris-period-epoch-duration-harmonic-v7"
 EPOCH_TOLERANCE_DURATION_MULTIPLIER = 1.0
 DURATION_RELATIVE_TOLERANCE = 0.5
+# --- Resonant-repulsion proximity scale (Lithwick & Wu 2012) ---
+# Lithwick & Wu (2012, ApJ, 756, L11, doi:10.1088/2041-8205/756/1/L11;
+# arXiv:1204.2555) show that pairs evolving under weak eccentricity damping
+# evacuate the near side of first-order j:(j-1) resonances and pile up on the
+# far side at a fractional distance from nominal commensurability of order
+#     Delta_mig ~ 0.006 (Q1/10)^(-1/3) (k2/0.1)^(1/3) (m1/10 Mearth)^(1/3)
+#                 (R1/2 Rearth)^(5/3) (M*/Msun)^(-8/3) (P1/5 d)^(-13/9)
+#                 (t/5 Gyr)^(1/3) (2 beta + 2 beta^2)^(1/3),
+#     beta = (m2/m1) sqrt(a2/a1) = (m2/m1) (P2/P1)^(2/3)
+# (their Eq. 12 in the expanded fiducial form).  The retained source PDF is
+# literature/lithwick_wu_2012_resonant_repulsion.pdf.
+RESONANCE_REPULSION_WIDTH_BASE = 0.006
+RESONANCE_TIDAL_Q_FIDUCIAL = 10.0
+RESONANCE_LOVE_K2_FIDUCIAL = 0.1
+RESONANCE_AGE_FIDUCIAL_GYR = 5.0
+RESONANCE_MASS_FIDUCIAL_EARTH = 10.0
+RESONANCE_RADIUS_FIDUCIAL_EARTH = 2.0
+RESONANCE_PERIOD_FIDUCIAL_DAYS = 5.0
+RESONANCE_EQUAL_MASS_BETA_FIDUCIAL = 1.0
 # Only adjacent first-order j:(j-1) resonances and their reciprocals are
 # comparison candidates; higher-order ratios are not silently promoted.
 # Resonances are derived dynamically using the standard fractions module (AGENTS.md Rule 10 & Rule 13).
@@ -62,6 +83,90 @@ def _derive_first_order_mmr_factors(max_j: int = 5) -> Tuple[float, ...]:
 
 HARMONIC_FACTORS = _derive_first_order_mmr_factors()
 
+
+def lithwick_wu_repulsion_width_fractional(
+    period_inner_days: float,
+    period_outer_days: float,
+    mass_inner_earth: Optional[float] = None,
+    radius_inner_earth: Optional[float] = None,
+    star_mass_solar: Optional[float] = None,
+    mass_outer_earth: Optional[float] = None,
+) -> float:
+    """Return the resonant-repulsion width as a fractional distance to resonance.
+
+    Evaluates Lithwick & Wu (2012, ApJ, 756, L11) Eq. (12) with the paper's
+    fiducial tidal quality factor ``Q1 = 10``, Love number ``k2 = 0.1``, and
+    system age ``t = 5 Gyr`` (each fiducial factor then evaluates to unity).
+    When either planet mass is unavailable the equal-mass fiducial
+    ``beta = 1`` from the same equation applies; missing inner-planet radius
+    or stellar mass likewise falls back to the paper's unit fiducial factors.
+    The result is a screening scale in the normalized distance
+    ``Delta = abs(P_outer / (j * P_inner) - 1)``.
+    """
+    periods = (float(period_inner_days), float(period_outer_days))
+    if not all(math.isfinite(value) and value > 0.0 for value in periods):
+        raise ValueError("resonance width requires finite positive periods")
+    q_factor = (RESONANCE_TIDAL_Q_FIDUCIAL / 10.0) ** (-1.0 / 3.0)
+    k2_factor = (RESONANCE_LOVE_K2_FIDUCIAL / 0.1) ** (1.0 / 3.0)
+    age_factor = (RESONANCE_AGE_FIDUCIAL_GYR / 5.0) ** (1.0 / 3.0)
+    mass_factor = 1.0
+    if mass_inner_earth is not None:
+        mass_factor = (float(mass_inner_earth) / RESONANCE_MASS_FIDUCIAL_EARTH) ** (1.0 / 3.0)
+    radius_factor = 1.0
+    if radius_inner_earth is not None:
+        radius_factor = (float(radius_inner_earth) / RESONANCE_RADIUS_FIDUCIAL_EARTH) ** (5.0 / 3.0)
+    star_mass_factor = 1.0
+    if star_mass_solar is not None:
+        star_mass_factor = float(star_mass_solar) ** (-8.0 / 3.0)
+    period_factor = (periods[0] / RESONANCE_PERIOD_FIDUCIAL_DAYS) ** (-13.0 / 9.0)
+    if mass_inner_earth is not None and mass_outer_earth is not None:
+        beta = (float(mass_outer_earth) / float(mass_inner_earth)) * (
+            periods[1] / periods[0]
+        ) ** (2.0 / 3.0)
+    else:
+        beta = RESONANCE_EQUAL_MASS_BETA_FIDUCIAL
+    beta_factor = (2.0 * beta + 2.0 * beta**2) ** (1.0 / 3.0)
+    return float(
+        RESONANCE_REPULSION_WIDTH_BASE
+        * q_factor
+        * k2_factor
+        * age_factor
+        * mass_factor
+        * radius_factor
+        * star_mass_factor
+        * period_factor
+        * beta_factor
+    )
+
+
+def _record_resonance_repulsion_width(
+    known_period_days: float,
+    candidate_period_days: float,
+    source: Mapping[str, Any],
+    contract: Mapping[str, Any],
+) -> float:
+    """Resonant-repulsion width scaled by the record's own reported parameters.
+
+    A snapshot carries at most one planet's mass, radius, and stellar mass.
+    The envelope is therefore scaled with the record's parameters whatever its
+    role in the pair (adjacent-planet masses enter the width only as
+    ``m^(1/3)``); when the optional columns are absent the published fiducial
+    factors of :func:`lithwick_wu_repulsion_width_fractional` apply.
+    """
+    mass_jup = _field(source, str(contract["mass_jup"])) if contract.get("mass_jup") else None
+    radius_jup = _field(source, str(contract["radius_jup"])) if contract.get("radius_jup") else None
+    star_mass = _field(source, str(contract["star_mass_solar"])) if contract.get("star_mass_solar") else None
+    mass_earth = mass_jup * float((M_jup / M_earth).value) if mass_jup is not None and mass_jup > 0.0 else None
+    radius_earth = radius_jup * float((R_jup / R_earth).value) if radius_jup is not None and radius_jup > 0.0 else None
+    return lithwick_wu_repulsion_width_fractional(
+        period_inner_days=min(float(known_period_days), float(candidate_period_days)),
+        period_outer_days=max(float(known_period_days), float(candidate_period_days)),
+        mass_inner_earth=mass_earth,
+        radius_inner_earth=radius_earth,
+        star_mass_solar=star_mass,
+        mass_outer_earth=None,
+    )
+
 # Every automatic source must state its field names, duration unit, and whether
 # the retained epoch is safe to compare with a candidate BJD_TDB ephemeris.
 # No conversion is inferred from a generic "BJD" label.
@@ -74,6 +179,9 @@ _PROVIDER_FIELD_CONTRACTS = {
         "name": ("pl_name", "pl_letter"),
         "epoch_time_scale": "PER_RECORD_DECLARED_TIME_SCALE",
         "duration_unit": "hours",
+        "mass_jup": "pl_bmassj",
+        "radius_jup": "pl_radj",
+        "star_mass_solar": "st_mass",
     },
     TOI_PROVIDER: {
         "period": "pl_orbper",
@@ -302,7 +410,7 @@ def _candidate_ephemeris(
     epoch = _finite(ephemeris.get("epoch_btjd"))
     duration_days = _finite(ephemeris.get("duration_days"))
     if (
-        not is_complete_candidate_ephemeris(ephemeris)
+        not is_complete_candidate_ephemeris(ephemeris, require_depth=False)
         or period is None
         or period <= 0
         or epoch is None
@@ -542,6 +650,10 @@ def _compare_record(
     period_harmonic_match = (
         period_difference_days <= period_tolerance if period_tolerance is not None else None
     )
+    resonance_width = _record_resonance_repulsion_width(period, candidate_period, source, contract)
+    period_near_resonance = bool(
+        harmonic != 1.0 and period_difference <= resonance_width
+    )
     epoch_btjd = epoch_bjd - 2457000.0 if epoch_bjd is not None else None
     epoch_tolerance = max(candidate_duration, duration_hours or 0.0) * EPOCH_TOLERANCE_DURATION_MULTIPLIER / 24.0
     # For non-unity harmonic ratios the epoch folding must happen on the
@@ -595,6 +707,8 @@ def _compare_record(
         "period_tolerance_days": period_tolerance,
         "period_tolerance_status": "available" if period_tolerance is not None else "unavailable",
         "period_harmonic_match": period_harmonic_match,
+        "period_near_resonance": period_near_resonance,
+        "resonance_width_fractional": resonance_width,
         "epoch_phase_delta_days": epoch_delta,
         "epoch_tolerance_days": epoch_tolerance if epoch_bjd is not None else None,
         "epoch_match": epoch_match,
@@ -603,6 +717,7 @@ def _compare_record(
         "duration_compatible": duration_compatible,
         "review_required": bool(
             period_harmonic_match is None
+            or period_near_resonance
             or (
                 period_harmonic_match is True
                 and (epoch_match is True or epoch_match is None or harmonic_parity_ambiguous)
@@ -684,7 +799,8 @@ def match_known_signal_ephemerides(
         "comparisons": comparisons,
         "limitations": (
             "This compares fresh retained NASA Exoplanet Archive pscomppars rows, TOI rows with period/duration-only epoch handling, and fresh candidate-recorded BJD_TDB evidence with raw-artifact hashes. "
-            "No match does not establish novelty; automatic eclipsing-binary, variable-star, ExoFOP, and literature ephemeris retrievals remain unavailable."
+            "No match does not establish novelty; automatic eclipsing-binary, variable-star, ExoFOP, and literature ephemeris retrievals remain unavailable. "
+            "Resonance proximity uses the resonant-repulsion width of Lithwick & Wu (2012, ApJ, 756, L11, Eq. 12) scaled by each record's reported mass, radius, and stellar mass when present, with the paper's fiducial factors otherwise."
         ),
     }
     output.write_text(json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")

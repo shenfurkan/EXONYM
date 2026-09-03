@@ -1,15 +1,20 @@
 """Unit coverage for the optional JAX/NumPyro transit-fit dispatcher."""
 
+import math
+
 import numpy as np
 import pytest
 from pathlib import Path
 
+from exonym.constants import SECONDS_PER_DAY
 from exonym.transit_fit import (
     GPU_NUTS_SAMPLES,
     GPU_NUTS_TARGET_ACCEPT_PROB,
     GPU_NUTS_WARMUP,
     _GpuBackendUnavailable,
     _load_emcee_checkpoint,
+    _initial_fit_parameters,
+    _posterior_summaries,
     _shutdown_worker_pool,
     _summarize_accelerated_samples,
     _validate_accelerated_transit_fit_data,
@@ -19,8 +24,9 @@ from exonym.transit_fit import (
 )
 
 
-def _fit_inputs():
-    time_days = np.linspace(-0.12, 0.12, 24)
+def _fit_inputs(time_days=None):
+    if time_days is None:
+        time_days = np.linspace(-0.12, 0.12, 24)
     return {
         "time_days": time_days,
         "flux": np.ones_like(time_days),
@@ -254,3 +260,43 @@ def test_normalized_output_has_every_required_posterior_summary():
     assert result["t0"]["median"] == pytest.approx(inputs["t0_days"])
     assert result["u1"]["median"] == pytest.approx(0.46)
     assert result["u2"]["median"] == pytest.approx(0.19)
+
+
+def test_accelerated_fit_derives_exposure_from_observed_timestamps(monkeypatch):
+    time_days = np.arange(20, dtype=float) / 24.0
+    captured = {}
+
+    def fake_cpu(data, **_kwargs):
+        captured["exposure_seconds"] = data.exposure_seconds
+        return {"backend": "emcee-cpu"}
+
+    monkeypatch.setattr("exonym.transit_fit._fit_emcee_cpu", fake_cpu)
+
+    result = fit_transit_light_curve(**_fit_inputs(time_days), device="cpu")
+
+    assert result == {"backend": "emcee-cpu"}
+    assert captured["exposure_seconds"] == pytest.approx(
+        float(np.median(np.diff(time_days))) * SECONDS_PER_DAY
+    )
+
+
+def test_accelerated_fit_rejects_light_curve_without_measurable_cadence():
+    time_days = np.zeros(20, dtype=float)
+
+    with pytest.raises(ValueError, match="Cadence cannot be determined"):
+        fit_transit_light_curve(**_fit_inputs(time_days), device="cpu")
+
+
+def test_posterior_depth_evaluation_requires_observational_exposure_time():
+    chain = np.tile(_initial_fit_parameters(1200.0, 1.0, 1e-4, eccentric=False), (4, 1))
+
+    with pytest.raises(ValueError, match="Observational exposure time is required"):
+        _posterior_summaries(chain, {"period_days": 3.0}, eccentric=False)
+
+
+def test_bayes_factor_retains_native_overflow_information():
+    from exonym.transit_fit import compute_bayesian_model_comparison
+
+    comparison = compute_bayesian_model_comparison(0.0, 0.0, 1000.0, 0.0)
+
+    assert math.isinf(comparison["bayes_factor"])

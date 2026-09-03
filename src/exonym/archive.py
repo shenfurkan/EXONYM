@@ -20,6 +20,7 @@ Scientific boundary:
 from __future__ import annotations
 
 import json
+import logging
 import math
 import time
 import urllib.parse
@@ -41,6 +42,14 @@ DEFAULT_HTTP_MAX_RETRIES = 2
 # a negative crowding assessment for the photometric aperture.
 DEFAULT_ARCHIVE_SEARCH_RADIUS_ARCSEC = 60.0
 MINIMUM_CROWDING_SEARCH_RADIUS_ARCSEC = 21.0
+# Exact Pogson magnitude-error propagation factor:
+#     sigma_m = |dm/dF| * sigma_F,   m = -2.5 * log10(F) + ZP
+#   => sigma_m = (2.5 / ln 10) * (sigma_F / F)
+# (Evans et al. 2018, A&A, 616, A4, doi:10.1051/0004-6361/201832756, flux-error
+# propagation of Gaia photometry).  Tier 3 analytic identity: the factor is
+# evaluated from math constants only; truncated decimals such as 1.086 or
+# 1.0857 are prohibited (AGENTS.md Rule 13).
+POGSON_MAGNITUDE_FACTOR = 2.5 / math.log(10.0)
 
 
 def _utc_timestamp() -> str:
@@ -66,7 +75,11 @@ class ArchivalVettingService:
     """
 
     ESA_GAIA_TAP_URL = "https://gea.esac.esa.int/tap-server/tap/sync"
+    AIP_GAIA_TAP_URL = "https://gaia.aip.de/tap/sync"
     MIRROR_GAIA_TAP_URL = "https://gaia.gec.asiaa.sinica.edu.tw/tap-server/tap/sync"
+    ESA_GAIA_TABLE = "gaiadr3.gaia_source_lite"
+    MIRROR_GAIA_TABLE = "gaiadr3.gaia_source"
+    VIZIER_GAIA_CATALOG = "I/355/gaiadr3"
     TARGET_PRESENCE_ARCSEC = 2.0
     EXOFOP_TARGET_EPOCH_JYEAR = 2000.0
     MAX_JSON_RESPONSE_BYTES = 16 * 1024 * 1024
@@ -227,13 +240,25 @@ class ArchivalVettingService:
         return None
 
     def _gaia_sources_tap(
-        self, ra: float, dec: float, radius_arcsec: float, base_url: str
+        self,
+        ra: float,
+        dec: float,
+        radius_arcsec: float,
+        base_url: str,
+        table_name: str,
     ) -> List[Dict[str, Any]]:
-        """Cone search via a TAP sync endpoint returning JSON row data."""
+        """Cone search via a TAP sync endpoint returning JSON row data.
+
+        The selected columns end with the Gaia mean-flux and flux-error
+        columns so magnitude uncertainties propagate with the exact Pogson
+        factor.  Legacy rows without those columns still parse; their
+        magnitude errors remain unmeasured (``None``) instead of fabricated.
+        """
         tap_query = (
             f"SELECT source_id, ra, dec, phot_g_mean_mag, phot_bp_mean_mag, phot_rp_mean_mag, ruwe, pmra, pmdec, ref_epoch, "
-            f"DISTANCE(POINT('ICRS', ra, dec), POINT('ICRS', {ra}, {dec}))*3600.0 AS sep_arcsec "
-            f"FROM gaiadr3.gaia_source "
+            f"DISTANCE(POINT('ICRS', ra, dec), POINT('ICRS', {ra}, {dec}))*3600.0 AS sep_arcsec, "
+            f"phot_g_mean_flux, phot_g_mean_flux_error, phot_bp_mean_flux, phot_bp_mean_flux_error, phot_rp_mean_flux, phot_rp_mean_flux_error "
+            f"FROM {table_name} "
             f"WHERE 1=CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', {ra}, {dec}, {radius_arcsec/3600.0})) "
             f"ORDER BY sep_arcsec ASC"
         )
@@ -272,6 +297,18 @@ class ArchivalVettingService:
                 pmra_val = None
             if sep_val is None or sep_val < 0.0:
                 continue
+            if len(row) >= 17:
+                g_flux = _finite_float(row[11])
+                g_flux_err = _finite_float(row[12])
+                bp_flux = _finite_float(row[13])
+                bp_flux_err = _finite_float(row[14])
+                rp_flux = _finite_float(row[15])
+                rp_flux_err = _finite_float(row[16])
+            else:
+                g_flux = g_flux_err = None
+                bp_flux = bp_flux_err = None
+                rp_flux = rp_flux_err = None
+
             sources.append(
                 {
                     "source_id": sid,
@@ -280,8 +317,14 @@ class ArchivalVettingService:
                     "separation_arcsec": round(sep_val, 4),
                     "ruwe": round(ruwe_val, 4) if ruwe_val is not None else None,
                     "phot_g_mean_mag": round(gmag, 4) if gmag is not None else None,
+                    "phot_g_mean_mag_error": self._pogson_magnitude_error(g_flux, g_flux_err),
+
                     "phot_bp_mean_mag": round(bp_mag, 4) if bp_mag is not None else None,
+                    "phot_bp_mean_mag_error": self._pogson_magnitude_error(bp_flux, bp_flux_err),
+
                     "phot_rp_mean_mag": round(rp_mag, 4) if rp_mag is not None else None,
+                    "phot_rp_mean_mag_error": self._pogson_magnitude_error(rp_flux, rp_flux_err),
+
                     "pmra_mas_per_year": round(pmra_val, 6)
                     if pmra_val is not None
                     else None,
@@ -296,6 +339,25 @@ class ArchivalVettingService:
         sources.sort(key=lambda item: item["separation_arcsec"])
         return sources
 
+    @staticmethod
+    def _pogson_magnitude_error(flux: Any, flux_error: Any) -> Optional[float]:
+        """Return ``sigma_m = POGSON_MAGNITUDE_FACTOR * sigma_F / F`` when valid.
+
+        The mean flux and its error must both be finite and strictly positive;
+        any other input yields ``None`` so an unmeasured magnitude error is
+        never substituted with a fabricated value.
+        """
+        flux_value = _finite_float(flux)
+        error_value = _finite_float(flux_error)
+        if (
+            flux_value is None
+            or error_value is None
+            or flux_value <= 0.0
+            or error_value <= 0.0
+        ):
+            return None
+        return POGSON_MAGNITUDE_FACTOR * (error_value / flux_value)
+
     def _gaia_sources_vizier(
         self, ra: float, dec: float, radius_arcsec: float
     ) -> List[Dict[str, Any]]:
@@ -307,7 +369,7 @@ class ArchivalVettingService:
         vizier = Vizier(row_limit=-1, timeout=self.timeout)
         coordinate = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs")
         result = vizier.query_region(
-            coordinate, radius=radius_arcsec * u.arcsec, catalog="I/355/gaiadr3"
+            coordinate, radius=radius_arcsec * u.arcsec, catalog=self.VIZIER_GAIA_CATALOG
         )
         if not result or len(result) == 0:
             return []
@@ -371,6 +433,13 @@ class ArchivalVettingService:
                     continue
                 if reference_epoch is not None:
                     break
+            flux_values: Dict[str, Optional[float]] = {}
+            for column in ("FG", "e_FG", "FBP", "e_FBP", "FRP", "e_FRP"):
+                try:
+                    flux_values[column] = _finite_float(row[column])
+                except KeyError:
+                    flux_values[column] = None
+
             sources.append(
                 {
                     "source_id": str(row["Source"]) if "Source" in row.colnames else "unknown",
@@ -379,8 +448,14 @@ class ArchivalVettingService:
                     "separation_arcsec": round(sep_arcsec, 4),
                     "ruwe": round(ruwe_val, 4) if ruwe_val is not None else None,
                     "phot_g_mean_mag": round(g_mag, 4) if g_mag is not None else None,
+                    "phot_g_mean_mag_error": self._pogson_magnitude_error(flux_values["FG"], flux_values["e_FG"]),
+
                     "phot_bp_mean_mag": round(bp_mag, 4) if bp_mag is not None else None,
+                    "phot_bp_mean_mag_error": self._pogson_magnitude_error(flux_values["FBP"], flux_values["e_FBP"]),
+
                     "phot_rp_mean_mag": round(rp_mag, 4) if rp_mag is not None else None,
+                    "phot_rp_mean_mag_error": self._pogson_magnitude_error(flux_values["FRP"], flux_values["e_FRP"]),
+
                     "pmra_mas_per_year": round(pmra_val, 6)
                     if pmra_val is not None
                     else None,
@@ -400,7 +475,9 @@ class ArchivalVettingService:
     ) -> Dict[str, Any]:
         """Cone search Gaia DR3 for celestial sources around target coordinates.
 
-        Queries bounded backends in order (ESA TAP sync, VizieR, mirror) and
+        Queries bounded backends in order (ESA TAP sync gaia_source_lite, CDS
+        VizieR I/355/gaiadr3, AIP Leibniz TAP gaia_source, ASIAA mirror) with
+        8-second timeouts and
         adopts the first result validated by a source inside
         ``TARGET_PRESENCE_ARCSEC`` of the target. For high-proper-motion
         targets, a Gaia source may instead be propagated from its catalog
@@ -444,7 +521,7 @@ class ArchivalVettingService:
             (
                 "esa-tap",
                 lambda: self._gaia_sources_tap(
-                    ra_value, dec_value, radius_value, self.ESA_GAIA_TAP_URL
+                    ra_value, dec_value, radius_value, self.ESA_GAIA_TAP_URL, self.ESA_GAIA_TABLE
                 ),
             ),
             (
@@ -452,9 +529,17 @@ class ArchivalVettingService:
                 lambda: self._gaia_sources_vizier(ra_value, dec_value, radius_value),
             ),
             (
+                "gaia-aip",
+                lambda: self._gaia_sources_tap(
+                    ra_value, dec_value, radius_value, self.AIP_GAIA_TAP_URL, self.MIRROR_GAIA_TABLE
+                ),
+            ),
+            (
+
+
                 "gaia-mirror",
                 lambda: self._gaia_sources_tap(
-                    ra_value, dec_value, radius_value, self.MIRROR_GAIA_TAP_URL
+                    ra_value, dec_value, radius_value, self.MIRROR_GAIA_TAP_URL, self.MIRROR_GAIA_TABLE
                 ),
             ),
         )
@@ -464,6 +549,10 @@ class ArchivalVettingService:
             try:
                 sources = fetch()
             except Exception as exc:
+                logging.warning(
+                    "gaia backend %s failed: %s: %s",
+                    backend_name, type(exc).__name__, exc,
+                )
                 results["query_errors"].append(
                     "{0}: {1}".format(backend_name, type(exc).__name__)
                 )

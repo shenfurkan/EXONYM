@@ -20,6 +20,8 @@ import numpy as np
 from astropy.constants import c, h, k_B
 from scipy.interpolate import InterpolatedUnivariateSpline
 
+from .constants import GRAVITATIONAL_CONSTANT_CGS, SECONDS_PER_DAY
+
 
 # TESS's published pivot wavelength is used for the Planck surface-brightness
 # ratio; common prefactors cancel when comparing two stellar photospheres.
@@ -225,8 +227,8 @@ def semi_major_axis_cgs(period_days: float, M_total_g: Any) -> Any:
 
     a^3 = G * M_total * P^2 / (4 * pi^2)
     """
-    P_s = period_days * 86_400.0
-    val = (6.67430e-8 * np.asarray(M_total_g, dtype=float) * P_s ** 2 / (4.0 * math.pi ** 2)) ** (1.0 / 3.0)
+    P_s = period_days * SECONDS_PER_DAY
+    val = (GRAVITATIONAL_CONSTANT_CGS * np.asarray(M_total_g, dtype=float) * P_s ** 2 / (4.0 * math.pi ** 2)) ** (1.0 / 3.0)
     if isinstance(M_total_g, (np.ndarray, list)):
         return val
     return float(val)

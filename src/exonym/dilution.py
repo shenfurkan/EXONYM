@@ -33,6 +33,9 @@ from .workspace import CandidateWorkspace
 
 QUALITY_HARD_MASK = 24319        # TESS quality bitmask rejecting severe cadences
 APERTURE_HALF_SIZES = (1, 2, 3)  # Half-widths for 3x3, 5x5, and 7x7 pixel bounding boxes
+# ASTROPHYSICAL_HEURISTIC: Maximum fractional transit depth variation across apertures
+# (30%) before flagging potential contamination/blending from an off-target source (Perryman §4.3).
+APERTURE_VARIATION_STABILITY_THRESHOLD = 0.3
 
 
 def _box_apertures(
@@ -88,8 +91,8 @@ def aperture_depth_ppm(
     except ValueError:
         return None
     return {
-        "depth_ppm": round(depth_ppm, 2),
-        "uncertainty_ppm": round(uncertainty_ppm, 2),
+        "depth_ppm": float(depth_ppm),
+        "uncertainty_ppm": float(uncertainty_ppm),
         "n_in_transit": int(n_in),
         "n_out_transit": int(n_out),
     }
@@ -226,12 +229,12 @@ def gaia_contamination_factor(
     available = not omitted
     return {
         "availability": "available" if available else "unavailable",
-        "contamination_factor": round(total_ratio, 6) if available else None,
+        "contamination_factor": float(total_ratio) if available else None,
         "n_neighbors_included": int(included),
         "n_neighbors_omitted": len(omitted),
         "omitted_neighbors": omitted,
         "search_radius_arcsec": float(search_radius_arcsec),
-        "contamination_ratio": round(total_ratio, 6) if available else None,
+        "contamination_ratio": float(total_ratio) if available else None,
         "n_neighbors_in_aperture": int(included),
         "target_g_mag": valid_target_g_mag,
     }
@@ -377,18 +380,18 @@ def run_dilution_sensitivity(workspace: CandidateWorkspace) -> Path:
         "aperture_summary_ppm": {
             name: {
                 "n_sectors": len(values),
-                "median_depth_ppm": round(float(np.median(values)), 2),
-                "min_depth_ppm": round(float(np.min(values)), 2),
-                "max_depth_ppm": round(float(np.max(values)), 2),
+                "median_depth_ppm": float(np.median(values)),
+                "min_depth_ppm": float(np.min(values)),
+                "max_depth_ppm": float(np.max(values)),
             }
             for name, values in per_aperture_summary.items()
         },
         "depth_stability": {
-            "median_depth_ppm": round(median_depth, 2),
-            "max_variation_relative_to_median": round(stability, 4),
+            "median_depth_ppm": float(median_depth),
+            "max_variation_relative_to_median": float(stability),
             "interpretation": (
                 "stable"
-                if stability < 0.3
+                if stability < APERTURE_VARIATION_STABILITY_THRESHOLD
                 else "aperture-sensitive"
             ),
         },
