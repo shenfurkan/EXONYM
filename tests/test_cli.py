@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import shutil
 from types import SimpleNamespace
 
@@ -25,52 +26,8 @@ def _repo(tmp_path):
     (tmp_path / "templates/protocols").mkdir(parents=True, exist_ok=True)
     (tmp_path / "templates/tracking").mkdir(parents=True, exist_ok=True)
     (tmp_path / "schemas").mkdir(parents=True, exist_ok=True)
-    for name in (
-        "candidate.schema.json",
-        "provenance.schema.json",
-        "claim.schema.json",
-        "novelty-audit.schema.json",
-        "survey.schema.json",
-        "survey-target.schema.json",
-        "survey-robustness.schema.json",
-        "survey-sensitivity.schema.json",
-        "engine-run.schema.json",
-        "analysis-completion.schema.json",
-        "automated-triage.schema.json",
-        "radial-velocity-observations.schema.json",
-        "rv-keplerian-fit.schema.json",
-        "planetsynth-characterization.schema.json",
-        "anomalous-transit-hypothesis.schema.json",
-        "planetsynth-interpretation.schema.json",
-        "pyppluss-hypothesis-test.schema.json",
-        "asymmetric-transit-hypothesis.schema.json",
-        "terminator-asymmetry-test.schema.json",
-        "mist-main-sequence-input.schema.json",
-        "sed-fit-results.schema.json",
-        "ttv-analysis.schema.json",
-         "statistical-vetting-evidence.schema.json",
-         "decisive-rejection.schema.json",
-         "classification-review.schema.json",
-         "triceratops-vetting-decision.schema.json",
-        "catalog-query-manifest.schema.json",
-        "catalog-raw-response-metadata.schema.json",
-        "catalog-snapshot.schema.json",
-        "catalog-stellar-parameters.schema.json",
-        "catalog-stellar-photometry.schema.json",
-        "catalog-archive-discovery.schema.json",
-        "catalog-contrast-curves.schema.json",
-        "catalog-context.schema.json",
-        "catalog-cross-match.schema.json",
-        "known-signal-ephemeris-match.schema.json",
-        "known-signal-ephemeris-evidence.schema.json",
-        "stellar-activity.schema.json",
-        "phase-curve.schema.json",
-        "detrending-manifest.schema.json",
-        "ldtk-quadratic-limb-darkening-prior.schema.json",
-        "exofop-prior-retrieval.schema.json",
-        "checkpoint-manifest.schema.json",
-    ):
-        shutil.copy2("schemas/{0}".format(name), tmp_path / "schemas" / name)
+    for schema_file in Path("schemas").glob("*.schema.json"):
+        shutil.copy2(schema_file, tmp_path / "schemas" / schema_file.name)
     (tmp_path / "requirements-lock.txt").write_text(
         "numpy==1.26.4\nscipy==1.13.1\n", encoding="utf-8"
     )

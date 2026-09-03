@@ -419,8 +419,15 @@ def _validate_triceratops_scientific_evidence(
                 report.add(report_path, "scientific-observed-photometry-invalid", "TRICERATOPS execution snapshot does not bind every photometry and ephemeris artifact")
         field_sources = provenance.get("ephemeris_field_sources")
         required_fields = ("period_days", "epoch_btjd", "duration_days")
+        allowed_ephemeris_sources = {
+            "candidate-config",
+            "candidate-config-signal",
+            "candidate-data-bls",
+            "bls-search",
+        }
         if not isinstance(field_sources, dict) or any(
-            field_sources.get(field) in (None, "synthetic-demo") for field in required_fields
+            field_sources.get(field) not in allowed_ephemeris_sources
+            for field in required_fields
         ):
             report.add(report_path, "scientific-ephemeris-provenance-invalid", "TRICERATOPS requires candidate-derived period, epoch, and duration provenance")
         if not isinstance(instance.get("random_seed"), int) or isinstance(instance.get("random_seed"), bool):

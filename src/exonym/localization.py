@@ -38,7 +38,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .archive import load_validated_archival_gaia_sources
-from .inputs import load_tpf_cubes, load_transit_ephemeris
+from .inputs import is_complete_candidate_ephemeris, load_tpf_cubes, load_transit_ephemeris
 from .lightcurve import phase_hours
 from .resources import read_schema_text
 from .workspace import CandidateWorkspace
@@ -1436,14 +1436,7 @@ def run_prf_localization(
         return output_path
 
     ephemeris = load_transit_ephemeris(workspace)
-    required_ephemeris_fields = ("period_days", "epoch_btjd", "duration_days")
-    field_sources = ephemeris.get("field_sources", {})
-    # Candidate data gate: all three ephemeris fields must come from
-    # non-synthetic sources (i.e. real search/fit outputs).
-    candidate_ephemeris = all(
-        field_sources.get(field) not in (None, "synthetic-demo")
-        for field in required_ephemeris_fields
-    )
+    candidate_ephemeris = is_complete_candidate_ephemeris(ephemeris)
     neighbors, source_catalog = _load_archival_gaia_neighbors(workspace)
 
     skipped_tpf_products: List[Dict[str, str]] = []

@@ -1047,7 +1047,10 @@ def format_report(report: IsolationReport) -> str:
     errors = [v for v in report.violations if v.severity == "error"]
     warnings = report.warnings
     if not errors:
-        lines = ["ISOLATION: PASS (no error violations)"]
+        lines = [
+            "LINT-PATHS (ISOLATION: PASS): 0 path/schema layout issues",
+            "[NOTE: Purely an administrative filesystem layout check. Does not validate scientific models, transit depths, or data correctness.]",
+        ]
         if warnings:
             lines.append("WARNINGS: {0} warning(s) found (non-fatal)".format(len(warnings)))
             by_rule: Dict[str, List[Violation]] = {}
@@ -1067,7 +1070,7 @@ def format_report(report: IsolationReport) -> str:
                 )
             )
         return "\n".join(lines)
-    lines = [f"ISOLATION: FAIL ({len(errors)} error violation(s))"]
+    lines = [f"LINT-PATHS (ISOLATION: FAIL): ({len(errors)} error violation(s))"]
     by_rule: Dict[str, List[Violation]] = {}
     for violation in errors:
         by_rule.setdefault(violation.rule, []).append(violation)

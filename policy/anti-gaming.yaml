@@ -1,0 +1,39 @@
+rules:
+  - id: ban-np-clip-in-production
+    languages: [python]
+    paths:
+      include:
+        - "src/exonym/"
+    message: >-
+      AGENTS.md Rule 2 & 7 violation: Artificial uncertainty clipping or posterior clamping
+      with np.clip is prohibited in production modules. Handle physical boundaries via
+      proper prior transforms, not parameter truncation.
+    severity: ERROR
+    pattern-either:
+      - pattern: np.clip(...)
+      - pattern: numpy.clip(...)
+
+  - id: ban-synthetic-generators-in-src
+    languages: [python]
+    paths:
+      include:
+        - "src/exonym/"
+    message: >-
+      AGENTS.md Rule 9 violation: In-tree synthetic observation generators belong strictly
+      in tests/fixtures/ and must never reside inside src/exonym/.
+    severity: ERROR
+    pattern: |
+      def _synthetic_$FUNC(...):
+        ...
+
+  - id: ban-static-exptime-seconds
+    languages: [python]
+    paths:
+      include:
+        - "src/exonym/"
+    message: >-
+      AGENTS.md Rule 4 violation: Hardcoding static exposure times (EXPTIME_SECONDS) is
+      strictly prohibited. Cadence and exposure duration must be dynamically derived
+      from actual FITS headers.
+    severity: ERROR
+    pattern: EXPTIME_SECONDS = $VAL

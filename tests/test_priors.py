@@ -57,20 +57,17 @@ def test_fetch_exofop_priors_filters_tic_and_writes_signal_configs(tmp_path, mon
 
     first = json.loads(written[0].read_text(encoding="utf-8"))
     second = json.loads(written[1].read_text(encoding="utf-8"))
-    assert first["transit"] == {
-        "period_days": 4.123457,
-        "epoch_btjd": 1123.45678,
-        "depth_ppm": 321.99,
-        "duration_hours": 2.35,
-        "source": "nasa-exofop",
-    }
-    assert second["transit"] == {
-        "period_days": 8.765432,
-        "epoch_btjd": 1130.12567,
-        "depth_ppm": 654.32,
-        "duration_hours": 4.57,
-        "source": "nasa-exofop",
-    }
+    assert first["transit"]["period_days"] == 4.12345678
+    assert first["transit"]["epoch_btjd"] == pytest.approx(1123.45678)
+    assert first["transit"]["depth_ppm"] == 321.987
+    assert first["transit"]["duration_hours"] == 2.345
+    assert first["transit"]["source"] == "nasa-exofop"
+
+    assert second["transit"]["period_days"] == 8.76543219
+    assert second["transit"]["epoch_btjd"] == pytest.approx(1130.12567)
+    assert second["transit"]["depth_ppm"] == 654.321
+    assert second["transit"]["duration_hours"] == 4.567
+    assert second["transit"]["source"] == "nasa-exofop"
     first_provenance = first["provenance"]
     second_provenance = second["provenance"]
     assert first_provenance["retrieval_id"] == second_provenance["retrieval_id"]

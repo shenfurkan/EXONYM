@@ -42,7 +42,10 @@ def _make_repo(tmp_path, with_templates=True):
         "asymmetric-transit-hypothesis.schema.json",
         "terminator-asymmetry-test.schema.json",
         "mist-main-sequence-input.schema.json",
+        "sed-input-manifest.schema.json",
         "sed-fit-results.schema.json",
+        "tess-prf-manifest.schema.json",
+        "tess-prf-recovery-calibration.schema.json",
         "ttv-analysis.schema.json",
          "statistical-vetting-evidence.schema.json",
          "decisive-rejection.schema.json",
@@ -1462,6 +1465,7 @@ def test_generated_stellar_activity_artifact_is_schema_valid(tmp_path, monkeypat
 
 def test_generated_phase_curve_artifact_is_schema_valid(tmp_path, monkeypatch):
     from exonym import phasecurve
+    from tests.fixtures.synthetic_observations import _synthetic_phase_curve_table
 
     repo = _make_repo(tmp_path)
     candidate = load_candidate(repo, "candidate-alpha")
@@ -1470,8 +1474,12 @@ def test_generated_phase_curve_artifact_is_schema_valid(tmp_path, monkeypatch):
         "period_days": 3.0,
         "epoch_btjd": 100.0,
         "duration_days": 0.1,
-        "source": "candidate-data",
-        "field_sources": {},
+        "source": "candidate-config",
+        "field_sources": {
+            "period_days": "candidate-config",
+            "epoch_btjd": "candidate-config",
+            "duration_days": "candidate-config",
+        },
     }
     (outputs / "mcmc_transit_fit.json").write_text(
         json.dumps(
@@ -1488,7 +1496,7 @@ def test_generated_phase_curve_artifact_is_schema_valid(tmp_path, monkeypatch):
         (32, 1),
     )
     np.save(str(outputs / "mcmc_transit_fit_chain.npy"), chain)
-    table = phasecurve._synthetic_phase_curve_table()
+    table = _synthetic_phase_curve_table()
     table.pop("_duration_days")
     table.pop("_epoch_btjd")
     table.pop("_period_days")
@@ -1498,7 +1506,7 @@ def test_generated_phase_curve_artifact_is_schema_valid(tmp_path, monkeypatch):
     output = phasecurve.run_phase_curve_search(candidate)
 
     payload = json.loads(output.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "1.1"
+    assert payload["schema_version"] == "1.2"
     assert payload["secondary_eclipse_control"]["mode"] == "eccentric-posterior-marginalized-box-control"
     assert _audit(repo).ok
 

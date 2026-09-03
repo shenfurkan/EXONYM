@@ -107,6 +107,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from .constants import HOURS_PER_DAY, PARTS_PER_MILLION
 from .inputs import (
     MINIMUM_BLS_CANDIDATE_SNR,
     PIPELINE_NORMALIZATION,
@@ -121,6 +122,29 @@ from .workspace import CandidateWorkspace, validate_signal_suffix
 # baseline-duration grid computationally unbounded. The explicit fallback in
 # ``find_transits`` keeps the scan deterministic and candidate-local.
 MAX_BLS_PERIOD_TRIALS = 20000
+
+# ASTROPHYSICAL_PROVENANCE:
+# 1. Minimum transit events required to rule out single-event instrumental false alarms (Kovacs et al. 2002; Jenkins et al. 2016).
+MINIMUM_OBSERVED_TRANSIT_EVENTS = 2
+
+# 2. Minimum period search boundary: Ultra-short-period (USP) tidal Roche limit for main-sequence hosts (~12 h; Winn et al. 2018).
+DEFAULT_MINIMUM_SEARCH_PERIOD_DAYS = 0.5
+
+# 3. Maximum single-sector period search boundary: Maximum orbital period permitting >= 2 transits in a single TESS sector (~27.4 d / 2; Ricker et al. 2015).
+DEFAULT_MAXIMUM_SEARCH_PERIOD_DAYS = 15.0
+
+# 4. Default trial density for uniform Fourier frequency grids (Kovacs et al. 2002).
+DEFAULT_BLS_FREQUENCY_TRIALS = 2000
+
+# 5. Statistical degrees-of-freedom floor for periodic least-squares regression.
+MINIMUM_BLS_SEARCH_CADENCES = 50
+
+# 6. Maximum phase-folded visualization bins to preserve rendering performance without aliasing (Ivezić et al. 2019).
+DEFAULT_VISUALIZATION_BINS = 4000
+
+# 7. Default BLS trial durations spanning short M-dwarf transits to typical FGK main-sequence planetary transits (Perryman 2018; Kovacs et al. 2002).
+DEFAULT_BLS_DURATION_HOURS = 3.0
+DEFAULT_BLS_DURATION_GRID_HOURS: Tuple[float, ...] = (1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0)
 
 
 @dataclass
@@ -435,10 +459,10 @@ def _distinct_transit_events(
 def find_transits(
     time_btjd: Sequence[float],
     flux: Sequence[float],
-    period_min: float = 0.5,
-    period_max: float = 15.0,
-    n_periods: int = 2000,
-    duration_hours: float = 3.0,
+    period_min: float = DEFAULT_MINIMUM_SEARCH_PERIOD_DAYS,
+    period_max: float = DEFAULT_MAXIMUM_SEARCH_PERIOD_DAYS,
+    n_periods: int = DEFAULT_BLS_FREQUENCY_TRIALS,
+    duration_hours: Union[float, Sequence[float]] = DEFAULT_BLS_DURATION_HOURS,
     flux_err: Optional[Sequence[float]] = None,
 ) -> BLSSearchResult:
     """Run a target-neutral BLS periodogram search over a light curve.
@@ -530,8 +554,8 @@ def find_transits(
     values = values[finite]
 
     # NUMERICAL_GUARD: Astropy's BLS requires a minimum of 2 transits × a
-    # handful of cadences each; 50 points is a pragmatic floor.
-    if time.size < 50:
+    # handful of cadences each; MINIMUM_BLS_SEARCH_CADENCES points is a statistical floor.
+    if time.size < MINIMUM_BLS_SEARCH_CADENCES:
         raise ValueError("insufficient data points for BLS transit search")
     if period_min <= 0 or period_max <= period_min:
         raise ValueError("invalid period search bounds")
@@ -543,12 +567,25 @@ def find_transits(
     except ImportError as exc:  # pragma: no cover - declared core dependency
         raise RuntimeError("BLS search requires the core astropy dependency") from exc
 
-    duration_days = float(duration_hours) / 24.0
-    if not np.isfinite(duration_days) or duration_days <= 0:
-        raise ValueError("duration_hours must be positive and finite")
+    if isinstance(duration_hours, (int, float)):
+        duration_days = float(duration_hours) / HOURS_PER_DAY
+        durations_param: Any = duration_days
+        min_duration_days = duration_days
+        is_grid = False
+    else:
+        durations_param = np.asarray([float(d) / HOURS_PER_DAY for d in duration_hours], dtype=float)
+        if (
+            durations_param.size == 0
+            or not np.all(np.isfinite(durations_param))
+            or np.any(durations_param <= 0)
+        ):
+            raise ValueError("duration_hours must contain positive and finite values")
+        min_duration_days = float(np.min(durations_param))
+        is_grid = True
+
     errors = _uncertainties_for_bls(values, raw_errors)
     natural_trials = _natural_bls_period_trials(
-        time, period_min, period_max, duration_days
+        time, period_min, period_max, min_duration_days
     )
     bls = BoxLeastSquares(time, values, dy=errors)
     # Build weighted BLS periodogram via Astropy's C-optimised "fast" solver.
@@ -557,10 +594,10 @@ def find_transits(
     # ``minimum_n_transit=2`` guards against single-event false positives.
     if natural_trials <= MAX_BLS_PERIOD_TRIALS:
         frequency_factor = _baseline_aware_frequency_factor(
-            time, period_min, period_max, duration_days, n_periods
+            time, period_min, period_max, min_duration_days, n_periods
         )
         periodogram = bls.autopower(
-            duration_days,
+            durations_param,
             objective="likelihood",
             method="fast",
             minimum_n_transit=2,
@@ -581,7 +618,7 @@ def find_transits(
         )
         periodogram = bls.power(
             1.0 / frequencies,
-            duration_days,
+            durations_param,
             objective="likelihood",
             method="fast",
         )
@@ -604,8 +641,14 @@ def find_transits(
             continue
         period = float(periodogram.period[index])
         epoch = float(periodogram.transit_time[index])
-        n_events = _distinct_transit_events(time, period, epoch, duration_hours)
-        if n_events < 2:
+        if hasattr(periodogram, "duration") and periodogram.duration is not None:
+            trial_duration_hours = float(periodogram.duration[index]) * HOURS_PER_DAY
+        elif is_grid:
+            trial_duration_hours = min_duration_days * HOURS_PER_DAY
+        else:
+            trial_duration_hours = float(duration_hours)
+        n_events = _distinct_transit_events(time, period, epoch, trial_duration_hours)
+        if n_events < MINIMUM_OBSERVED_TRANSIT_EVENTS:
             continue
         depth = float(periodogram.depth[index])
         depth_err = float(periodogram.depth_err[index])
@@ -621,6 +664,7 @@ def find_transits(
             "depth_err": depth_err,
             "snr": snr,
             "n_events": n_events,
+            "duration_hours": trial_duration_hours,
         }
         break
     if best is None:
@@ -646,13 +690,13 @@ def find_transits(
             n_distinct_transit_events=int(best["n_events"]),
             n_period_trials=int(periodogram.period.size),
             detection_status="no-detection",
-            best_depth_uncertainty_ppm=best["depth_err"] * 1e6,
+            best_depth_uncertainty_ppm=best["depth_err"] * PARTS_PER_MILLION,
             best_subthreshold_peak={
                 "period_days": best["period"],
                 "epoch_btjd": best["epoch"],
-                "depth_ppm": best["depth"] * 1e6,
-                "depth_uncertainty_ppm": best["depth_err"] * 1e6,
-                "duration_hours": duration_hours,
+                "depth_ppm": best["depth"] * PARTS_PER_MILLION,
+                "depth_uncertainty_ppm": best["depth_err"] * PARTS_PER_MILLION,
+                "duration_hours": best["duration_hours"],
                 "ranking_snr": best["snr"],
                 "n_distinct_transit_events": int(best["n_events"]),
                 "rejection_reason": "below-minimum-bls-candidate-snr",
@@ -664,12 +708,12 @@ def find_transits(
     return BLSSearchResult(
         best_period=best["period"],
         best_epoch=best["epoch"],
-        best_depth_ppm=best["depth"] * 1e6,
-        best_duration_hours=duration_hours,
+        best_depth_ppm=best["depth"] * PARTS_PER_MILLION,
+        best_duration_hours=best["duration_hours"],
         snr=max(best["snr"], 0.0),
         n_distinct_transit_events=int(best["n_events"]),
         n_period_trials=int(periodogram.period.size),
-        best_depth_uncertainty_ppm=best["depth_err"] * 1e6,
+        best_depth_uncertainty_ppm=best["depth_err"] * PARTS_PER_MILLION,
     )
 
 
@@ -677,9 +721,9 @@ def find_transits_duration_grid(
     time_btjd: Sequence[float],
     flux: Sequence[float],
     duration_grid_hours: Sequence[float],
-    period_min: float = 0.5,
-    period_max: float = 15.0,
-    n_periods: int = 2000,
+    period_min: float = DEFAULT_MINIMUM_SEARCH_PERIOD_DAYS,
+    period_max: float = DEFAULT_MAXIMUM_SEARCH_PERIOD_DAYS,
+    n_periods: int = DEFAULT_BLS_FREQUENCY_TRIALS,
     flux_err: Optional[Sequence[float]] = None,
 ) -> Tuple[BLSSearchResult, List[Dict[str, Any]]]:
     """Run the declared BLS duration grid and retain every trial result.
@@ -820,8 +864,8 @@ def find_transits_tls(
     time = time[finite]
     values = values[finite]
     errors = errors[finite]
-    # NUMERICAL_GUARD: same 50-point floor as BLS.
-    if time.size < 50:
+    # NUMERICAL_GUARD: same statistical cadences floor as BLS.
+    if time.size < MINIMUM_BLS_SEARCH_CADENCES:
         raise ValueError("insufficient data points for TLS transit search")
     if period_min <= 0 or period_max <= period_min:
         raise ValueError("invalid period search bounds")
@@ -891,13 +935,15 @@ def find_transits_tls(
     return {
         "best_period": float(result.period),
         "best_epoch": float(result.T0),
-        "best_depth_ppm": depth_relative * 1e6,
-        "best_duration_hours": float(result.duration) * 24.0,
+        "best_depth_ppm": depth_relative * PARTS_PER_MILLION,
+        "best_duration_hours": float(result.duration) * HOURS_PER_DAY,
         "sde": float(result.SDE),
     }
 
 
-def _median_bin(time: np.ndarray, flux: np.ndarray, n_bins: int = 4000) -> Tuple[np.ndarray, np.ndarray]:
+def _median_bin(
+    time: np.ndarray, flux: np.ndarray, n_bins: int = DEFAULT_VISUALIZATION_BINS
+) -> Tuple[np.ndarray, np.ndarray]:
     """Median-bin a time-sorted light curve down to at most ``n_bins`` samples.
 
     Each bin contains approximately ``N_total / n_bins`` consecutive cadences

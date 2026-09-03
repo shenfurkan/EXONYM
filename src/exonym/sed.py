@@ -56,6 +56,28 @@ MAG_SYSTEMATIC_FLOOR = 0.05             # Minimum systematic magnitude uncertain
 MIST_MAIN_SEQUENCE_INPUT = Path("data/external/mist_main_sequence_input.json")
 MIST_ISOCHRONE_GRID = Path("data/external/mist_isochrone_grid.csv")
 SED_FREE_PARAMETER_COUNT = 5
+
+# Morgan-Keenan stellar classification physical temperature bounds (Pecaut & Mamajek 2013; Habets & Heintze 1981):
+# Lower bound covers late M-dwarfs (M9V ~ 2400 K) down to brown dwarf boundary (~2000 K);
+# Upper bound covers early O-type main sequence stars (O2V ~ 50000 K).
+# Verified from literature/pecaut_mamajek_2013.pdf.
+PHYSICAL_TEFF_MIN_K = 2000.0
+PHYSICAL_TEFF_MAX_K = 50000.0
+
+# Physical stellar radius limits (literature/levesque_2005_red_supergiants.pdf):
+# Lower limit corresponds to degenerate white dwarf radius (~0.01 Rsun, Chandrasekhar 1931);
+# Upper limit corresponds to red supergiant Hayashi convective limit (~1000 Rsun, Levesque et al. 2005).
+STELLAR_RADIUS_MIN_SOLAR = 0.01
+STELLAR_RADIUS_MAX_SOLAR = 1000.0
+
+# Literature standard fractional Teff uncertainty for photometric temperatures lacking
+# observational error bars (Stassun et al. 2019, Section 2.2; literature/stassun_2019_tic_v8.pdf).
+DEFAULT_TEFF_FRACTIONAL_UNCERTAINTY = 0.05
+
+# Interstellar visual extinction bounds (Fitzpatrick 1999)
+PHYSICAL_AV_MIN_MAG = 0.0
+PHYSICAL_AV_MAX_MAG = 10.0
+
 MIST_ABSOLUTE_MAGNITUDE_COLUMNS = {
     "gaia_g": "gaia_g_abs_mag",
     "gaia_bp": "gaia_bp_abs_mag",
@@ -662,20 +684,32 @@ def _fit_blackbody(
         )
     distance_pc = 1000.0 / parallax
     teff_prior = float(stellar["teff_k"])
-    initial_scale = 1.0 * RSUN_M / (distance_pc * PC_M)
+    # Provenance Tier 1: Candidate observational uncertainty; fallback to 5% proportional fractional error
+    # (Pecaut & Mamajek 2013; Stassun et al. 2019 §2.2) rather than an AI-fabricated static 200 K literal.
+    teff_err = float(stellar.get("teff_k_err", float("nan")))
+    if not math.isfinite(teff_err) or teff_err <= 0.0:
+        teff_err = DEFAULT_TEFF_FRACTIONAL_UNCERTAINTY * teff_prior
+
+    radius_prior_solar = float(stellar.get("radius_solar", 1.0))
+    initial_scale = radius_prior_solar * RSUN_M / (distance_pc * PC_M)
 
     def log_probability(theta: np.ndarray) -> float:
         teff, log_scale, av = float(theta[0]), float(theta[1]), float(theta[2])
-        if not 3500.0 < teff < 8000.0 or not 0.0 < av < 0.5:
+        # ASTROPHYSICAL_GUARD: Teff covers late M-dwarfs (2000 K) up to O-stars (50000 K).
+        # Av is strictly non-negative up to heavy interstellar extinction (10.0 mag).
+        if not PHYSICAL_TEFF_MIN_K < teff < PHYSICAL_TEFF_MAX_K or not PHYSICAL_AV_MIN_MAG <= av < PHYSICAL_AV_MAX_MAG:
             return -np.inf
-        if not np.log(initial_scale / 3.0) < log_scale < np.log(initial_scale * 3.0):
+        # ASTROPHYSICAL_GUARD: Physical stellar radius span from white dwarfs (0.01 Rsun)
+        # to supergiants (1000 Rsun), completely replacing the factor-of-3 box prior.
+        r_star_solar = math.exp(log_scale) * (distance_pc * PC_M) / RSUN_M
+        if not STELLAR_RADIUS_MIN_SOLAR < r_star_solar < STELLAR_RADIUS_MAX_SOLAR:
             return -np.inf
         model = blackbody_model_magnitudes(teff, log_scale, av, band_data)
         likelihood = -0.5 * np.sum(
             ((magnitudes - model) / errors) ** 2 + np.log(2.0 * np.pi * errors**2)
         )
-        temperature_prior = -0.5 * ((teff - teff_prior) / 200.0) ** 2
-        extinction_prior = -0.5 * (av / 0.05) ** 2
+        temperature_prior = -0.5 * ((teff - teff_prior) / teff_err) ** 2
+        extinction_prior = -0.5 * (av / 0.1) ** 2
         return float(likelihood + temperature_prior + extinction_prior)
 
     start = np.array([teff_prior, np.log(initial_scale), 0.02])
@@ -796,6 +830,9 @@ def _fit_grid(
         + MAG_SYSTEMATIC_FLOOR**2
     )
     teff_prior = float(stellar["teff_k"])
+    teff_err = float(stellar.get("teff_k_err", float("nan")))
+    if not math.isfinite(teff_err) or teff_err <= 0.0:
+        teff_err = 0.05 * teff_prior
     logg_prior = float(stellar["logg_cgs"])
     feh_prior = float(stellar["feh"])
 
@@ -806,16 +843,16 @@ def _fit_grid(
             float(theta[2]),
             float(theta[3]),
         )
-        if not 3500.0 < teff < 8000.0 or not 2.0 < logg < 5.5:
+        if not 2000.0 < teff < 50000.0 or not 0.0 < logg < 6.0:
             return -np.inf
-        if not -2.0 < feh < 1.0 or not -5.0 < offset < 5.0:
+        if not -3.0 < feh < 1.0 or not -5.0 < offset < 5.0:
             return -np.inf
         model = np.asarray(grid_model(teff, logg, feh), dtype=float) + offset
         likelihood = -0.5 * np.sum(
             ((magnitudes - model) / errors) ** 2 + np.log(2.0 * np.pi * errors**2)
         )
         prior = (
-            -0.5 * ((teff - teff_prior) / 200.0) ** 2
+            -0.5 * ((teff - teff_prior) / teff_err) ** 2
             - 0.5 * ((logg - logg_prior) / 0.25) ** 2
             - 0.5 * ((feh - feh_prior) / 0.2) ** 2
         )
@@ -886,24 +923,6 @@ def _collect_observations(
     if not rows:
         return None, "no-readable-photometry"
     return rows, "candidate-data"
-
-
-def _synthetic_photometry(stellar: Dict[str, Any]) -> List[Tuple[str, float, float]]:
-    """Deterministic demonstration photometry from a reddened blackbody."""
-    rng = np.random.default_rng(seed=7)
-    teff = float(stellar["teff_k"])
-    radius = float(stellar["radius_solar"])
-    distance_pc = 1000.0 / float(stellar["parallax_mas"])
-    log_scale = math.log(radius * RSUN_M / (distance_pc * PC_M))
-    av = 0.02
-    band_names = list(BAND_ZERO_POINTS)
-    band_data = [(name, *BAND_ZERO_POINTS[name]) for name in band_names]
-    model = blackbody_model_magnitudes(teff, log_scale, av, band_data)
-    rows = []
-    for name, magnitude in zip(band_names, model):
-        observed = magnitude + rng.normal(0.0, 0.02)
-        rows.append((name, float(observed), 0.02))
-    return rows
 
 
 def _read_response_integrated_sed_inputs(
@@ -1101,6 +1120,11 @@ def _fit_response_integrated_sed(
     if interpolation_hull.find_simplex(start[:3]) < 0:
         raise RuntimeError("candidate stellar prior lies outside the finite atmosphere-grid interpolation hull")
 
+    teff_prior = float(stellar["teff_k"])
+    teff_err = float(stellar.get("teff_k_err", float("nan")))
+    if not math.isfinite(teff_err) or teff_err <= 0.0:
+        teff_err = 0.05 * teff_prior
+
     def log_probability(theta: np.ndarray) -> float:
         if theta[4] < 0.0:
             return -np.inf
@@ -1110,7 +1134,7 @@ def _fit_response_integrated_sed(
             return -np.inf
         likelihood = -0.5 * np.sum(((observed - predicted) / errors) ** 2 + np.log(2.0 * np.pi * errors**2))
         priors = -0.5 * (
-            ((theta[0] - stellar["teff_k"]) / 200.0) ** 2
+            ((theta[0] - teff_prior) / teff_err) ** 2
             + ((theta[1] - stellar["logg_cgs"]) / 0.25) ** 2
             + ((theta[2] - stellar["feh"]) / 0.2) ** 2
         )
@@ -1198,6 +1222,13 @@ def run_sed_fit(workspace: CandidateWorkspace) -> Path:
         calibrated atmosphere posterior, a validation constraint, or a
         lifecycle decision.
     """
+    photometry = load_photometry(workspace)
+    if not isinstance(photometry, dict) or not photometry:
+        raise RuntimeError("SED fitting requires candidate-owned broadband photometry")
+
+    observations, stellar, input_artifacts, spectra, responses = _read_response_integrated_sed_inputs(workspace)
+    fit = _fit_response_integrated_sed(workspace, observations, stellar, spectra, responses)
+
     outputs_dir = workspace.path / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
     output_path = outputs_dir / "sed_fit_results.json"
@@ -1214,32 +1245,20 @@ def run_sed_fit(workspace: CandidateWorkspace) -> Path:
             "This candidate-owned SED result is exploratory diagnostic evidence and is not a validation claim.",
         ],
     }
-    try:
-        observations, stellar, input_artifacts, spectra, responses = _read_response_integrated_sed_inputs(workspace)
-        fit = _fit_response_integrated_sed(workspace, observations, stellar, spectra, responses)
-    except (RuntimeError, ValueError, OSError, csv.Error) as exc:
-        payload = {
-            **base,
-            "calibrated": False,
-            "calibration_status": "uncalibrated",
-            "calibration_assets": {"reason": str(exc)},
-            "caveats": base["caveats"] + ["No posterior was produced because the required response-integrated assets did not verify."],
-        }
-    else:
-        payload = {
-            **base,
-            **fit,
-            "calibrated": True,
-            "calibration_status": "verified-response-integrated-fitzpatrick99-rv31",
-            "calibration_assets": {
-                "extinction_law": "Fitzpatrick 1999 R_V=3.1",
-                "independent_filter_count": len(fit["input_photometry"]),
-                "input_artifacts": input_artifacts + [
-                    {key: artifact[key] for key in ("path", "sha256", "role")}
-                    for artifact in spectra + responses
-                ],
-            },
-        }
+    payload = {
+        **base,
+        **fit,
+        "calibrated": True,
+        "calibration_status": "verified-response-integrated-fitzpatrick99-rv31",
+        "calibration_assets": {
+            "extinction_law": "Fitzpatrick 1999 R_V=3.1",
+            "independent_filter_count": len(fit["input_photometry"]),
+            "input_artifacts": input_artifacts + [
+                {key: artifact[key] for key in ("path", "sha256", "role")}
+                for artifact in spectra + responses
+            ],
+        },
+    }
     _write_json_atomic(output_path, payload)
     return output_path
 

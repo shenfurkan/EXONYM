@@ -8,12 +8,12 @@ import pytest
 
 from exonym.transit_fit import stellar_density_a_rs
 from exonym.ttv import (
-    _synthetic_timing_table,
     _template_flux,
     fit_transit_epoch,
     transit_template_parameters,
     transit_timing_analysis,
 )
+from tests.fixtures.synthetic_observations import _synthetic_timing_table
 
 
 def test_fit_transit_epoch_preserves_high_precision_unclipped_sigma():

@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .archive import load_validated_archival_gaia_sources
-from .inputs import load_tpf_cubes, load_transit_ephemeris
+from .inputs import is_complete_candidate_ephemeris, load_tpf_cubes, load_transit_ephemeris
 from .lightcurve import phase_hours, robust_transit_depth
 from .workspace import CandidateWorkspace
 
@@ -293,62 +293,6 @@ def _load_archival_gaia_neighbor_rows(
     return rows, target_g_mag, metadata, target_bp_rp_color
 
 
-def _synthetic_tpf_cube() -> Dict[str, Any]:
-    """Deterministic test-only TPF cube with a blended neighbor."""
-    rng = np.random.default_rng(seed=31)
-    shape = (11, 11)
-    target_x, target_y = 5.0, 5.0
-    neighbor_x, neighbor_y = 7.5, 5.0
-    neighbor_ratio = 0.02
-    fwhm = 1.2
-    sigma = fwhm / 2.3548
-    yy, xx = np.indices(shape, dtype=float)
-    target_psf = np.exp(
-        -((xx - target_x) ** 2 + (yy - target_y) ** 2) / (2.0 * sigma**2)
-    )
-    neighbor_psf = np.exp(
-        -((xx - neighbor_x) ** 2 + (yy - neighbor_y) ** 2) / (2.0 * sigma**2)
-    )
-    base_image = 1800.0 + 1200.0 * target_psf / np.max(target_psf) + 24.0 * neighbor_psf
-    deficit_psf = 60.0 * target_psf / np.max(target_psf)
-
-    demo_period_days = 3.5
-    demo_epoch_btjd = 2.0
-    demo_duration_days = 0.12
-    cadence_days = 120.0 / 86400.0
-    time = np.arange(0.0, 27.0, cadence_days)
-    hours = phase_hours(time, demo_period_days, demo_epoch_btjd)
-    in_transit = np.abs(hours) < 0.5 * demo_duration_days * 24.0
-    flux_cube = np.zeros((time.size, *shape), dtype=float)
-    for index in range(time.size):
-        image = base_image + rng.normal(0.0, 1.0, size=shape)
-        if in_transit[index]:
-            image = image - deficit_psf
-        flux_cube[index] = image
-    aperture = np.zeros(shape, dtype=int)
-    aperture[1:-1, 1:-1] = 2
-    return {
-        "path": None,
-        "sector": 1,
-        "time": time,
-        "quality": np.zeros(time.size, dtype=np.int64),
-        "flux": flux_cube,
-        "aperture": aperture,
-        "header": {},
-        "_neighbor_rows": [
-            {
-                "g_mag": 14.24,
-                "separation_arcsec": round(2.5 * 21.0, 2),
-                "flux_ratio": neighbor_ratio,
-                "is_target": False,
-            }
-        ],
-        "_period_days": demo_period_days,
-        "_epoch_btjd": demo_epoch_btjd,
-        "_duration_days": demo_duration_days,
-    }
-
-
 def run_dilution_sensitivity(workspace: CandidateWorkspace) -> Path:
     """Write a candidate-local aperture and neighbor sensitivity artifact.
 
@@ -375,11 +319,7 @@ def run_dilution_sensitivity(workspace: CandidateWorkspace) -> Path:
     if not cubes:
         raise RuntimeError("dilution sensitivity requires observed candidate target-pixel data")
     ephemeris = load_transit_ephemeris(workspace)
-    required_fields = ("period_days", "epoch_btjd", "duration_days")
-    if ephemeris.get("source") == "synthetic-demo" or any(
-        ephemeris.get("field_sources", {}).get(field) == "synthetic-demo"
-        for field in required_fields
-    ):
+    if not is_complete_candidate_ephemeris(ephemeris):
         raise RuntimeError("dilution sensitivity requires a complete candidate-derived transit ephemeris")
     source = "candidate-data"
     neighbor_rows, target_g_mag, contamination_metadata, target_bp_rp_color = _load_archival_gaia_neighbor_rows(

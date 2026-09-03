@@ -22,7 +22,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .inputs import load_transit_ephemeris
+from .inputs import is_complete_candidate_ephemeris, load_transit_ephemeris
 from .lightcurve import bin_phase_folded_flux, phase_hours
 from .search import load_candidate_light_curve
 from .workspace import CandidateWorkspace, validate_signal_suffix
@@ -202,7 +202,9 @@ def generate_candidate_plots(
     figures_dir.mkdir(parents=True, exist_ok=True)
     if period_days is None or epoch_btjd is None:
         ephemeris = load_transit_ephemeris(workspace, signal=signal)
-        if ephemeris.get("source") == "synthetic-demo":
+        if not is_complete_candidate_ephemeris(
+            ephemeris, require_duration=False, require_depth=False
+        ):
             raise ValueError("candidate plot requires a candidate-data ephemeris")
         if period_days is None:
             period_days = ephemeris["period_days"]

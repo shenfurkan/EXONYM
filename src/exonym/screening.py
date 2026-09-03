@@ -25,7 +25,13 @@ from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
 
-from .inputs import BTJD_TIME_SYSTEM, load_light_curve_table, load_transit_ephemeris
+from .inputs import (
+    BTJD_TIME_SYSTEM,
+    is_complete_candidate_ephemeris,
+    load_light_curve_table,
+    load_transit_ephemeris,
+)
+from .constants import SAMPLE_MEDIAN_STANDARD_ERROR_FACTOR
 from .workspace import validate_signal_suffix
 from .lightcurve import phase_hours
 from .workspace import CandidateWorkspace
@@ -80,8 +86,8 @@ def _depth_measurement(
     depth = float(np.median(out_values) - np.median(in_values)) * 1e6
     uncertainty = float(
         math.hypot(
-            1.253 * float(np.std(in_values)) / math.sqrt(in_values.size),
-            1.253 * float(np.std(out_values)) / math.sqrt(out_values.size),
+            SAMPLE_MEDIAN_STANDARD_ERROR_FACTOR * float(np.std(in_values)) / math.sqrt(in_values.size),
+            SAMPLE_MEDIAN_STANDARD_ERROR_FACTOR * float(np.std(out_values)) / math.sqrt(out_values.size),
         )
         * 1e6
     )
@@ -240,15 +246,15 @@ def fixed_ephemeris_screen(
     }
 
 
-def _rounded_payload(value: object, digits: int = 6) -> object:
-    """Recursively make a JSON-safe, concise payload without nonfinite values."""
+def _sanitize_payload(value: object) -> object:
+    """Recursively make a JSON-safe payload preserving full float precision without nonfinite values."""
     if isinstance(value, dict):
-        return {str(key): _rounded_payload(item, digits) for key, item in value.items()}
+        return {str(key): _sanitize_payload(item) for key, item in value.items()}
     if isinstance(value, list):
-        return [_rounded_payload(item, digits) for item in value]
+        return [_sanitize_payload(item) for item in value]
     if isinstance(value, (float, np.floating)):
         number = _finite_float(value)
-        return None if number is None else round(number, digits)
+        return None if number is None else float(number)
     if isinstance(value, (int, np.integer)) and not isinstance(value, bool):
         return int(value)
     return value
@@ -284,11 +290,7 @@ def run_fixed_ephemeris_screen(
         raise ValueError(
             "no readable signal prior at config/signals/transit_config{0}.json".format(signal)
         )
-    required_fields = ("period_days", "epoch_btjd", "duration_days", "depth_ppm")
-    field_sources = ephemeris.get("field_sources", {})
-    if not isinstance(field_sources, dict) or any(
-        field_sources.get(field) in (None, "synthetic-demo") for field in required_fields
-    ):
+    if not is_complete_candidate_ephemeris(ephemeris):
         raise ValueError("fixed-ephemeris screening requires complete candidate-derived ephemeris data")
     if ephemeris.get("time_system") != BTJD_TIME_SYSTEM:
         raise ValueError("fixed-ephemeris screening requires a BTJD_TDB epoch")
@@ -338,7 +340,7 @@ def run_fixed_ephemeris_screen(
     outputs_dir = workspace.path / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
     output = outputs_dir / "fixed_ephemeris_screen{0}.json".format(signal or "")
-    serialized_payload = _rounded_payload(payload)
+    serialized_payload = _sanitize_payload(payload)
     # Preserve the exact candidate ephemeris for hash-bound BLS replay.
     serialized_payload["ephemeris"] = payload["ephemeris"]
     output.write_text(

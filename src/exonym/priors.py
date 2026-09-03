@@ -120,10 +120,10 @@ def _normalized_rows(raw_csv: str, tic_id: object) -> Tuple[List[Dict[str, Any]]
                 "toi": str(row.get("TOI", "")).strip(),
                 "signal_suffix": signal_suffix,
                 "source_row_number": source_row_number,
-                "period_days": round(period, 6),
-                "epoch_btjd": round(epoch - 2457000.0 if epoch > 2450000.0 else epoch, 5),
-                "depth_ppm": round(depth, 2),
-                "duration_hours": round(duration, 2),
+                "period_days": float(period),
+                "epoch_btjd": float(epoch - 2457000.0 if epoch > 2450000.0 else epoch),
+                "depth_ppm": float(depth),
+                "duration_hours": float(duration),
                 "source_time_system": "BJD value converted to BTJD only when greater than 2450000",
             }
         )

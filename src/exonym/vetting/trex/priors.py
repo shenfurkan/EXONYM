@@ -21,11 +21,26 @@ import math
 from typing import Optional, Tuple
 
 import numpy as np
+from scipy.special import ndtr as _standard_normal_cdf
 from scipy.stats import beta as _beta_dist
 from scipy.stats import powerlaw as _powerlaw_dist
 
 from .constants import Msun, Rsun, au, G, pi
 from .funcs import separation_at_contrast
+
+# Winters et al. (2019), AJ, 157, 216, DOI:10.3847/1538-3881/ab05dc,
+# arXiv:1901.06364, §5.3 and Figure 22.  The retained source PDF is
+# literature/winters_2019_m_dwarf_multiplicity.pdf.  The survey measures a
+# 26.8% corrected M-dwarf multiplicity rate and fits the distribution of
+# log10(projected separation / AU) with a Gaussian centered at 20 AU and a
+# 1.16-dex standard deviation.  Its reported primary-mass sub-samples span
+# 0.075--0.60 solar masses; no extrapolation beyond that lower boundary is
+# scientifically supported by this relation.
+WINTERS_2019_M_DWARF_MINIMUM_MASS_SOLAR = 0.075
+WINTERS_2019_M_DWARF_MAXIMUM_MASS_SOLAR = 0.60
+WINTERS_2019_M_DWARF_MULTIPLICITY_FRACTION = 0.268
+WINTERS_2019_LOG10_SEPARATION_MEAN_AU = math.log10(20.0)
+WINTERS_2019_LOG10_SEPARATION_STANDARD_DEVIATION_DEX = 1.16
 
 # ---------------------------------------------------------------------------
 # Planet radius prior  (Fressin et al. 2013, broken power law)
@@ -217,6 +232,33 @@ def sample_q(x: np.ndarray, M_s: float) -> np.ndarray:
 # Log-prior for bound companions  (Raghavan+ 2010; Moe & Di Stefano 2017)
 # ---------------------------------------------------------------------------
 
+def _winters2019_m_dwarf_companion_cdf(
+    primary_mass_solar: float,
+    maximum_separation_au: np.ndarray,
+) -> np.ndarray:
+    """Return Winters et al. (2019) M-dwarf companion probability.
+
+    The measured M-dwarf system multiplicity normalizes a Gaussian CDF in
+    log10 projected separation.  This is applicable only to the observed
+    0.075--0.60 solar-mass primary range; it is not an extrapolated
+    mass-dependent multiplicity law.
+    """
+    if not math.isfinite(primary_mass_solar) or (
+        primary_mass_solar < WINTERS_2019_M_DWARF_MINIMUM_MASS_SOLAR
+    ):
+        raise ValueError(
+            "Winters et al. (2019) M-dwarf prior requires a primary mass of at least 0.075 solar masses"
+        )
+    separation_au = np.asarray(maximum_separation_au, dtype=float)
+    if not np.all(np.isfinite(separation_au)) or np.any(separation_au <= 0.0):
+        raise ValueError("maximum bound-companion separations must be finite and positive")
+    standardized_log_separation = (
+        np.log10(separation_au) - WINTERS_2019_LOG10_SEPARATION_MEAN_AU
+    ) / WINTERS_2019_LOG10_SEPARATION_STANDARD_DEVIATION_DEX
+    return WINTERS_2019_M_DWARF_MULTIPLICITY_FRACTION * _standard_normal_cdf(
+        standardized_log_separation
+    )
+
 def lnprior_bound(
     M_s: float,
     delta_mags: np.ndarray,
@@ -226,22 +268,22 @@ def lnprior_bound(
 ) -> np.ndarray:
     """Log-prior probability of a bound companion at given contrasts.
 
-    Implements the occurrence-rate-weighted prior from Raghavan et al.
-    (2010) multiplicity statistics and Moe & Di Stefano (2017) period
-    distributions.
+    Implements the occurrence-rate-weighted prior from Winters et al. (2019)
+    within its measured M-dwarf domain and from Moe & Di Stefano (2017) for
+    more massive hosts.
 
     Args:
         M_s: Primary mass [Msun].
         delta_mags: Companion contrasts [delta_mag], shape (N,).
         separations: Separation values [arcsec] from contrast curve.
         contrasts: Contrast values [delta_mag] from contrast curve.
-        plx: Parallax [mas] (nan -> 0.1 default).
+        plx: Finite positive parallax [mas].
 
     Returns:
         ln(prior_bound), shape (N,).
     """
     if not math.isfinite(plx) or plx <= 0.0:
-        plx = 0.1
+        raise ValueError("bound-companion prior requires a finite positive parallax")
     d_pc = 1000.0 / plx
     seps_arcsec = separation_at_contrast(
         np.asarray(delta_mags, dtype=float),
@@ -251,16 +293,12 @@ def lnprior_bound(
     seps_au = d_pc * seps_arcsec
     max_Porbs = ((4.0 * pi ** 2) / (G * M_s * Msun) * (seps_au * au) ** 3) ** 0.5 / 86400.0
 
-    if M_s >= 1.0:
-        f1 = 0.020 + 0.04 * math.log10(M_s) + 0.07 * (math.log10(M_s)) ** 2
-        f2 = 0.039 + 0.07 * math.log10(M_s) + 0.01 * (math.log10(M_s)) ** 2
-        f3 = 0.078 - 0.05 * math.log10(M_s) + 0.04 * (math.log10(M_s)) ** 2
-    else:
-        M_act = M_s
-        M_s_use = 1.0
-        f1 = 0.020 + 0.04 * math.log10(M_s_use) + 0.07 * (math.log10(M_s_use)) ** 2
-        f2 = 0.039 + 0.07 * math.log10(M_s_use) + 0.01 * (math.log10(M_s_use)) ** 2
-        f3 = 0.078 - 0.05 * math.log10(M_s_use) + 0.04 * (math.log10(M_s_use)) ** 2
+    if M_s <= WINTERS_2019_M_DWARF_MAXIMUM_MASS_SOLAR:
+        return np.log(_winters2019_m_dwarf_companion_cdf(M_s, seps_au))
+
+    f1 = 0.020 + 0.04 * math.log10(M_s) + 0.07 * (math.log10(M_s)) ** 2
+    f2 = 0.039 + 0.07 * math.log10(M_s) + 0.01 * (math.log10(M_s)) ** 2
+    f3 = 0.078 - 0.05 * math.log10(M_s) + 0.04 * (math.log10(M_s)) ** 2
 
     alpha = 0.018
     dlogP = 0.7
@@ -274,32 +312,19 @@ def lnprior_bound(
     f_comp = np.zeros_like(max_Porbs)
     m = np.log10(max_Porbs)
 
-    if M_s >= 1.0:
-        r12 = (m >= 1.0) & (m < 2.0)
-        r23 = (m >= 2.0) & (m < 3.4)
-        r34 = (m >= 3.4) & (m < 5.5)
-        r45 = (m >= 5.5) & (m < 8.0)
-        r5p = m >= 8.0
-        f_comp[r12] = 0.5 * (m[r12] - 1.0) * (2.0 * f1 + (f2 - f1 - alpha * dlogP) * (m[r12] - 1.0))
-        f_comp[r23] = t2 + 0.5 * alpha * (m[r23] ** 2 - 5.4 * m[r23] + 6.8) + f2 * (m[r23] - 2.0)
-        f_comp[r34] = t2 + t3 + alpha * dlogP * (m[r34] - 3.4) + f2 * (m[r34] - 3.4) + (
-            f3 - f2 - alpha * dlogP) * (0.238095 * m[r34] ** 2 - 0.952381 * m[r34] + 0.485714)
-        f_comp[r45] = t2 + t3 + t4 + f3 * (3.33333 - 17.3566 * np.exp(-0.3 * m[r45]))
-        f_comp[r5p] = t2 + t3 + t4 + t5
-        f_comp[f_comp < 0.0] = 0.0
-        return np.log(f_comp)
-    else:
-        r34 = (m >= 3.4) & (m < 5.5)
-        r45 = (m >= 5.5) & (m < 8.0)
-        r5p = m >= 8.0
-        f_comp[r34] = (alpha * dlogP * (m[r34] - 3.4) + f2 * (m[r34] - 3.4)
-                       + (f3 - f2 - alpha * dlogP)
-                       * (0.238095 * m[r34] ** 2 - 0.952381 * m[r34] + 0.485714))
-        f_comp[r45] = t4 + f3 * (3.33333 - 17.3566 * np.exp(-0.3 * m[r45]))
-        f_comp[r5p] = t4 + t5
-        f_act = 0.65 * f_comp + 0.35 * f_comp * M_act
-        f_act[f_act < 0.0] = 0.0
-        return np.log(f_act)
+    r12 = (m >= 1.0) & (m < 2.0)
+    r23 = (m >= 2.0) & (m < 3.4)
+    r34 = (m >= 3.4) & (m < 5.5)
+    r45 = (m >= 5.5) & (m < 8.0)
+    r5p = m >= 8.0
+    f_comp[r12] = 0.5 * (m[r12] - 1.0) * (2.0 * f1 + (f2 - f1 - alpha * dlogP) * (m[r12] - 1.0))
+    f_comp[r23] = t2 + 0.5 * alpha * (m[r23] ** 2 - 5.4 * m[r23] + 6.8) + f2 * (m[r23] - 2.0)
+    f_comp[r34] = t2 + t3 + alpha * dlogP * (m[r34] - 3.4) + f2 * (m[r34] - 3.4) + (
+        f3 - f2 - alpha * dlogP) * (0.238095 * m[r34] ** 2 - 0.952381 * m[r34] + 0.485714)
+    f_comp[r45] = t2 + t3 + t4 + f3 * (3.33333 - 17.3566 * np.exp(-0.3 * m[r45]))
+    f_comp[r5p] = t2 + t3 + t4 + t5
+    f_comp[f_comp < 0.0] = 0.0
+    return np.log(f_comp)
 
 
 # ---------------------------------------------------------------------------

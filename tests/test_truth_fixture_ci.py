@@ -13,10 +13,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from exonym.asteroseismology import (
-    _synthetic_oscillation_table,
-    estimate_oscillation_envelope,
-)
+from exonym.asteroseismology import estimate_oscillation_envelope
 from exonym.catalog import calculate_radial_velocity_semi_amplitude
 from exonym.detrending import (
     _celerite_trend,
@@ -25,6 +22,7 @@ from exonym.detrending import (
     transit_mask_from_ephemeris,
 )
 from exonym.ephemeris_matching import _compare_record
+from tests.fixtures.synthetic_observations import _synthetic_oscillation_table
 
 
 def _synthetic_masked_transit_light_curve():

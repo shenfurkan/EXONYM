@@ -25,3 +25,10 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: protect-tests
+        name: Enforce read-only test suite against AI test weakening
+        entry: bash .git/hooks/pre-commit
+        language: system
+        pass_filenames: false
+        always_run: true
+

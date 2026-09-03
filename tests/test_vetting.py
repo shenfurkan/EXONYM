@@ -540,8 +540,15 @@ def test_run_triceratops_falls_back_when_signal_config_missing(tmp_path):
     with pytest.warns(UserWarning, match="could not read signal transit config"):
         report_path = run_triceratops_simulation(stub, signal=".99", allow_fallback=True)
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    assert report["ephemeris"]["source"] == "defaults"
-    assert report["ephemeris"]["period_days"] == pytest.approx(2.5)
+    assert report["ephemeris"] == {
+        "period_days": None,
+        "epoch_btjd": None,
+        "depth_ppm": None,
+        "duration_hours": None,
+        "source": "unavailable",
+    }
+    assert report["FPP"] is None
+    assert report["claim_eligible"] is False
 
 
 def test_run_triceratops_no_tic_raises_without_allow_fallback(tmp_path):
@@ -972,10 +979,8 @@ def test_load_transit_ephemeris_uses_matching_signal_bls_result(tmp_path):
 
 
 def test_asteroseismology_recovers_injected_comb():
-    from exonym.asteroseismology import (
-        _synthetic_oscillation_table,
-        estimate_oscillation_envelope,
-    )
+    from exonym.asteroseismology import estimate_oscillation_envelope
+    from tests.fixtures.synthetic_observations import _synthetic_oscillation_table
 
     table = _synthetic_oscillation_table()
     result = estimate_oscillation_envelope(table["time"], table["flux"], 100.0, 1600.0)
@@ -1631,7 +1636,8 @@ def test_prf_scene_injection_recovers_detector_scale_gaussian_amplitudes():
 
 
 def test_sed_recovers_synthetic_photometry():
-    from exonym.sed import _fit_blackbody, _synthetic_photometry
+    from exonym.sed import _fit_blackbody
+    from tests.fixtures.synthetic_observations import _synthetic_photometry
 
     stellar = {
         "teff_k": 5772.0,
@@ -1802,7 +1808,7 @@ def test_sed_fit_fails_closed_without_a_response_integrated_grid(tmp_path, monke
 
 
 def _mock_candidate_fit_inputs(monkeypatch):
-    from exonym.transit_fit import _synthetic_transit_table
+    from tests.fixtures.synthetic_observations import _synthetic_transit_table
 
     ephemeris = {
         "period_days": 3.2,
@@ -2362,7 +2368,8 @@ def test_eccentric_transit_geometry_preserves_semimajor_axis_and_adjusts_inclina
 
 
 def test_phase_curve_recovers_injected_reflection():
-    from exonym.phasecurve import _synthetic_phase_curve_table, fit_phase_curve_components
+    from exonym.phasecurve import fit_phase_curve_components
+    from tests.fixtures.synthetic_observations import _synthetic_phase_curve_table
 
     table = _synthetic_phase_curve_table()
     ephemeris = {
@@ -2381,8 +2388,9 @@ def test_phase_curve_recovers_injected_reflection():
 def test_phase_curve_marks_zero_covariance_error_as_undefined(monkeypatch):
     """Do not turn an undefined covariance error into a zero-ppm limit."""
     import exonym.phasecurve as phasecurve
+    from tests.fixtures.synthetic_observations import _synthetic_phase_curve_table
 
-    table = phasecurve._synthetic_phase_curve_table()
+    table = _synthetic_phase_curve_table()
     ephemeris = {
         "period_days": table.pop("_period_days"),
         "epoch_btjd": table.pop("_epoch_btjd"),
@@ -2492,6 +2500,7 @@ def test_phase_curve_uses_declared_transit_chain_parameter_contract(tmp_path):
 def test_phase_curve_run_records_eccentric_secondary_control(tmp_path, monkeypatch):
     from exonym import phasecurve
     from exonym.workspace import create_candidate
+    from tests.fixtures.synthetic_observations import _synthetic_phase_curve_table
 
     workspace = create_candidate(tmp_path, "phase-ecc-output-test")
     outputs = workspace.path / "outputs"
@@ -2499,8 +2508,13 @@ def test_phase_curve_run_records_eccentric_secondary_control(tmp_path, monkeypat
         "period_days": 3.0,
         "epoch_btjd": 100.0,
         "duration_days": 0.1,
-        "source": "candidate-data",
-        "field_sources": {},
+        "time_system": "BTJD_TDB",
+        "source": "candidate-config",
+        "field_sources": {
+            "period_days": "candidate-config",
+            "epoch_btjd": "candidate-config",
+            "duration_days": "candidate-config",
+        },
     }
     (outputs / "mcmc_transit_fit.json").write_text(
         json.dumps(
@@ -2517,7 +2531,7 @@ def test_phase_curve_run_records_eccentric_secondary_control(tmp_path, monkeypat
         (32, 1),
     )
     np.save(str(outputs / "mcmc_transit_fit_chain.npy"), chain)
-    table = phasecurve._synthetic_phase_curve_table()
+    table = _synthetic_phase_curve_table()
     table.pop("_duration_days")
     table.pop("_epoch_btjd")
     table.pop("_period_days")
@@ -2748,11 +2762,11 @@ def test_ttv_linear_ephemeris_has_small_residuals():
     from exonym.search import calculate_ttv_super_period
     from exonym.transit_fit import stellar_density_a_rs
     from exonym.ttv import (
-        _synthetic_timing_table,
         enumerate_companion_super_periods,
         transit_template_parameters,
         transit_timing_analysis,
     )
+    from tests.fixtures.synthetic_observations import _synthetic_timing_table
 
     table = _synthetic_timing_table(ttv_amplitude_minutes=0.0)
     ephemeris = {
@@ -2812,10 +2826,10 @@ def test_ttv_refits_a_weighted_linear_ephemeris():
 def test_ttv_injected_signal_has_nonzero_refit_residuals():
     from exonym.transit_fit import stellar_density_a_rs
     from exonym.ttv import (
-        _synthetic_timing_table,
         transit_template_parameters,
         transit_timing_analysis,
     )
+    from tests.fixtures.synthetic_observations import _synthetic_timing_table
 
     table = _synthetic_timing_table(ttv_amplitude_minutes=20.0)
     ephemeris = {
@@ -2924,7 +2938,9 @@ def test_ttv_rejects_low_snr_epochs_and_persists_epoch_diagnostics(tmp_path, mon
     assert timing["n_rejected_epochs"] == len(timing["rejected_epochs"])
     accepted = [record for record in timing["per_epoch"] if not record["excluded_no_detection"]]
     assert all(record["local_duration_days"] is not None for record in accepted)
-    assert timing["epoch_acceptance"]["local_duration_method"].startswith("bounded profile")
+    assert timing["epoch_acceptance"]["local_duration_method"] == (
+        "fixed candidate-derived transit-fit template duration"
+    )
     assert "uncertainty_clipped_epochs" in timing
     assert "search_boundary_epochs" in timing
     json.dumps(payload, allow_nan=False)
@@ -3003,7 +3019,6 @@ def test_ttv_retains_clipped_uncertainty_and_search_boundary_records(monkeypatch
 
 def test_activity_recovers_rotation_period():
     from exonym.activity import (
-        _synthetic_rotation_table,
         gls_periodogram,
         reconcile_harmonic_segment_periods,
         sampling_window_diagnostics,
@@ -3013,6 +3028,7 @@ def test_activity_recovers_rotation_period():
         weighted_period_summary,
         weighted_percentile_summary,
     )
+    from tests.fixtures.synthetic_observations import _synthetic_rotation_table
 
     table = _synthetic_rotation_table()
     periods, powers, fap = gls_periodogram(table["time"], table["flux"])
@@ -3304,9 +3320,9 @@ def test_dilution_rejects_unvalidated_archival_neighbors(tmp_path):
 def test_dilution_aperture_depth_decreases_with_size():
     from exonym.dilution import (
         _extract_cube_light_curves,
-        _synthetic_tpf_cube,
         aperture_depth_ppm,
     )
+    from tests.fixtures.synthetic_observations import _synthetic_tpf_cube
 
     cube = _synthetic_tpf_cube()
     ephemeris = {

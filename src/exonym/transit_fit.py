@@ -105,10 +105,13 @@ import numpy as np
 
 from .constants import (
     GRAVITATIONAL_CONSTANT_CGS,
+    PARTS_PER_MILLION,
+    SAMPLE_MEDIAN_STANDARD_ERROR_FACTOR,
     SECONDS_PER_DAY,
     SOLAR_MEAN_DENSITY_G_CM3,
 )
 from .inputs import (
+    is_complete_candidate_ephemeris,
     load_light_curve_table,
     load_stellar_parameters,
     load_transit_ephemeris,
@@ -852,10 +855,12 @@ def _accelerated_cpu_log_probability(
     sqe_cosw = values["sqe_cosw"]
     sqe_sinw = values["sqe_sinw"]
     eccentricity = sqe_cosw * sqe_cosw + sqe_sinw * sqe_sinw
+    # ASTROPHYSICAL_GUARD: Allow brown dwarfs and grazing EBs (rp_rstar up to 0.5)
+    # and baseline deviations up to 5% without arbitrary box clamping.
     if not (
-        0.001 < rp_rstar < 0.3
+        0.0005 < rp_rstar < 0.5
         and 0.0 <= impact_parameter < 1.0 + rp_rstar
-        and 0.99 < baseline < 1.01
+        and 0.95 < baseline < 1.05
         and JITTER_LOG_LOWER < log_jitter < JITTER_LOG_UPPER
         and -50.0 < log_rho_star < 50.0
         and 0.0 < q1 < 1.0
@@ -967,15 +972,12 @@ def _fit_emcee_cpu(
     for walker_index in range(effective_walkers):
         for _attempt in range(1000):
             proposal = initial + rng.normal(size=ndim) * scales
-            proposal[0] = np.clip(proposal[0], 0.0011, 0.299)
-            proposal[2] = np.clip(proposal[2], 0.0, 1.0)
-            proposal[3] = np.clip(proposal[3], 0.9901, 1.0099)
-            proposal[4] = np.clip(proposal[4], JITTER_LOG_LOWER + 0.01, JITTER_LOG_UPPER - 0.01)
-            proposal[5:7] = np.clip(proposal[5:7], 1.0e-5, 1.0 - 1.0e-5)
             if data.eccentric:
                 eccentric_radius = float(math.hypot(proposal[7], proposal[8]))
                 if eccentric_radius >= 0.99:
-                    proposal[7:9] *= 0.99 / eccentric_radius
+                    continue
+            # Rejection sampling: accept proposal only when log-probability is finite
+            # rather than artificially squashing boundaries via np.clip
             if math.isfinite(_accelerated_cpu_log_probability(proposal, data)):
                 p0[walker_index] = proposal
                 break
@@ -1550,7 +1552,7 @@ def _phase_bin_transit_window_data(
                 continue
             bin_values = values[selected]
             bin_errors = errors[selected]
-            scatter_error = 1.253 * float(np.std(bin_values)) / math.sqrt(count)
+            scatter_error = SAMPLE_MEDIAN_STANDARD_ERROR_FACTOR * float(np.std(bin_values)) / math.sqrt(count)
             reported_error = float(np.median(bin_errors)) / math.sqrt(count)
             combined_error = math.sqrt(scatter_error ** 2 + reported_error ** 2)
             if not math.isfinite(combined_error) or combined_error <= 0.0:
@@ -2066,28 +2068,16 @@ def _log_prior(
         )
     except ValueError:
         return -np.inf
+    # ASTROPHYSICAL_GUARD: Allow brown dwarfs and grazing EBs (rp up to 0.5)
+    # and baseline deviations up to 5% without arbitrary box clamping.
     if not (
-        0.001 < rp < 0.3
+        0.0005 < rp < 0.5
         and -2.0 < log_rho < 1.5
-        # ASTROPHYSICAL_HEURISTIC: b <= 1.2 admits grazing transits (b slightly > 1).
-        # The quadratic limb-darkening model is defined up to the stellar limb;
-        # a few percent beyond (partially occulted planet) is allowed because
-        # impact-parameter uncertainties from the ephemeris may exceed the
-        # stellar radius.  Posteriors with median b > 1.0 should be flagged for
-        # manual review as they are degenerate with high-impact-parameter
-        # eclipsing binaries.
-        # DIAGNOSTIC_REASONING: the bottleneck guard at b < 1.2 prevents the
-        # sampler from spending time in the fully non-transiting regime, while
-        # the range 1.0 < b < 1.2 allows the posterior to explore grazing
-        # geometries that may still produce a detectable transit.
         and 0.0 <= b < 1.2
-        and bool(np.all((0.99 < baselines) & (baselines < 1.01)))
-        # NUMERICAL_GUARD: log_jitter bounds keep exp(log_jitter) within
-        # machine-precision finite range: exp(-12) ≈ 6e-6, exp(-2) ≈ 0.14
-        # (normalized flux units).
+        and bool(np.all((0.95 < baselines) & (baselines < 1.05)))
         and JITTER_LOG_LOWER < log_jitter < JITTER_LOG_UPPER
-        and 0.01 < q1 < 0.99
-        and 0.01 < q2 < 0.99
+        and 0.0 < q1 < 1.0
+        and 0.0 < q2 < 1.0
     ):
         return -np.inf
     if eccentric and se_cos * se_cos + se_sin * se_sin > 1.0:
@@ -2416,6 +2406,7 @@ def _posterior_summaries(
     eccentric: bool,
     n_sectors: int = 1,
     sector_labels: Optional[Sequence[int]] = None,
+    exposure_seconds: Optional[float] = None,
 ) -> Dict[str, Dict[str, float]]:
     """Summarize sampled and derived transit parameters from an equal-weight chain.
 
@@ -2481,7 +2472,7 @@ def _posterior_summaries(
         (projection_samples < 0.0) | (projection_samples > 1.0)
     )
     inc_samples = np.degrees(np.arccos(np.clip(projection_samples, 0.0, 1.0)))
-    area_ppm = (rp_samples**2) * 1e6
+    area_ppm = (rp_samples**2) * PARTS_PER_MILLION
     # COVARIANCE_GUARD: thin the joint parameter matrix with a uniform stride
     # so every evaluated tuple is an actual posterior draw. Independent
     # per-column chunk medians would pair samples from different iterations,
@@ -2513,17 +2504,19 @@ def _posterior_summaries(
             eccentricity=float(median_eccentricity),
             omega_deg=float(median_omega),
             # ASTROPHYSICAL_GUARD: evaluate the instantaneous mid-transit depth
-            # at native TESS cadence. The default 480 s supersampling window
-            # smears short transits and biases the derived depth low relative
-            # to the geometric area ratio (rp/rs)^2.
-            exposure_seconds=EXPTIME_SECONDS,
+            # at candidate cadence.
+            exposure_seconds=(
+                float(exposure_seconds)
+                if exposure_seconds is not None and math.isfinite(exposure_seconds) and exposure_seconds > 0
+                else EXPTIME_SECONDS
+            ),
         )
         if model is None or model.shape != (1,) or not np.isfinite(model[0]):
             raise RuntimeError(
                 "batman failed while evaluating posterior-derived mid-transit depths"
             )
         depth_values.append(1.0 - model[0])
-    depth_ppm_samples = np.asarray(depth_values) * 1e6
+    depth_ppm_samples = np.asarray(depth_values) * PARTS_PER_MILLION
 
     if not (
         np.all(np.isfinite(q1_samples))
@@ -2755,56 +2748,6 @@ def _make_dynesty_prior_transform(
         return theta
 
     return prior_transform
-
-
-def _synthetic_transit_table(
-    ephemeris: Dict[str, Any], rng_seed: int = 5
-) -> Dict[str, np.ndarray]:
-    """Deterministic test-only transit light curve.
-
-    The injected radius is derived from the ephemeris depth so the synthetic
-    signal is self-consistent with the fitter's initialization.
-
-    .. warning::
-
-        This function produces **synthetic** photometry with hardcoded
-        limb-darkening coefficients (q1=0.35, q2=0.3) and 80 ppm Gaussian
-        noise.  It exists for development and testing only.
-    """
-    rng = np.random.default_rng(seed=rng_seed)
-    cadence_days = 120.0 / SECONDS_PER_DAY
-    duration_days = max(12.0, 4.0 * float(ephemeris["period_days"]))
-    time = np.arange(0.0, duration_days, cadence_days)
-    phase_days = (
-        (time - ephemeris["epoch_btjd"] + 0.5 * ephemeris["period_days"])
-        % ephemeris["period_days"]
-    ) - 0.5 * ephemeris["period_days"]
-    injected_rp = math.sqrt(max(float(ephemeris["depth_ppm"]) * 1e-6, 1e-8))
-    rho_solar = 1.0
-    a_rs = stellar_density_a_rs(rho_solar, ephemeris["period_days"])
-    model = batman_transit_flux(
-        phase_days,
-        ephemeris["period_days"],
-        injected_rp,
-        a_rs,
-        0.3,
-        0.35,
-        0.3,
-        1.0,
-        exposure_seconds=EXPTIME_SECONDS,
-    )
-    if model is None:
-        raise RuntimeError("batman failed while generating a synthetic transit fixture")
-    flux = np.asarray(model)
-    flux = flux + rng.normal(0.0, 80e-6, size=time.shape)
-    flux_err = np.full_like(flux, 80e-6)
-    sector_values = np.ones(time.size, dtype=int)
-    return {
-        "time": time,
-        "flux": flux,
-        "flux_err": flux_err,
-        "sector": sector_values,
-    }
 
 
 def _mcmc_convergence_diagnostics(
@@ -3255,7 +3198,7 @@ def _fit_emcee_candidate_transit_fit(
     ------
     RuntimeError
         If the required ``batman-package`` dependency is unavailable, or
-        photometry, ephemeris, or stellar parameters are synthetic or missing.
+        candidate photometry, ephemeris, or stellar parameters are unavailable.
     """
     signal = validate_signal_suffix(signal)
     suffix = f".{signal.lstrip('.')}" if signal else ""
@@ -3265,9 +3208,7 @@ def _fit_emcee_candidate_transit_fit(
     outputs_dir = workspace.path / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
     ephemeris = load_transit_ephemeris(workspace, signal=signal)
-    if ephemeris["source"] == "synthetic-demo" or any(
-        value == "synthetic-demo" for value in ephemeris.get("field_sources", {}).values()
-    ):
+    if not is_complete_candidate_ephemeris(ephemeris):
         raise RuntimeError("transit fitting requires a complete candidate-derived transit ephemeris")
     stellar = load_stellar_parameters(workspace)
     if stellar["source"] != "candidate-data":
@@ -3386,23 +3327,13 @@ def _fit_emcee_candidate_transit_fit(
             for center in (map_point, start):
                 for _attempt in range(100):
                     candidate_theta = center + 1e-3 * rng.normal(size=ndim)
-                    candidate_theta[2] = np.clip(candidate_theta[2], 0.0, 1.1)
                     baseline_stop = 3 + n_sectors
-                    candidate_theta[3:baseline_stop] = np.clip(
-                        candidate_theta[3:baseline_stop], 0.995, 1.005
-                    )
-                    candidate_theta[baseline_stop + 1] = np.clip(
-                        candidate_theta[baseline_stop + 1], 0.01, 0.99
-                    )
-                    candidate_theta[baseline_stop + 2] = np.clip(
-                        candidate_theta[baseline_stop + 2], 0.01, 0.99
-                    )
                     if eccentric:
                         eccentric_radius = math.hypot(
                             candidate_theta[baseline_stop + 3], candidate_theta[baseline_stop + 4]
                         )
                         if eccentric_radius >= 0.99:
-                            candidate_theta[baseline_stop + 3:baseline_stop + 5] *= 0.99 / eccentric_radius
+                            continue
                     if valid_walker_start(candidate_theta):
                         accepted_start = candidate_theta
                         break
@@ -3567,8 +3498,18 @@ def _fit_emcee_candidate_transit_fit(
             pass
 
     names = _parameter_names(eccentric, n_sectors, sector_labels)
+    eff_exposure_seconds = (
+        float(np.median(exposure_seconds_by_sector))
+        if exposure_seconds_by_sector is not None and len(exposure_seconds_by_sector) > 0
+        else None
+    )
     posteriors = _posterior_summaries(
-        chain, ephemeris, eccentric, n_sectors=n_sectors, sector_labels=sector_labels
+        chain,
+        ephemeris,
+        eccentric,
+        n_sectors=n_sectors,
+        sector_labels=sector_labels,
+        exposure_seconds=eff_exposure_seconds,
     )
 
     try:
@@ -3613,6 +3554,7 @@ def _fit_emcee_candidate_transit_fit(
             "random_seed": int(seed),
             "fallback_reason": backend_fallback_reason,
         },
+        exposure_seconds=eff_exposure_seconds,
     )
 
     sampling = table.get("sampling", {"mode": "native", "max_points": None})
@@ -3720,6 +3662,7 @@ def _candidate_accelerated_posterior_summary(
     *,
     backend: str,
     sampler_metadata: Dict[str, Any],
+    exposure_seconds: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Expose the common accelerator schema alongside the legacy artifact."""
     samples = np.asarray(chain, dtype=float)
@@ -3756,7 +3699,11 @@ def _candidate_accelerated_posterior_summary(
         rho_star_sigma_g_cm3=float(density_sigma_cgs),
         period_sigma_days=None,
         t0_sigma_days=None,
-        exposure_seconds=EXPTIME_SECONDS,
+        exposure_seconds=(
+            float(exposure_seconds)
+            if exposure_seconds is not None and math.isfinite(exposure_seconds) and exposure_seconds > 0
+            else EXPTIME_SECONDS
+        ),
         eccentric=eccentric,
     )
     return _summarize_accelerated_samples(
@@ -3787,9 +3734,7 @@ def _run_numpyro_candidate_transit_fit(
     outputs_dir = workspace.path / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
     ephemeris = load_transit_ephemeris(workspace, signal=signal)
-    if ephemeris["source"] == "synthetic-demo" or any(
-        value == "synthetic-demo" for value in ephemeris.get("field_sources", {}).values()
-    ):
+    if not is_complete_candidate_ephemeris(ephemeris):
         raise RuntimeError("transit fitting requires a complete candidate-derived transit ephemeris")
     stellar = load_stellar_parameters(workspace)
     if stellar["source"] != "candidate-data":
@@ -3975,8 +3920,18 @@ def _run_numpyro_candidate_transit_fit(
         raise RuntimeError("NumPyro returned a non-finite candidate transit posterior")
     _require_batman()
     names = _parameter_names(eccentric, n_sectors, sector_labels)
+    eff_exposure_seconds = (
+        float(np.median(exposure_seconds_by_sector))
+        if exposure_seconds_by_sector is not None and len(exposure_seconds_by_sector) > 0
+        else None
+    )
     posteriors = _posterior_summaries(
-        chain, ephemeris, eccentric, n_sectors=n_sectors, sector_labels=sector_labels
+        chain,
+        ephemeris,
+        eccentric,
+        n_sectors=n_sectors,
+        sector_labels=sector_labels,
+        exposure_seconds=eff_exposure_seconds,
     )
     extra_fields = sampler.get_extra_fields(group_by_chain=False)
     divergences = int(np.sum(np.asarray(extra_fields.get("diverging", ()), dtype=bool)))
@@ -4002,6 +3957,7 @@ def _run_numpyro_candidate_transit_fit(
         rho_prior_log10_sigma,
         backend="jax-gpu",
         sampler_metadata=sampler_metadata,
+        exposure_seconds=eff_exposure_seconds,
     )
     jitter_prior = _jitter_prior_assumption()
     payload = {
@@ -4213,8 +4169,8 @@ def _run_dynesty_transit_fit(
     Raises
     ------
     RuntimeError
-        If dynesty is not installed, photometry/parameters are synthetic
-        or missing, or the nested-sampling results are incomplete.
+        If dynesty is not installed, candidate photometry or parameters are
+        unavailable, or the nested-sampling results are incomplete.
     """
     signal = validate_signal_suffix(signal)
     try:
@@ -4231,9 +4187,7 @@ def _run_dynesty_transit_fit(
     _require_batman()
 
     ephemeris = load_transit_ephemeris(workspace, signal=signal)
-    if ephemeris["source"] == "synthetic-demo" or any(
-        value == "synthetic-demo" for value in ephemeris.get("field_sources", {}).values()
-    ):
+    if not is_complete_candidate_ephemeris(ephemeris):
         raise RuntimeError("transit fitting requires a complete candidate-derived transit ephemeris")
     stellar = load_stellar_parameters(workspace)
     if stellar["source"] != "candidate-data":
@@ -4370,8 +4324,18 @@ def _run_dynesty_transit_fit(
     posterior_weights = np.exp(log_weights - float(log_evidence[-1]))
     chain, effective_samples = _resample_weighted_posterior(samples, posterior_weights, seed)
     names = _parameter_names(eccentric, n_sectors, sector_labels)
+    eff_exposure_seconds = (
+        float(np.median(exposure_seconds_by_sector))
+        if exposure_seconds_by_sector is not None and len(exposure_seconds_by_sector) > 0
+        else None
+    )
     posteriors = _posterior_summaries(
-        chain, ephemeris, eccentric, n_sectors=n_sectors, sector_labels=sector_labels
+        chain,
+        ephemeris,
+        eccentric,
+        n_sectors=n_sectors,
+        sector_labels=sector_labels,
+        exposure_seconds=eff_exposure_seconds,
     )
     sampling_efficiency = float(getattr(results, "eff", np.nan))
     if not math.isfinite(sampling_efficiency):

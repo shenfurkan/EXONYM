@@ -31,9 +31,7 @@ from ..workspace import validate_signal_suffix
 # SCIENTIFIC_BOUNDARY: This threshold is retained for transparent routing; it
 # does not enable a claim while the calibrated scene-model prerequisite is open.
 FPP_THRESHOLD = 0.01
-# SCIENTIFIC_BOUNDARY: A report-aware routing pass requires both retained
-# TRICERATOPS false-positive terms; an FPP-only scalar is legacy utility input.
-NFPP_THRESHOLD = 0.01
+from .trex.diagnostics import NFPP_THRESHOLD
 FPP_CLAIM_BLOCK_REASON = (
     "FPP claim creation is disabled until TRICERATOPS receives provenance-bound "
     "observed photometry and scene constraints."
@@ -402,21 +400,27 @@ def _prepare_observed_transit_input(workspace: Any, signal: Optional[str]) -> Di
     """
     import numpy as np
 
-    from ..inputs import BTJD_TIME_SYSTEM, load_light_curve_table, load_transit_ephemeris
+    from ..inputs import (
+        BTJD_TIME_SYSTEM,
+        is_complete_candidate_ephemeris,
+        load_light_curve_table,
+        load_transit_ephemeris,
+    )
 
     table = load_light_curve_table(workspace, max_points=None, require_raw_provenance=True)
     if table is None:
         raise ValueError("TRICERATOPS requires a readable candidate light curve")
+    flux_err_sources = table.get("flux_err_sources")
+    if flux_err_sources != ["reported"]:
+        raise ValueError("TRICERATOPS requires reported per-cadence flux uncertainties")
 
     ephemeris = load_transit_ephemeris(workspace, signal=signal)
-    field_sources = ephemeris.get("field_sources", {})
-    required_fields = ("period_days", "epoch_btjd", "duration_days")
-    if not isinstance(field_sources, dict) or any(
-        field_sources.get(field) in (None, "synthetic-demo") for field in required_fields
-    ):
+    if not is_complete_candidate_ephemeris(ephemeris, require_depth=False):
         raise ValueError(
-            "TRICERATOPS requires candidate-derived period, epoch, and duration values"
+            "TRICERATOPS requires a complete candidate-derived transit ephemeris"
         )
+    field_sources = ephemeris["field_sources"]
+    required_fields = ("period_days", "epoch_btjd", "duration_days")
     if ephemeris.get("time_system") != BTJD_TIME_SYSTEM:
         raise ValueError("TRICERATOPS requires a BTJD_TDB ephemeris")
 
@@ -435,10 +439,6 @@ def _prepare_observed_transit_input(workspace: Any, signal: Optional[str]) -> Di
         or duration_days >= 0.5 * period_days
     ):
         raise ValueError("TRICERATOPS requires a positive duration shorter than half the orbital period")
-
-    flux_err_sources = table.get("flux_err_sources")
-    if flux_err_sources != ["reported"]:
-        raise ValueError("TRICERATOPS requires reported per-cadence flux uncertainties")
 
     time_btjd = np.asarray(table.get("time"), dtype=float)
     flux = np.asarray(table.get("flux"), dtype=float)
@@ -542,6 +542,7 @@ def _prepare_observed_transit_input(workspace: Any, signal: Optional[str]) -> Di
         "flux": phase_flux,
         "flux_err": flux_err_scalar,
         "period_days": period_days,
+        "epoch_btjd": epoch_btjd,
         "duration_hours": duration_days * 24.0,
         "depth_ppm": depth_ppm,
         "exposure_days": exposure_days,
@@ -734,30 +735,33 @@ def run_triceratops_simulation(
             )
             raise
 
-    period, depth_ppm, duration_hrs, ephemeris_source = 2.50, 1250.0, 2.85, "defaults"
+    period: Optional[float] = None
+    depth_ppm: Optional[float] = None
+    duration_hrs: Optional[float] = None
+    epoch_btjd: Optional[float] = None
+    ephemeris_source = "unavailable"
     if observed_input is not None:
         period = observed_input["period_days"]
         depth_ppm = observed_input["depth_ppm"]
         duration_hrs = observed_input["duration_hours"]
+        epoch_btjd = observed_input.get("epoch_btjd")
         ephemeris_source = observed_input["provenance"]["ephemeris_source"]
     else:
         # A fallback report may describe a candidate-owned ephemeris, but it
         # must use the same provenance checks as the actual observed-data path.
         try:
-            from ..inputs import load_transit_ephemeris
+            from ..inputs import is_complete_candidate_ephemeris, load_transit_ephemeris
 
             ephemeris = load_transit_ephemeris(workspace, signal=signal)
-            field_sources = ephemeris.get("field_sources", {})
-            required_fields = ("period_days", "duration_days", "depth_ppm")
-            if not isinstance(field_sources, dict) or any(
-                field_sources.get(field) == "synthetic-demo" for field in required_fields
-            ):
-                raise ValueError("ephemeris is incomplete or synthetic")
+            if not is_complete_candidate_ephemeris(ephemeris):
+                raise ValueError("ephemeris is unavailable, partial, or not candidate-derived")
             period = float(ephemeris["period_days"])
+            epoch_btjd = float(ephemeris["epoch_btjd"])
             depth_ppm = float(ephemeris["depth_ppm"])
             duration_hrs = float(ephemeris["duration_days"]) * 24.0
             if (
                 not math.isfinite(period)
+                or not math.isfinite(epoch_btjd)
                 or not math.isfinite(depth_ppm)
                 or not math.isfinite(duration_hrs)
                 or period <= 0.0
@@ -923,9 +927,10 @@ def run_triceratops_simulation(
         "random_seed": random_seed,
         "backend": backend,
         "ephemeris": {
-            "period_days": round(period, 6),
-            "depth_ppm": round(depth_ppm, 2),
-            "duration_hours": round(duration_hrs, 3),
+            "period_days": period,
+            "epoch_btjd": epoch_btjd,
+            "depth_ppm": depth_ppm,
+            "duration_hours": duration_hrs,
             "source": ephemeris_source,
         },
         "FPP": fpp_rounded,

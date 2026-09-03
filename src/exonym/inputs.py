@@ -2,8 +2,8 @@
 
 Every loader probes candidate workspace files and metadata only. Ephemerides,
 stellar parameters, photometry, light curves, and target-pixel products are
-read dynamically; generic demonstration values are used only when no candidate
-data exists and are explicitly labelled synthetic-demo.
+read dynamically from candidate-owned records. Missing or invalid evidence is
+reported explicitly and is never substituted with demonstration values.
 
 Provenance-aware loaders reject stale or unbound BLS and detrending evidence
 before a downstream workflow treats it as candidate-derived. Light-curve and
@@ -29,20 +29,6 @@ import numpy as np
 
 from .workspace import CandidateWorkspace, validate_signal_suffix
 
-# Generic demonstration ephemeris used only when no candidate ephemeris source
-# exists. These are placeholder values, never target data.
-DEMO_PERIOD_DAYS = 3.5
-DEMO_EPOCH_BTJD = 2.0
-DEMO_DURATION_DAYS = 0.12
-DEMO_DEPTH_PPM = 1200.0
-
-# Generic demonstration stellar parameters (solar reference values).
-DEMO_TEFF_K = 5772.0
-DEMO_LOGG_CGS = 4.438
-DEMO_FEH = 0.0
-DEMO_MASS_SOLAR = 1.0
-DEMO_RADIUS_SOLAR = 1.0
-DEMO_PARALLAX_MAS = 10.0
 BTJD_REFERENCE_BJD = 2457000.0
 BTJD_TIME_SYSTEM = "BTJD_TDB"
 # This is a candidate-selection threshold, not a calibrated false-alarm rate.
@@ -104,11 +90,80 @@ def _first_number(payload: Dict[str, Any], keys: Sequence[str]) -> Optional[floa
     return None
 
 
-def _has_complete_candidate_ephemeris(result: Dict[str, Any], source_prefix: str) -> bool:
-    field_sources = result["field_sources"]
-    return all(
+def _has_complete_candidate_ephemeris(
+    result: Dict[str, Any], source_prefix: str, *, require_duration: bool = True, require_depth: bool = True
+) -> bool:
+    """Return whether all transit fields form one usable candidate-owned record."""
+    field_sources = result.get("field_sources")
+    if not isinstance(field_sources, dict):
+        return False
+    required_fields = ("period_days", "epoch_btjd")
+    if require_duration:
+        required_fields += ("duration_days",)
+    if require_depth:
+        required_fields += ("depth_ppm",)
+    if not all(
         str(field_sources.get(field, "")).startswith(source_prefix)
-        for field in ("period_days", "epoch_btjd", "duration_days", "depth_ppm")
+        for field in required_fields
+    ):
+        return False
+    try:
+        period_days = float(result["period_days"])
+        epoch_btjd = float(result["epoch_btjd"])
+        duration_days = float(result["duration_days"]) if require_duration else None
+        depth_ppm = float(result["depth_ppm"]) if require_depth else None
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (
+        # ``epoch_btjd`` is an explicit BTJD coordinate. The candidate loader
+        # records BTJD_TDB for it; accept an omitted redundant label from an
+        # in-memory caller, but never accept a conflicting declared system.
+        result.get("time_system") in (None, BTJD_TIME_SYSTEM)
+        and all(
+            math.isfinite(value)
+            for value in (period_days, epoch_btjd, duration_days)
+            if value is not None
+        )
+        and period_days > 0.0
+        and (
+            duration_days is None
+            or (duration_days > 0.0 and duration_days < period_days)
+        )
+        and (depth_ppm is None or (math.isfinite(depth_ppm) and depth_ppm > 0.0))
+    )
+
+
+def is_complete_candidate_ephemeris(
+    ephemeris: Dict[str, Any], *, require_duration: bool = True, require_depth: bool = True
+) -> bool:
+    """Return whether an ephemeris is complete, physical, and candidate-derived.
+
+    This is the shared boundary for scientific callers.  A parsed configuration
+    can be candidate-owned yet partial; it must not be passed to inference until
+    period, epoch, the BTJD_TDB declaration, and field provenance are present
+    and mutually consistent. Duration and depth are required by default;
+    callers that do not consume one or both fields may set the corresponding
+    requirement to false.
+    """
+    if not isinstance(ephemeris, dict):
+        return False
+    source = ephemeris.get("source")
+    source_prefixes = {
+        "candidate-config",
+        "candidate-config-signal",
+        "candidate-data-bls",
+        "bls-search",
+    }
+    if not isinstance(source, str):
+        return False
+    source_prefix = source.removeprefix("partial-")
+    if source_prefix not in source_prefixes:
+        return False
+    return _has_complete_candidate_ephemeris(
+        ephemeris,
+        source_prefix,
+        require_duration=require_duration,
+        require_depth=require_depth,
     )
 
 
@@ -402,8 +457,8 @@ def load_transit_ephemeris(
 
     A validated per-signal configuration has precedence when requested.
     Otherwise, candidate configuration is considered before provenance-bound
-    BLS outputs. When neither source is readable, the result retains generic
-    demonstration values explicitly labelled synthetic-demo.
+    BLS outputs. When neither source is readable, every transit field remains
+    unavailable rather than receiving an in-band demonstration substitute.
 
     Args:
         workspace: Candidate workspace whose configuration and outputs are
@@ -418,8 +473,9 @@ def load_transit_ephemeris(
         ValueError: If signal suffix syntax is invalid.
 
     Notes:
-        Callers that require observed candidate evidence must reject
-        synthetic-demo or partial provenance explicitly.
+        Callers that require observed candidate evidence must require
+        :func:`is_complete_candidate_ephemeris` rather than treating a partial
+        configuration as scientifically usable.
     """
     signal = validate_signal_suffix(signal)
     result: Dict[str, Any] = {
@@ -950,16 +1006,16 @@ def _load_detrended_light_curve_table(
 
         try:
             # The processed artifact carries the exact canonical ephemeris used to
-            # protect its transit mask. A stale BLS-derived config temporarily
-            # resolves to synthetic-demo after the artifact is regenerated, before
-            # a fresh blind BLS search can rebind it. In that narrow case validate
-            # the immutable mask provenance against its recorded ephemeris. A
-            # readable current candidate ephemeris still has to match exactly.
+            # protect its transit mask. A stale BLS-derived config can become
+            # unavailable before a fresh blind BLS search rebinds it. In that
+            # narrow case validate the immutable mask provenance against its
+            # recorded ephemeris. A complete current candidate ephemeris still
+            # has to match exactly.
             mask_ephemeris = transit_mask_provenance.get("ephemeris")
             current_ephemeris = load_transit_ephemeris(workspace)
             ephemeris_for_validation = (
                 mask_ephemeris
-                if current_ephemeris.get("source") == "synthetic-demo"
+                if not is_complete_candidate_ephemeris(current_ephemeris)
                 else current_ephemeris
             )
             validate_transit_mask_provenance(

@@ -195,7 +195,7 @@ def test_transit_fit_signal_suffix(tmp_path):
         "radius_solar_err": 0.05,
         "source": "candidate-data",
     }
-    from exonym.transit_fit import _synthetic_transit_table
+    from tests.fixtures.synthetic_observations import _synthetic_transit_table
 
     synthetic_table = _synthetic_transit_table(ephemeris)
     with patch("exonym.transit_fit.load_light_curve_table", return_value=synthetic_table), patch(

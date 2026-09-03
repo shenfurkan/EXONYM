@@ -27,6 +27,7 @@ import importlib
 import importlib.metadata
 import io
 import json
+import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -35,6 +36,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.ndimage import median_filter
+from scipy.optimize import minimize
 
 from .remediation import numerical_npz_sha256
 from .workspace import CandidateWorkspace, validate_candidate_id
@@ -445,6 +447,14 @@ def _celerite_trend(
     When ``transit_mask`` is provided, masked cadences are excluded from
     the amplitude estimate and GP conditioning arrays.  The conditioned GP
     then predicts the trend at every cadence, including transit windows.
+
+    The Matern-3/2 hyperparameters are maximum-a-posteriori optimized using
+    the celerite marginal likelihood and analytic gradient following
+    Foreman-Mackey et al. (2017, AJ, 154, 220; arXiv:1703.09710;
+    DOI:10.3847/1538-3881/aa9332). The retained primary source is
+    ``literature/foreman_mackey_2017_celerite.pdf``. Bounds arise only from
+    the observed cadence, baseline, quoted uncertainty floor, and residual
+    flux span of the unmasked candidate data.
     """
     unmasked = np.ones(values.size, dtype=bool)
     if transit_mask is not None:
@@ -465,6 +475,7 @@ def _celerite_trend(
     baseline = float(np.median(values[unmasked]))
     residuals = values - baseline
     unmasked_residuals = residuals[unmasked]
+    unmasked_time = time[unmasked]
     amplitude = max(float(np.std(unmasked_residuals)), np.finfo(float).eps)
     unmasked_errors = _resolved_errors(
         values[unmasked], errors[unmasked] if errors is not None else None
@@ -474,10 +485,74 @@ def _celerite_trend(
             log_sigma=float(np.log(amplitude)), log_rho=float(np.log(window_days))
         )
         gp = celerite.GP(kernel, mean=0.0)
-        gp.compute(time[unmasked], unmasked_errors)
+        gp.compute(unmasked_time, unmasked_errors)
+        initial_parameters = np.asarray(gp.get_parameter_vector(), dtype=float)
+        parameter_names = tuple(gp.get_parameter_names())
+        if initial_parameters.ndim != 1 or initial_parameters.size != len(parameter_names):
+            raise RuntimeError("celerite GP parameter vector is invalid")
+
+        cadence_days = float(np.min(np.diff(np.sort(unmasked_time))))
+        baseline_days = float(np.max(unmasked_time) - np.min(unmasked_time))
+        log_rho_bounds = (math.log(cadence_days), math.log(baseline_days))
+        log_sigma_bounds = (
+            math.log(max(float(np.min(unmasked_errors)), np.finfo(float).eps)),
+            math.log(max(float(np.ptp(unmasked_residuals)), np.finfo(float).eps)),
+        )
+        if (
+            not all(math.isfinite(value) for value in (*log_rho_bounds, *log_sigma_bounds))
+            or log_rho_bounds[0] > log_rho_bounds[1]
+            or log_sigma_bounds[0] > log_sigma_bounds[1]
+        ):
+            raise RuntimeError("Celerite GP hyperparameter optimization failed to converge")
+
+        bounds = []
+        for parameter_name in parameter_names:
+            if parameter_name.endswith("log_sigma"):
+                bounds.append(log_sigma_bounds)
+            elif parameter_name.endswith("log_rho"):
+                bounds.append(log_rho_bounds)
+            else:
+                raise RuntimeError("Celerite GP exposes unsupported Matern32 hyperparameters")
+
+        def negative_log_likelihood(parameters: np.ndarray) -> Tuple[float, np.ndarray]:
+            gp.set_parameter_vector(parameters)
+            gp.compute(unmasked_time, unmasked_errors)
+            log_likelihood = float(gp.log_likelihood(unmasked_residuals))
+            gradient_result = gp.grad_log_likelihood(unmasked_residuals)
+            gradient = (
+                gradient_result[1]
+                if isinstance(gradient_result, tuple)
+                else gradient_result
+            )
+            gradient = np.asarray(gradient, dtype=float)
+            if (
+                not math.isfinite(log_likelihood)
+                or gradient.shape != parameters.shape
+                or not np.all(np.isfinite(gradient))
+            ):
+                return math.inf, np.full(parameters.shape, math.nan)
+            return -log_likelihood, -gradient
+
+        solution = minimize(
+            negative_log_likelihood,
+            initial_parameters,
+            method="L-BFGS-B",
+            jac=True,
+            bounds=bounds,
+        )
+        if (
+            not solution.success
+            or not np.all(np.isfinite(solution.x))
+            or not math.isfinite(float(solution.fun))
+        ):
+            raise RuntimeError("Celerite GP hyperparameter optimization failed to converge")
+        gp.set_parameter_vector(solution.x)
+        gp.compute(unmasked_time, unmasked_errors)
         prediction = np.asarray(
             gp.predict(unmasked_residuals, time, return_cov=False), dtype=float
         )
+    except RuntimeError:
+        raise
     except Exception as exc:
         raise RuntimeError("Celerite detrending failed") from exc
     return baseline + prediction

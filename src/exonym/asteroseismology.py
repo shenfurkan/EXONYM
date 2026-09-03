@@ -44,6 +44,7 @@ from .constants import (
     SECONDS_PER_DAY,
 )
 from .inputs import (
+    is_complete_candidate_ephemeris,
     load_light_curve_table,
     load_stellar_parameters,
     load_transit_ephemeris,
@@ -704,15 +705,31 @@ def seismic_uncertainty_summary(
             "reason": str(exc),
         }
     rng = np.random.default_rng(seed=41)
-    numax_draws = rng.uniform(numax_lower, numax_upper, draws)
-    dnu_draws = rng.uniform(dnu_lower, dnu_upper, draws)
+    numax_err = envelope.get("numax_candidate_err_uhz")
+    dnu_err = envelope.get("dnu_candidate_err_uhz")
+    if (
+        numax_err is not None
+        and dnu_err is not None
+        and math.isfinite(float(numax_err))
+        and math.isfinite(float(dnu_err))
+        and float(numax_err) > 0
+        and float(dnu_err) > 0
+    ):
+        numax_draws = np.maximum(rng.normal(numax, float(numax_err), draws), np.finfo(float).eps)
+        dnu_draws = np.maximum(rng.normal(dnu, float(dnu_err), draws), np.finfo(float).eps)
+        distribution_name = "gaussian-observational-uncertainty"
+    else:
+        numax_draws = rng.uniform(numax_lower, numax_upper, draws)
+        dnu_draws = rng.uniform(dnu_lower, dnu_upper, draws)
+        distribution_name = "uniform-within-one-Rayleigh-resolution-element"
+
     dnu_corrected_draws = dnu_draws * correction_factor
     if not np.all(np.isfinite(dnu_corrected_draws)) or not np.all(dnu_corrected_draws > 0.0):
         return {
             "status": "unavailable-invalid-dnu-correction-factor",
             "reason": "dnu_correction_factor produces invalid corrected Delta-nu draws.",
         }
-    teff_draws = np.clip(rng.normal(teff, teff_error, draws), np.finfo(float).eps, None)
+    teff_draws = np.maximum(rng.normal(teff, teff_error, draws), np.finfo(float).eps)
     numax_ratio = numax_draws / NUMAX_SUN_UHZ
     dnu_ratio = dnu_corrected_draws / DNU_SUN_UHZ
     teff_ratio = teff_draws / TEFF_SUN_K
@@ -732,7 +749,7 @@ def seismic_uncertainty_summary(
         "mass_solar": _percentile_summary(mass_draws),
         "radius_solar": _percentile_summary(radius_draws),
         "frequency_resolution_sampling": {
-            "distribution": "uniform-within-one-Rayleigh-resolution-element",
+            "distribution": distribution_name,
             "rayleigh_uhz": rayleigh,
             "numax_interval_uhz": [numax_lower, numax_upper],
             "dnu_interval_uhz": [dnu_lower, dnu_upper],
@@ -1176,36 +1193,6 @@ def _record_tess_atl_adapter(workspace: CandidateWorkspace) -> Dict[str, Any]:
     return {"status": "unavailable", "manifest_path": manifest_path}
 
 
-def _synthetic_oscillation_table() -> Dict[str, np.ndarray]:
-    """Deterministic demonstration light curve with an injected p-mode comb.
-
-    The comb carries a Gaussian amplitude envelope so the whitened PSD
-    envelope peaks near the injected nu_max.
-    """
-    rng = np.random.default_rng(seed=23)
-    numax_demo_uhz = 250.0
-    dnu_demo_uhz = 40.0
-    envelope_sigma_uhz = 2.5 * dnu_demo_uhz
-    cadence_days = 120.0 / SECONDS_PER_DAY
-    time = np.arange(0.0, 27.0, cadence_days)
-    flux = np.ones_like(time)
-    for harmonic in range(-4, 5):
-        amplitude = 120e-6 * math.exp(
-            -((harmonic * dnu_demo_uhz) ** 2) / (2.0 * envelope_sigma_uhz**2)
-        )
-        frequency_cpd = (numax_demo_uhz + harmonic * dnu_demo_uhz) * CPD_PER_UHZ
-        flux = flux + amplitude * np.sin(2.0 * np.pi * frequency_cpd * time)
-    flux = flux + rng.normal(0.0, 30e-6, size=time.shape)
-    flux_err = np.full_like(flux, 30e-6)
-    sector_values = np.ones(time.size, dtype=int)
-    return {
-        "time": time,
-        "flux": flux,
-        "flux_err": flux_err,
-        "sector": sector_values,
-    }
-
-
 def run_asteroseismology(
     workspace: CandidateWorkspace,
     numax_min_uhz: float = 100.0,
@@ -1256,11 +1243,7 @@ def run_asteroseismology(
     cadence_seconds = 120.0
     if time.size > 1:
         cadence_seconds = float(np.median(np.diff(np.sort(time)))) * SECONDS_PER_DAY
-    required_fields = ("period_days", "epoch_btjd", "duration_days")
-    can_mask_transits = ephemeris.get("source") != "synthetic-demo" and all(
-        ephemeris.get("field_sources", {}).get(field) != "synthetic-demo"
-        for field in required_fields
-    )
+    can_mask_transits = is_complete_candidate_ephemeris(ephemeris)
     if can_mask_transits:
         phase_days = phase_hours(time, ephemeris["period_days"], ephemeris["epoch_btjd"]) / 24.0
         transit_mask = np.abs(phase_days) >= 0.75 * ephemeris["duration_days"]

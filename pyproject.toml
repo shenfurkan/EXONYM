@@ -15,6 +15,7 @@ dependencies = [
   "matplotlib==3.9.4",
   "astropy==6.0.1",
   "astroquery==0.4.11",
+  "autograd==1.9.1",
   "lightkurve==2.6.0",
   "batman-package==2.5.3",
   "celerite==0.4.3",

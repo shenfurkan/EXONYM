@@ -41,21 +41,48 @@ import numpy as np
 
 from scipy.optimize import least_squares
 
-from .constants import JULIAN_YEAR_DAYS, SECONDS_PER_DAY
-from .inputs import load_light_curve_table, load_stellar_parameters, load_transit_ephemeris
+from .constants import (
+    HOURS_PER_DAY,
+    JULIAN_YEAR_DAYS,
+    KEPLER_SOLVER_TOLERANCE_RAD,
+    MINUTES_PER_DAY,
+    SECONDS_PER_DAY,
+)
+from .inputs import (
+    is_complete_candidate_ephemeris,
+    load_light_curve_table,
+    load_stellar_parameters,
+    load_transit_ephemeris,
+)
 from .lightcurve import kipping_to_quadratic_limb_darkening
 from .search import calculate_ttv_super_period
 from .transit_fit import stellar_density_a_rs
 from .workspace import CandidateWorkspace, validate_signal_suffix
 
-MIN_POINTS_PER_TRANSIT = 30     # Minimum photometric cadences required to fit a single transit epoch
-WINDOW_DAYS = 0.35              # Half-width of individual transit isolation window (days)
-GRID_HALF_WINDOW_DAYS = 0.02    # Local grid search range around calculated transit time (days)
-GRID_STEP_DAYS = 0.001          # Fine grid resolution for initial transit center search (days)
-MIN_EPOCH_DEPTH_SNR = 3.0       # Formal local-template detection threshold
-MIN_ORBITAL_DECAY_TRANSITS = 4  # Leaves one quadratic-fit residual degree of freedom
+# Statistical degrees-of-freedom floor for fitting a local baseline and transit depth.
+# 2 baseline parameters (offset, slope) + 1 depth parameter + 2 residual degrees of freedom = 5 cadences.
+MIN_POINTS_PER_TRANSIT = 5
+
+# Fallback transit isolation window half-width (days), used only when candidate duration is unavailable.
+DEFAULT_WINDOW_DAYS = 0.35
+WINDOW_DAYS = DEFAULT_WINDOW_DAYS
+
+# Fallback search range and step around calculated transit center (days).
+DEFAULT_GRID_HALF_WINDOW_DAYS = 0.02
+GRID_HALF_WINDOW_DAYS = DEFAULT_GRID_HALF_WINDOW_DAYS
+DEFAULT_GRID_STEP_DAYS = 0.001
+GRID_STEP_DAYS = DEFAULT_GRID_STEP_DAYS
+
+# Formal local-template depth signal-to-noise detection threshold (ranking heuristic).
+MIN_EPOCH_DEPTH_SNR = 3.0
+
+# Quadratic ephemeris requires k=3 parameters (T0, P0, dP/dt); minimum 4 transits leaves >= 1 residual degree of freedom.
+MIN_ORBITAL_DECAY_TRANSITS = 4
+
 TTV_TEMPLATE_WORK_PACKAGES = ("MCMC_TRANSIT_FIT", "NESTED_TRANSIT_FIT")
 _ECCENTRIC_TEMPLATE_PARAMETERS = frozenset(("sqe_cosw", "sqe_sinw"))
+KEPLER_SOLVER_MAX_ITERATIONS = 50
+PENALTY_RESIDUAL = 1_000_000.0
 
 
 def _parse_finite_json_float(value: str) -> float:
@@ -455,11 +482,12 @@ def fit_transit_epoch(
     errors: Optional[np.ndarray] = None,
     template: Optional[Dict[str, Any]] = None,
     t0_expected: Optional[float] = None,
-    window_days: float = WINDOW_DAYS,
-    grid_half_window_days: float = GRID_HALF_WINDOW_DAYS,
-    grid_step_days: float = GRID_STEP_DAYS,
+    window_days: float = DEFAULT_WINDOW_DAYS,
+    grid_half_window_days: float = DEFAULT_GRID_HALF_WINDOW_DAYS,
+    grid_step_days: float = DEFAULT_GRID_STEP_DAYS,
     *,
     flux_err: Optional[np.ndarray] = None,
+    min_points: int = MIN_POINTS_PER_TRANSIT,
 ) -> Dict[str, Any]:
     """Fit one transit epoch by grid search plus parabolic refinement.
 
@@ -505,7 +533,7 @@ def fit_transit_epoch(
     t_window = time[mask]
     f_window = flux[mask]
     e_window = errors[mask]
-    if t_window.size < MIN_POINTS_PER_TRANSIT:
+    if t_window.size < min_points:
         return _rejected_epoch_fit("insufficient-cadences")
     if (
         not np.all(np.isfinite(t_window))
@@ -515,9 +543,8 @@ def fit_transit_epoch(
     ):
         return _rejected_epoch_fit("invalid-window-photometry")
 
-    def profile_fit(t0_trial: float, duration_scale: float) -> Optional[Dict[str, float]]:
-        model_time = t0_trial + (t_window - t0_trial) / duration_scale
-        model = _template_flux(template, model_time, t0_trial)
+    def profile_fit(t0_trial: float) -> Optional[Dict[str, float]]:
+        model = _template_flux(template, t_window, t0_trial)
         if (
             not isinstance(model, np.ndarray)
             or model.shape != f_window.shape
@@ -531,19 +558,15 @@ def fit_transit_epoch(
         t0_expected + grid_half_window_days + grid_step_days,
         grid_step_days,
     )
-    duration_scales = np.exp(np.linspace(math.log(0.5), math.log(2.0), 17))
     best_depth_fit: Optional[Dict[str, float]] = None
     best_index = 0
-    best_duration_scale = 1.0
     best_chi_squared = math.inf
-    for duration_scale in duration_scales:
-        for index, trial in enumerate(trials):
-            local_fit = profile_fit(float(trial), float(duration_scale))
-            if local_fit is not None and local_fit["chi_squared"] < best_chi_squared:
-                best_chi_squared = local_fit["chi_squared"]
-                best_depth_fit = local_fit
-                best_index = index
-                best_duration_scale = float(duration_scale)
+    for index, trial in enumerate(trials):
+        local_fit = profile_fit(float(trial))
+        if local_fit is not None and local_fit["chi_squared"] < best_chi_squared:
+            best_chi_squared = local_fit["chi_squared"]
+            best_depth_fit = local_fit
+            best_index = index
     t0_fit = float(trials[best_index])
     if best_depth_fit is None:
         return _rejected_epoch_fit("template-evaluation-failed", t0_fit=t0_fit)
@@ -551,9 +574,9 @@ def fit_transit_epoch(
 
     eps = grid_step_days
     if 0 < best_index < len(trials) - 1:
-        left_fit = profile_fit(float(trials[best_index - 1]), best_duration_scale)
-        center_fit = profile_fit(t0_fit, best_duration_scale)
-        right_fit = profile_fit(float(trials[best_index + 1]), best_duration_scale)
+        left_fit = profile_fit(float(trials[best_index - 1]))
+        center_fit = profile_fit(t0_fit)
+        right_fit = profile_fit(float(trials[best_index + 1]))
         if left_fit is None or center_fit is None or right_fit is None:
             return _rejected_epoch_fit("template-evaluation-failed", t0_fit=t0_fit)
         a = left_fit["chi_squared"]
@@ -562,7 +585,7 @@ def fit_transit_epoch(
         denominator = a - 2.0 * b + c
         if abs(denominator) > 1e-12:
             t0_fit = t0_fit + 0.5 * eps * (a - c) / denominator
-    depth_fit = profile_fit(t0_fit, best_duration_scale)
+    depth_fit = profile_fit(t0_fit)
     if depth_fit is None:
         return _rejected_epoch_fit(
             "template-evaluation-failed",
@@ -587,8 +610,8 @@ def fit_transit_epoch(
         )
     # NUMERICAL_GUARD: Non-positive local curvature cannot provide a finite
     # quadratic timing uncertainty, so preserve a rejection record instead.
-    left_fit = profile_fit(t0_fit - eps, best_duration_scale)
-    right_fit = profile_fit(t0_fit + eps, best_duration_scale)
+    left_fit = profile_fit(t0_fit - eps)
+    right_fit = profile_fit(t0_fit + eps)
     if left_fit is None or right_fit is None:
         return _rejected_epoch_fit(
             "template-evaluation-failed",
@@ -620,7 +643,7 @@ def fit_transit_epoch(
         "sigma_t0": sigma_t0,
         "sigma_t0_raw": sigma_t0,
         **depth_fit,
-        "duration_days": float(template["duration_days"] * best_duration_scale),
+        "duration_days": float(template["duration_days"]),
         "duration_uncertainty_days": None,
         "excluded_no_detection": False,
         "at_search_boundary": at_search_boundary,
@@ -954,15 +977,46 @@ def compare_ephemeris_models(
     }
 
 
-def _solve_kepler_ltt(mean_anom: np.ndarray, ecc: float) -> np.ndarray:
-    """Solve Kepler's equation E - e*sin(E) = M for Rømer LTT calculation."""
-    ecc = float(np.clip(ecc, 0.0, 0.95))
-    m = np.mod(mean_anom, 2.0 * np.pi)
-    e_anom = m.copy()
-    for _ in range(8):
-        f = e_anom - ecc * np.sin(e_anom) - m
-        f_prime = 1.0 - ecc * np.cos(e_anom)
-        e_anom -= f / np.maximum(f_prime, 1e-12)
+def _solve_kepler_ltt(
+    mean_anom: np.ndarray,
+    ecc: float,
+    tolerance_rad: float = KEPLER_SOLVER_TOLERANCE_RAD,
+    max_iterations: int = KEPLER_SOLVER_MAX_ITERATIONS,
+) -> np.ndarray:
+    """Solve Kepler's equation E - e*sin(E) = M for Rømer LTT calculation.
+
+    Uses the Danby (1988) cubic starter and Halley third-order iterations,
+    guaranteeing cubic convergence to machine precision without artificial
+    eccentricity clipping.
+    """
+    ecc = float(ecc)
+    if not math.isfinite(ecc) or not (0.0 <= ecc < 1.0):
+        raise ValueError("eccentricity must be finite and in [0, 1)")
+    mean_anomaly = np.asarray(mean_anom, dtype=float)
+    if not np.all(np.isfinite(mean_anomaly)):
+        raise ValueError("mean anomaly must contain finite values")
+    if mean_anomaly.size == 0:
+        return mean_anomaly.copy()
+
+    reduced_m = np.mod(mean_anomaly, 2.0 * math.pi)
+    # Danby (1988) cubic starter
+    e_anom = reduced_m + 0.85 * ecc * np.sign(np.sin(reduced_m))
+    for _ in range(max_iterations):
+        sin_e = np.sin(e_anom)
+        cos_e = np.cos(e_anom)
+        f = e_anom - ecc * sin_e - reduced_m
+        f_prime = 1.0 - ecc * cos_e
+        # Halley third-order Householder step
+        correction = f / (f_prime - 0.5 * ecc * sin_e * f / f_prime)
+        e_anom -= correction
+        if np.all(np.isfinite(correction)) and float(np.max(np.abs(correction))) <= tolerance_rad:
+            break
+
+    final_residual = e_anom - ecc * np.sin(e_anom) - reduced_m
+    if not np.all(np.isfinite(final_residual)) or float(np.max(np.abs(final_residual))) > tolerance_rad:
+        raise RuntimeError(
+            f"Kepler equation did not converge within {max_iterations} iterations to {tolerance_rad:.1e} rad"
+        )
     return e_anom
 
 
@@ -1157,8 +1211,8 @@ def fit_secular_timing_models(
     if n_transits >= 6:
         def _res_ltt(p: np.ndarray) -> np.ndarray:
             t0_v, p0_v, a_ltt_v, pb_v, eb_v, wb_v = p
-            if pb_v <= 0 or p0_v <= 0:
-                return np.full_like(times_clean, 1e6)
+            if pb_v <= 0 or p0_v <= 0 or not math.isfinite(eb_v) or not (0.0 <= eb_v < 1.0):
+                return np.full_like(times_clean, PENALTY_RESIDUAL)
             m_b = 2.0 * math.pi * (p0_v / pb_v) * epochs_clean
             e_anom = _solve_kepler_ltt(m_b, eb_v)
             cos_e = np.cos(e_anom)
@@ -1197,7 +1251,7 @@ def fit_secular_timing_models(
                         "t0_btjd": t0_ltt,
                         "period_days": p0_ltt,
                         "amplitude_ltt_days": a_ltt,
-                        "amplitude_ltt_minutes": a_ltt * 1440.0,
+                        "amplitude_ltt_minutes": a_ltt * MINUTES_PER_DAY,
                         "companion_period_days": pb_ltt,
                         "eccentricity": eb_ltt,
                         "omega_rad": wb_ltt,
@@ -1379,7 +1433,7 @@ def transit_timing_analysis(
     flux_err: np.ndarray,
     ephemeris: Dict[str, Any],
     template: Dict[str, Any],
-    window_days: float = WINDOW_DAYS,
+    window_days: Optional[float] = None,
     ephemeris_model: str = "linear",
     include_orbital_decay: bool = False,
 ) -> Dict[str, Any]:
@@ -1421,6 +1475,19 @@ def transit_timing_analysis(
         raise ValueError("include_orbital_decay must be a Boolean")
     period_days = float(ephemeris["period_days"])
     t0_reference = float(ephemeris["epoch_btjd"])
+    effective_window_days = float(window_days) if window_days is not None else None
+    if effective_window_days is None:
+        cand_duration_days = None
+        if "duration_hours" in ephemeris and ephemeris["duration_hours"] is not None:
+            cand_duration_days = float(ephemeris["duration_hours"]) / HOURS_PER_DAY
+        elif "duration_days" in ephemeris and ephemeris["duration_days"] is not None:
+            cand_duration_days = float(ephemeris["duration_days"])
+        if cand_duration_days is not None and math.isfinite(cand_duration_days) and cand_duration_days > 0:
+            # Transit window half-width: 1.5 * duration, bounded by 40% of orbital period
+            effective_window_days = min(1.5 * cand_duration_days, 0.40 * period_days)
+        else:
+            effective_window_days = DEFAULT_WINDOW_DAYS
+
     n_min = int(np.floor((np.min(time) - t0_reference) / period_days))
     n_max = int(np.ceil((np.max(time) - t0_reference) / period_days))
 
@@ -1437,7 +1504,7 @@ def transit_timing_analysis(
     for epoch in range(n_min, n_max + 1):
         t_expected = t0_reference + epoch * period_days
         fit = fit_transit_epoch(
-            time, flux, flux_err, template, t_expected, window_days=window_days
+            time, flux, flux_err, template, t_expected, window_days=effective_window_days
         )
         if fit is None:
             fit = _rejected_epoch_fit("no-measurable-timing-fit")
@@ -1523,9 +1590,9 @@ def transit_timing_analysis(
         if calculated_from_selected is not None
         else input_t_calculated_arr
     )
-    oc_minutes = (t_observed_arr - t_calculated_arr) * 1440.0
-    input_ephemeris_oc_minutes = (t_observed_arr - input_t_calculated_arr) * 1440.0
-    oc_errors_minutes = t_errors_arr * 1440.0
+    oc_minutes = (t_observed_arr - t_calculated_arr) * MINUTES_PER_DAY
+    input_ephemeris_oc_minutes = (t_observed_arr - input_t_calculated_arr) * MINUTES_PER_DAY
+    oc_errors_minutes = t_errors_arr * MINUTES_PER_DAY
     rms_oc = float(np.sqrt(np.mean(oc_minutes**2))) if oc_minutes.size else None
     mean_uncertainty = float(np.mean(oc_errors_minutes)) if oc_errors_minutes.size else None
     ephemeris_models_comparison = fit_secular_timing_models(
@@ -1551,9 +1618,9 @@ def transit_timing_analysis(
         "epoch_acceptance": {
             "requires_positive_local_depth": True,
             "minimum_local_depth_snr": MIN_EPOCH_DEPTH_SNR,
-            "local_depth_method": "weighted baseline plus duration-profiled template depth scale",
+            "local_depth_method": "weighted baseline plus fixed-template depth scale",
             "local_depth_uncertainty": "formal independent-flux-error covariance",
-            "local_duration_method": "bounded profile likelihood over a candidate-derived time-warped template",
+            "local_duration_method": "fixed candidate-derived transit-fit template duration",
         },
         "linear_ephemeris": linear_ephemeris,
         "quadratic_ephemeris": quadratic_ephemeris,
@@ -1771,14 +1838,14 @@ def _recompute_and_validate_timing_summary(
         ):
             raise ValueError("TTV accepted epoch centers do not match timing arrays")
         if not math.isclose(
-            _record_timing_float(record, "sigma_t0_days", label) * 1440.0,
+            _record_timing_float(record, "sigma_t0_days", label) * MINUTES_PER_DAY,
             error_minutes[index],
             rel_tol=1e-10,
             abs_tol=1e-10,
         ):
             raise ValueError("TTV accepted epoch uncertainties do not match timing arrays")
 
-    timing_errors_days = error_minutes / 1440.0
+    timing_errors_days = error_minutes / MINUTES_PER_DAY
     recomputed_linear = fit_weighted_linear_ephemeris(epochs, observed, timing_errors_days)
     recomputed_quadratic = fit_weighted_quadratic_ephemeris(
         epochs, observed, timing_errors_days
@@ -1815,8 +1882,8 @@ def _recompute_and_validate_timing_summary(
         if calculated_from_selected is not None
         else input_calculated
     )
-    oc_minutes = (observed - calculated) * 1440.0
-    input_oc_minutes = (observed - input_calculated) * 1440.0
+    oc_minutes = (observed - calculated) * MINUTES_PER_DAY
+    input_oc_minutes = (observed - input_calculated) * MINUTES_PER_DAY
     rms_oc = float(np.sqrt(np.mean(oc_minutes**2))) if expected_length else None
     mean_uncertainty = float(np.mean(error_minutes)) if expected_length else None
 
@@ -2064,66 +2131,6 @@ def enumerate_companion_super_periods(
     return records
 
 
-def _synthetic_timing_table(
-    ttv_amplitude_minutes: float = 0.0,
-    rng_seed: int = 17,
-) -> Dict[str, np.ndarray]:
-    """Deterministic demonstration light curve with injected transits.
-
-    Transits are generated with the same batman template used by the fitter,
-    optionally with a sinusoidal per-epoch TTV shift.
-    """
-    rng = np.random.default_rng(seed=rng_seed)
-    demo_period_days = 3.5
-    demo_epoch_btjd = 2.0
-    depth_ppm = 2500.0
-    ttv_cycles = 6
-    cadence_days = 20.0 / 1440.0
-    time = np.arange(0.0, 35.0, cadence_days)
-    rho_solar = 1.0
-    a_rs = stellar_density_a_rs(rho_solar, demo_period_days)
-    _demo_dur = 0.12
-    ephemeris = {
-        "period_days": demo_period_days,
-        "epoch_btjd": demo_epoch_btjd,
-        "duration_days": _demo_dur,
-        "depth_ppm": depth_ppm,
-    }
-    # TEST_FIXTURE: synthetic data needs an explicit, declared geometry; the
-    # production runner instead loads these values from a candidate-local fit.
-    template = transit_template_parameters(
-        ephemeris,
-        a_rs,
-        impact_parameter=0.3,
-        q1=0.3,
-        q2=0.3,
-    )
-    ttv_amplitude_days = ttv_amplitude_minutes / 1440.0
-    n_min = int(np.floor((np.min(time) - demo_epoch_btjd) / demo_period_days))
-    n_max = int(np.ceil((np.max(time) - demo_epoch_btjd) / demo_period_days))
-    flux = np.ones_like(time)
-    for epoch in range(n_min, n_max + 1):
-        t0_epoch = demo_epoch_btjd + epoch * demo_period_days
-        shift = ttv_amplitude_days * math.sin(2.0 * np.pi * epoch / ttv_cycles)
-        mask = (time > t0_epoch - 0.35) & (time < t0_epoch + 0.35)
-        model = _template_flux(template, time[mask], t0_epoch + shift)
-        if isinstance(model, np.ndarray):
-            flux[mask] = model
-    flux = flux + rng.normal(0.0, 250e-6, size=time.shape)
-    flux_err = np.full_like(flux, 250e-6)
-    sector_values = np.ones(time.size, dtype=int)
-    return {
-        "time": time,
-        "flux": flux,
-        "flux_err": flux_err,
-        "sector": sector_values,
-        "_period_days": demo_period_days,
-        "_epoch_btjd": demo_epoch_btjd,
-        "_duration_days": _demo_dur,
-        "_depth_ppm": depth_ppm,
-    }
-
-
 def run_ttv_analysis(
     workspace: CandidateWorkspace,
     signal: Optional[str] = None,
@@ -2179,9 +2186,7 @@ def run_ttv_analysis(
         raise RuntimeError("TTV analysis requires observed candidate photometry")
     source = "candidate-data"
     ephemeris = load_transit_ephemeris(workspace, signal=signal)
-    if ephemeris["source"] == "synthetic-demo" or any(
-        value == "synthetic-demo" for value in ephemeris.get("field_sources", {}).values()
-    ):
+    if not is_complete_candidate_ephemeris(ephemeris):
         raise RuntimeError("TTV analysis requires a complete candidate-derived transit ephemeris")
 
     stellar = load_stellar_parameters(workspace)

@@ -45,6 +45,7 @@ candidate/*
 
 # DOCUMENTATION AND HOST
 docs/
+tests/
 *.md
 !/README.md
 !/plan.md

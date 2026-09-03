@@ -12,6 +12,7 @@ astropy==6.0.1
 astropy-iers-data==0.2026.3.16.0.53.33
 astroquery==0.4.11
 async-timeout==5.0.1
+autograd==1.9.1
 attrs==26.1.0
 backports.tarfile==1.2.0
 bandit==1.8.6

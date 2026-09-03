@@ -10,6 +10,7 @@ import inspect
 
 import numpy as np
 import pytest
+from scipy.special import ndtr
 
 from exonym.vetting.trex.constants import Msun, Rsun, Rearth, G, au, pi
 from exonym.vetting.trex._numerics import _log_mean_exp, _normalize_probabilities
@@ -291,9 +292,63 @@ def test_eb_model_evaluates_secondary_at_observed_times(monkeypatch):
     assert calls[1][1] == pytest.approx(phase * 5.0)
 
 
+def test_eb_model_preserves_an_exact_equal_radius_ratio():
+    """Batman must receive the physical equal-radius EB geometry unchanged."""
+    pytest.importorskip("batman")
+
+    flux, _ = simulate_EB(
+        np.array([-0.01, 0.0, 0.01]), 1.0, 0.25, 5.0, 89.0, 1.0e12,
+        1.0, 0.4, 0.2, 0.01,
+    )
+
+    assert np.all(np.isfinite(flux))
+
+
 def test_lnprior_bound_finite():
     lnp = lnprior_bound(1.0, np.array([1.0]), np.array([0.1, 2.0]), np.array([0.0, 3.0]), 5.0)
     assert np.all(np.isfinite(lnp))
+
+
+@pytest.mark.parametrize("primary_mass_solar", [0.075, 0.15, 0.30, 0.60])
+def test_lnprior_bound_uses_winters_m_dwarf_separation_cdf(primary_mass_solar):
+    """Winters et al. (2019) fixes the M-dwarf normalization and log-a CDF."""
+    parallax_mas = 10.0
+    separation_arcsec = np.array([2.0, 2.0])
+    maximum_separation_au = separation_arcsec[0] * (1000.0 / parallax_mas)
+    expected_probability = 0.268 * ndtr(
+        (np.log10(maximum_separation_au) - np.log10(20.0)) / 1.16
+    )
+
+    log_prior = lnprior_bound(
+        primary_mass_solar, np.array([1.0]), separation_arcsec,
+        np.array([1.0, 2.0]), parallax_mas,
+    )
+
+    np.testing.assert_allclose(np.exp(log_prior), expected_probability)
+
+
+def test_lnprior_bound_m_dwarf_prior_increases_with_searchable_separation():
+    """The retained Winters Gaussian CDF must be monotone in physical separation."""
+    log_prior = lnprior_bound(
+        0.30, np.array([1.0, 2.0, 3.0]), np.array([0.1, 1.0, 10.0]),
+        np.array([1.0, 2.0, 3.0]), 10.0,
+    )
+
+    assert np.all(np.diff(np.exp(log_prior)) > 0.0)
+
+
+def test_lnprior_bound_rejects_substellar_primary_below_winters_domain():
+    with pytest.raises(ValueError, match=r"Winters et al. \(2019\)"):
+        lnprior_bound(0.07, np.array([1.0]), np.array([0.1, 2.0]), np.array([0.0, 3.0]), 5.0)
+
+
+@pytest.mark.parametrize("parallax_mas", [0.0, -1.0, np.nan, np.inf])
+def test_lnprior_bound_rejects_unusable_parallax(parallax_mas):
+    with pytest.raises(ValueError, match="finite positive parallax"):
+        lnprior_bound(
+            1.0, np.array([1.0]), np.array([0.1, 2.0]), np.array([0.0, 3.0]),
+            parallax_mas,
+        )
 
 
 def test_lnprior_background_finite():

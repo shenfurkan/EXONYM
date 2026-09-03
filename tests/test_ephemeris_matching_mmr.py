@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -84,12 +85,12 @@ def _write_mock_snapshot(
 @pytest.mark.parametrize(
     "ratio,expected_factor",
     [
-        (1.5, 1.5),         # 3:2 MMR
-        (4.0 / 3.0, 1.3333), # 4:3 MMR
-        (1.25, 1.25),       # 5:4 MMR
-        (2.0 / 3.0, 0.6667), # 2:3 MMR
-        (0.75, 0.75),       # 3:4 MMR
-        (0.8, 0.8),         # 4:5 MMR
+        (float(Fraction(3, 2)), float(Fraction(3, 2))),  # 3:2 MMR
+        (float(Fraction(4, 3)), float(Fraction(4, 3))),  # 4:3 MMR
+        (float(Fraction(5, 4)), float(Fraction(5, 4))),  # 5:4 MMR
+        (float(Fraction(2, 3)), float(Fraction(2, 3))),  # 2:3 MMR
+        (float(Fraction(3, 4)), float(Fraction(3, 4))),  # 3:4 MMR
+        (float(Fraction(4, 5)), float(Fraction(4, 5))),  # 4:5 MMR
     ],
 )
 def test_first_order_mmr_detection(tmp_path, ratio, expected_factor):

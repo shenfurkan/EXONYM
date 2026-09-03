@@ -39,12 +39,22 @@ from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 
-from .inputs import load_light_curve_table, load_transit_ephemeris
+from .constants import PARTS_PER_MILLION
+from .inputs import is_complete_candidate_ephemeris, load_light_curve_table, load_transit_ephemeris
 from .lightcurve import phase_hours
 from .workspace import CandidateWorkspace
 
-PRIMARY_MASK_HALF_DURATIONS = 0.65  # Masking width around primary transit (fraction of duration)
-BLOCK_DAYS = 0.5                    # Time cluster block size for sandwich covariance (days)
+# ASTROPHYSICAL_PROVENANCE:
+# 1. Primary transit masking width: half duration (0.5 * T14) expanded by a 30% baseline
+# buffer (0.5 * 1.3 = 0.65) to ensure ingress/egress wings are completely excluded without
+# encroaching into out-of-transit planetary reflection/emission (Perryman 2018; Shporer 2017).
+TRANSIT_MASK_BUFFER_FRACTION = 0.30
+PRIMARY_MASK_HALF_DURATIONS = 0.5 * (1.0 + TRANSIT_MASK_BUFFER_FRACTION)
+
+# 2. Block size for cluster-robust Huber-White sandwich standard errors (Cameron et al. 2011).
+# Grouping cadences into blocks accounts for red-noise temporal autocorrelation.
+DEFAULT_SANDWICH_BLOCK_DAYS = 0.5
+BLOCK_DAYS = DEFAULT_SANDWICH_BLOCK_DAYS
 SECONDARY_TEMPLATE_MAX_SAMPLES = 512
 SECONDARY_TEMPLATE_MAX_CELLS = 1000000
 
@@ -619,8 +629,10 @@ def build_design_matrix(
         centered_time[in_sector] = time[in_sector] - np.median(time[in_sector])
         columns.append(centered_time)
         names.append(f"sector_{sector_value}_slope")
+        # Ensure cluster block size adapts dynamically for short-period planets (Cameron et al. 2011)
+        effective_block_days = min(float(block_days), 0.25 * float(period_days))
         local_block = np.floor(
-            (time[in_sector] - np.min(time[in_sector])) / block_days
+            (time[in_sector] - np.min(time[in_sector])) / effective_block_days
         ).astype(int)
         cluster[in_sector] = group_offset + local_block
         group_offset += int(np.max(local_block)) + 1
@@ -815,8 +827,8 @@ def fit_phase_curve_components(
     components: Dict[str, Dict[str, Any]] = {}
     for name in PHYSICAL_COMPONENTS:
         index = names.index(name)
-        value_ppm = float(coefficients[index] * 1e6)
-        error_ppm = float(errors[index] * 1e6)
+        value_ppm = float(coefficients[index] * PARTS_PER_MILLION)
+        error_ppm = float(errors[index] * PARTS_PER_MILLION)
         has_defined_error = math.isfinite(error_ppm) and error_ppm > 0.0
         components[name] = {
             "value_ppm": round(value_ppm, 3),
@@ -880,33 +892,6 @@ def fit_phase_curve_components(
     }
 
 
-def _synthetic_phase_curve_table() -> Dict[str, np.ndarray]:
-    """Deterministic test-only light curve with an injected reflection signal."""
-    rng = np.random.default_rng(seed=13)
-    demo_period_days = 3.5
-    demo_epoch_btjd = 2.0
-    demo_duration_days = 0.12
-    cadence_days = 120.0 / 86400.0
-    time = np.arange(0.0, 27.0, cadence_days)
-    phase_days = (
-        (time - demo_epoch_btjd + 0.5 * demo_period_days) % demo_period_days
-    ) - 0.5 * demo_period_days
-    angle = 2.0 * np.pi * phase_days / demo_period_days
-    reflection = 150e-6 * (-np.cos(angle))
-    flux = 1.0 + reflection + rng.normal(0.0, 400e-6, size=time.shape)
-    flux_err = np.full_like(flux, 400e-6)
-    sector_values = np.ones(time.size, dtype=int)
-    return {
-        "time": time,
-        "flux": flux,
-        "flux_err": flux_err,
-        "sector": sector_values,
-        "_duration_days": demo_duration_days,
-        "_epoch_btjd": demo_epoch_btjd,
-        "_period_days": demo_period_days,
-    }
-
-
 def run_phase_curve_search(workspace: CandidateWorkspace) -> Path:
     """Run the candidate-local exploratory phase-curve regression.
 
@@ -936,11 +921,7 @@ def run_phase_curve_search(workspace: CandidateWorkspace) -> Path:
     if table is None:
         raise RuntimeError("phase-curve analysis requires observed candidate photometry")
     ephemeris = load_transit_ephemeris(workspace)
-    required_fields = ("period_days", "epoch_btjd", "duration_days")
-    if ephemeris.get("source") == "synthetic-demo" or any(
-        ephemeris.get("field_sources", {}).get(field) == "synthetic-demo"
-        for field in required_fields
-    ):
+    if not is_complete_candidate_ephemeris(ephemeris, require_depth=False):
         raise RuntimeError("phase-curve analysis requires a complete candidate-derived transit ephemeris")
     source = "candidate-data"
     secondary_arguments, secondary_control = resolve_secondary_eclipse_control(workspace, ephemeris)

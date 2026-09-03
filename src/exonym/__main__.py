@@ -589,7 +589,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ds9_parser.add_argument("candidate_id")
 
-    verify_parser = commands.add_parser("verify", help="Audit source isolation or candidate integrity.")
+    lint_paths_parser = commands.add_parser(
+        "lint-paths",
+        aliases=["check-layout", "lint-isolation"],
+        help="Administrative syntax linter: checks file paths and schema layout (DOES NOT verify scientific math or physics).",
+    )
+    add_verify_arguments(lint_paths_parser)
+
+    verify_parser = commands.add_parser(
+        "verify",
+        help="[DEPRECATED / DEMOTED]: Legacy filesystem linter. Use 'lint-paths' instead.",
+    )
     add_verify_arguments(verify_parser)
 
     debug_parser = commands.add_parser(
@@ -989,7 +999,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(format_debug_report(report, args.debug_format))
             return report.exit_code
 
-        if args.command == "verify":
+        if args.command in ("verify", "lint-paths", "check-layout", "lint-isolation"):
+            if args.command == "verify":
+                import sys
+
+                sys.stderr.write(
+                    "\n"
+                    "===============================================================================\n"
+                    "[NOTICE]: 'exonym verify' has been DEMOTED to an administrative path linter!\n"
+                    "-------------------------------------------------------------------------------\n"
+                    "This command checks ONLY filesystem directory layouts and AST path strings.\n"
+                    "It DOES NOT verify astrophysical models, transit physics, MCMC convergence,\n"
+                    "or candidate data integrity.\n"
+                    "\n"
+                    "-> Official command: 'exonym lint-paths'\n"
+                    "-> To verify scientific & mathematical correctness, run:\n"
+                    "   pytest tests/test_<module>.py -v\n"
+                    "===============================================================================\n\n"
+                )
+
             remediated, report = run_verify_command(
                 repository_root,
                 source=args.source,

@@ -19,7 +19,7 @@ import json
 import math
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -420,12 +420,16 @@ def _sample_posterior(
     start: np.ndarray,
     bounds: Sequence[Tuple[Optional[float], Optional[float]]],
     seed: int,
+    log_prior: Optional[Callable[[np.ndarray], float]] = None,
+    prior_description: str = "uniform within the explicit optimizer support bounds",
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Draw a bounded ensemble posterior without using optimizer curvature.
 
     The likelihood is the same normalized independent-Gaussian likelihood used
-    for model comparison and bounds implement explicit uniform support.  An
-    unavailable sampler is an execution failure rather than a Hessian fallback.
+    for model comparison. Bounds implement explicit uniform support and an
+    optional caller-supplied log prior represents a documented coordinate
+    Jacobian or candidate-derived ephemeris constraint. An unavailable sampler
+    is an execution failure rather than a Hessian fallback.
     """
     try:
         import emcee
@@ -450,8 +454,11 @@ def _sample_posterior(
         for value, (lower, upper) in zip(theta, bounds):
             if (lower is not None and value < lower) or (upper is not None and value > upper):
                 return -math.inf
+        prior_value = float(log_prior(theta)) if log_prior is not None else 0.0
+        if not math.isfinite(prior_value):
+            return -math.inf
         value = float(objective(theta))
-        return -value if math.isfinite(value) else -math.inf
+        return -value + prior_value if math.isfinite(value) else -math.inf
 
     sampler = emcee.EnsembleSampler(walker_count, dimension, log_probability)
     random_state = np.random.get_state()
@@ -476,7 +483,7 @@ def _sample_posterior(
         "production_steps": POSTERIOR_PRODUCTION_STEPS,
         "retained_draws": int(samples.shape[0]),
         "mean_acceptance_fraction": acceptance,
-        "prior": "uniform within the explicit optimizer support bounds",
+        "prior": prior_description,
     }
 
 
@@ -491,6 +498,31 @@ def _eccentricity_components(theta: np.ndarray, component_start: int) -> Tuple[f
     return eccentricity, argument, first, second
 
 
+def _eccentricity_log_jacobian(theta: np.ndarray, component_start: int) -> float:
+    """Return the exact rational-coordinate Jacobian log determinant.
+
+    For ``e = e_max * r**2 / (1 + r**2)`` and ``omega = atan2(y, x)``,
+    Eastman, Gaudi & Agol (2013, §3.2.1; arXiv:1206.5798;
+    DOI:10.1086/669497) require the transformed-coordinate density to include
+    ``ln|de dω / dx dy| = ln(2 e_max) - 2 ln(1 + r**2)``. The retained
+    primary source is ``literature/eastman_2013_exofast.pdf``.
+    """
+    first = float(theta[component_start])
+    second = float(theta[component_start + 1])
+    norm_squared = first * first + second * second
+    if not math.isfinite(norm_squared) or norm_squared < 0.0:
+        return -math.inf
+    return math.log(2.0 * MAXIMUM_FIT_ECCENTRICITY) - 2.0 * math.log1p(norm_squared)
+
+
+def _gaussian_log_prior(value: float, mean: float, standard_deviation: float) -> float:
+    """Return a normalized Gaussian log prior for a candidate ephemeris value."""
+    if not all(math.isfinite(item) for item in (value, mean, standard_deviation)) or standard_deviation <= 0.0:
+        return -math.inf
+    standardized_residual = (value - mean) / standard_deviation
+    return float(-0.5 * (standardized_residual**2 + math.log(_TAU * standard_deviation**2)))
+
+
 def _finite_uncertainty(value: float) -> Optional[float]:
     return float(value) if math.isfinite(value) and value >= 0 else None
 
@@ -500,7 +532,7 @@ def fit_radial_velocity(
     period_days: float,
     period_uncertainty_days: Optional[float] = None,
 ) -> Path:
-    """Compare constant and eccentric Keplerian RV models at a fixed period.
+    """Compare constant and eccentric Keplerian RV models.
 
     Mathematical Formulation:
         Each model uses ``sigma_eff**2 = sigma_quoted**2 + jitter**2`` in an
@@ -518,10 +550,11 @@ def fit_radial_velocity(
     Args:
         workspace (CandidateWorkspace): Workspace containing validated
             candidate-local RV observations.
-        period_days (float): Positive fixed period in days.  This function does
-            not search or marginalize over a period grid.
-        period_uncertainty_days (Optional[float]): Positive reported input
-            uncertainty in days, retained as provenance when available.
+        period_days (float): Positive candidate-derived ephemeris period in
+            days. It is fixed only when no uncertainty is supplied.
+        period_uncertainty_days (Optional[float]): Positive candidate-derived
+            period uncertainty in days. When provided, the Keplerian posterior
+            samples period with its Gaussian ephemeris prior.
 
     Returns:
         Path: Candidate-local ``outputs/rv_keplerian_fit.json`` with input
@@ -549,6 +582,7 @@ def fit_radial_velocity(
         period_uncertainty_days = float(period_uncertainty_days)
         if not math.isfinite(period_uncertainty_days) or period_uncertainty_days <= 0:
             raise ValueError("period_uncertainty_days must be finite and positive when provided")
+    period_is_sampled = period_uncertainty_days is not None
 
     record = load_radial_velocity_observations(workspace)
     input_path = _observation_path(workspace)
@@ -566,7 +600,8 @@ def fit_radial_velocity(
     activity_parameter_count = 1 if activity_values is not None else 0
     nuisance_parameter_count = instrument_count + 1 + activity_parameter_count
     constant_parameter_count = nuisance_parameter_count + instrument_count
-    keplerian_parameter_count = nuisance_parameter_count + 4 + instrument_count
+    sampled_period_parameter_count = int(period_is_sampled)
+    keplerian_parameter_count = nuisance_parameter_count + 4 + sampled_period_parameter_count + instrument_count
     if time.size <= keplerian_parameter_count:
         raise ValueError("RV fit requires more observations than Keplerian free parameters")
 
@@ -621,12 +656,14 @@ def fit_radial_velocity(
         (
             common_start[:nuisance_parameter_count],
             np.asarray([math.log(initial_amplitude), 0.0, 0.0, 0.0]),
+            np.asarray([period_days]) if period_is_sampled else np.asarray([]),
             common_start[nuisance_parameter_count:],
         )
     )
     keplerian_bounds = (
         common_bounds[:nuisance_parameter_count]
         + [(lower_log_amplitude, upper_log_amplitude), (-_TAU, _TAU), (None, None), (None, None)]
+        + ([(np.finfo(float).eps, None)] if period_is_sampled else [])
         + common_bounds[nuisance_parameter_count:]
     )
 
@@ -635,11 +672,14 @@ def fit_radial_velocity(
         amplitude = math.exp(float(theta[amplitude_index]))
         mean_anomaly = float(theta[amplitude_index + 1])
         eccentricity, argument, _, _ = _eccentricity_components(theta, amplitude_index + 2)
+        sampled_period_days = (
+            float(theta[amplitude_index + 4]) if period_is_sampled else period_days
+        )
         trend = float(theta[instrument_count])
         activity_coefficient = (
             float(theta[instrument_count + 1]) if standardized_activity is not None else 0.0
         )
-        jitter_start = amplitude_index + 4
+        jitter_start = amplitude_index + 4 + sampled_period_parameter_count
         prediction = (
             design @ theta[:instrument_count]
             + trend * centered_time_days
@@ -650,7 +690,7 @@ def fit_radial_velocity(
                 eccentricity,
                 argument,
                 reference_time_bjd_tdb,
-                period_days,
+                sampled_period_days,
             )
         )
         if standardized_activity is not None:
@@ -663,6 +703,20 @@ def fit_radial_velocity(
     def keplerian_negative_log_likelihood(theta: np.ndarray) -> float:
         prediction, effective_uncertainty, _ = keplerian_components(theta)
         return _negative_log_likelihood(velocity - prediction, effective_uncertainty)
+
+    def keplerian_log_prior(theta: np.ndarray) -> float:
+        amplitude_index = nuisance_parameter_count
+        value = _eccentricity_log_jacobian(theta, amplitude_index + 2)
+        if not period_is_sampled:
+            return value
+        return value + _gaussian_log_prior(
+            float(theta[amplitude_index + 4]), period_days, period_uncertainty_days
+        )
+
+    def keplerian_negative_log_posterior(theta: np.ndarray) -> float:
+        likelihood_value = keplerian_negative_log_likelihood(theta)
+        prior_value = keplerian_log_prior(theta)
+        return likelihood_value - prior_value if math.isfinite(prior_value) else math.inf
 
     def optimize_model(
         objective: Any,
@@ -697,7 +751,7 @@ def fit_radial_velocity(
 
     constant_result = optimize_model(constant_negative_log_likelihood, common_start, common_bounds, None)
     result = optimize_model(
-        keplerian_negative_log_likelihood,
+        keplerian_negative_log_posterior,
         keplerian_start,
         keplerian_bounds,
         nuisance_parameter_count + 1,
@@ -725,6 +779,13 @@ def fit_radial_velocity(
         result.x,
         keplerian_bounds,
         (seed + 1) % (2**32),
+        log_prior=keplerian_log_prior,
+        prior_description=(
+            "uniform explicit support with the Eastman et al. (2013) rational-eccentricity "
+            "Jacobian and a Gaussian candidate ephemeris period prior"
+            if period_is_sampled
+            else "uniform explicit support with the Eastman et al. (2013) rational-eccentricity Jacobian"
+        ),
     )
     standard_errors = np.std(posterior_samples, axis=0, ddof=1)
     constant_standard_errors = np.std(constant_samples, axis=0, ddof=1)
@@ -758,6 +819,15 @@ def fit_radial_velocity(
     argument_uncertainty = (
         _finite_uncertainty(math.degrees(math.sqrt(-2.0 * math.log(argument_resultant))))
         if argument_resultant > 0.0
+        else None
+    )
+    period_parameter_index = amplitude_index + 4 if period_is_sampled else None
+    fitted_period_days = (
+        float(result.x[period_parameter_index]) if period_parameter_index is not None else period_days
+    )
+    period_posterior_uncertainty = (
+        _finite_uncertainty(float(np.std(posterior_samples[:, period_parameter_index], ddof=1)))
+        if period_parameter_index is not None
         else None
     )
 
@@ -832,6 +902,7 @@ def fit_radial_velocity(
         "fixed_orbital_inputs": {
             "period": _parameter(period_days, period_uncertainty_days, "days"),
             "reference_time": _parameter(reference_time_bjd_tdb, None, "BJD_TDB"),
+            "period_sampling": "gaussian-ephemeris-prior" if period_is_sampled else "fixed",
         },
         "models": {
             "constant": {
@@ -843,6 +914,9 @@ def fit_radial_velocity(
                 "model": "single-companion eccentric Keplerian with shared jitter, linear trend, and optional activity regression",
                 **keplerian_statistics,
                 "parameters": {
+                    "orbital_period": _parameter(
+                        fitted_period_days, period_posterior_uncertainty, "days"
+                    ),
                     "semi_amplitude": _parameter(amplitude, amplitude_uncertainty, "m/s"),
                     "eccentricity": _parameter(eccentricity, eccentricity_uncertainty, "dimensionless"),
                     "argument_periastron": _parameter(math.degrees(argument), argument_uncertainty, "deg"),
@@ -906,10 +980,11 @@ def fit_radial_velocity(
                     "estimates become poorly conditioned."
                 ),
                 "scientific_limitation": (
-                    "This is a numerical support restriction, not an astrophysical "
-                    "eccentricity prior; fits requiring e near or above 0.95 need a "
-                    "separate model and review."
+                    "The exact coordinate Jacobian is included in the posterior; this is a "
+                    "numerical support restriction rather than an astrophysical eccentricity "
+                    "prior, so fits requiring e near or above 0.95 need a separate model and review."
                 ),
+                "log_jacobian": "ln(2 * e_max) - 2 * ln(1 + x^2 + y^2)",
             },
         },
         "caveat": "This candidate-local RV fit is non-claim evidence and does not determine scientific disposition or lifecycle state. The optional activity term tests only a contemporaneous linear correlation in the supplied indicator; it is not an activity model, and the jitter/trend terms do not establish a companion.",

@@ -23,7 +23,8 @@
       "required": ["period", "reference_time"],
       "properties": {
         "period": { "$ref": "#/$defs/parameter" },
-        "reference_time": { "$ref": "#/$defs/parameter" }
+        "reference_time": { "$ref": "#/$defs/parameter" },
+        "period_sampling": { "enum": ["fixed", "gaussian-ephemeris-prior"] }
       }
     },
     "models": {
@@ -41,8 +42,9 @@
                 "parameters": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["semi_amplitude", "eccentricity", "argument_periastron", "mean_anomaly_reference", "systemic_velocities", "linear_trend", "activity_coefficient", "instrument_jitters"],
+                    "required": ["semi_amplitude", "eccentricity", "argument_periastron", "mean_anomaly_reference", "systemic_velocities", "linear_trend", "activity_coefficient", "instrument_jitters"],
                   "properties": {
+                    "orbital_period": { "$ref": "#/$defs/parameter" },
                     "semi_amplitude": { "$ref": "#/$defs/parameter" },
                     "eccentricity": { "$ref": "#/$defs/parameter" },
                     "argument_periastron": { "$ref": "#/$defs/parameter" },
@@ -149,7 +151,8 @@
             "mapping": { "type": "string", "minLength": 1 },
             "maximum_eccentricity_exclusive": { "const": 0.95 },
             "numerical_rationale": { "type": "string", "minLength": 1 },
-            "scientific_limitation": { "type": "string", "minLength": 1 }
+            "scientific_limitation": { "type": "string", "minLength": 1 },
+            "log_jacobian": { "type": "string", "minLength": 1 }
           }
         }
       }

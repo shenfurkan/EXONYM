@@ -9,8 +9,8 @@ Scientific foundations
   eclipsing binaries.
 * **Robust depth estimation** — Ivezić et al. (2019, Statistics, Data
   Mining, and Machine Learning in Astronomy): asymptotic standard error
-  of the median :math:`\\sigma_{\\text{med}} = \\sqrt{\\pi/(2N)}\\,\\sigma
-  \\approx 1.253\\,\\sigma / \\sqrt{N}`, median-binned phase-folded light
+  of the median :math:`\sigma_{\text{med}} = \sqrt{\pi/(2N)}\,\sigma`
+  (:data:`~exonym.constants.SAMPLE_MEDIAN_STANDARD_ERROR_FACTOR`), median-binned phase-folded light
   curves, and quadrature propagation of independent errors.
 * **Limb-darkening parametrisation** — Kipping (2013, MNRAS 435, 2152):
   triangular sampling transform between quadratic (*u*₁, *u*₂) and
@@ -39,6 +39,7 @@ import numpy as np
 from .constants import (
     EARTH_TO_SOLAR_RADIUS_RATIO,
     GRAVITATIONAL_CONSTANT_CGS,
+    SAMPLE_MEDIAN_STANDARD_ERROR_FACTOR,
     SECONDS_PER_DAY,
     SOLAR_MEAN_DENSITY_G_CM3,
 )
@@ -130,9 +131,9 @@ def robust_transit_depth(
         \\delta = \\operatorname{median}(\\mathbf{f}_{\\text{out}})
                 - \\operatorname{median}(\\mathbf{f}_{\\text{in}}).
 
-    The standard error of each median uses the asymptotic factor
-    :math:`\\sqrt{\\pi/(2N)} \\approx 1.253` (Ivezić et al. 2019,
-    Eq. 3.37), giving :math:`\\sigma_{\\text{med}} = 1.253\\,\\sigma / \\sqrt{N}`.
+    The standard error of each median uses the exact asymptotic factor
+    :math:`\\sqrt{\\pi/2}` (Ivezić et al. 2019, Eq. 3.37), giving
+    :math:`\\sigma_{\\text{med}} = \\sqrt{\\pi/(2N)}\\,\\sigma`.
     The quadrature-sum of the in- and out-of-transit median errors yields
     the combined depth uncertainty.
 
@@ -178,8 +179,8 @@ def robust_transit_depth(
 
     Notes
     -----
-    The factor 1.253 is the three-significant-figure truncation of the
-    exact asymptotic value :math:`\\sqrt{\\pi/2} \\approx 1.253314`.
+    The standard error factor is the exact asymptotic value
+    :math:`\\sqrt{\\pi/2}` (SAMPLE_MEDIAN_STANDARD_ERROR_FACTOR in :mod:`exonym.constants`).
     This is a **robust** depth estimate; it does not account for limb
     darkening or dilution.
     """
@@ -206,13 +207,13 @@ def robust_transit_depth(
         raise ValueError("insufficient finite in-transit or out-of-transit coverage")
 
     depth = float(np.median(out_values) - np.median(in_values))
-    # NUMERICAL_GUARD: asymptotic median-error factor 1.253 ≈ √(π/2)
+    # NUMERICAL_GUARD: asymptotic median-error factor sqrt(pi/2)
     # (Ivezić et al. 2019, Eq. 3.37).  Standard errors are propagated in
     # quadrature, assuming independent in/out samples.
     uncertainty = float(
         np.sqrt(
-            (1.253 * np.std(in_values) / np.sqrt(in_values.size)) ** 2
-            + (1.253 * np.std(out_values) / np.sqrt(out_values.size)) ** 2
+            (SAMPLE_MEDIAN_STANDARD_ERROR_FACTOR * np.std(in_values) / np.sqrt(in_values.size)) ** 2
+            + (SAMPLE_MEDIAN_STANDARD_ERROR_FACTOR * np.std(out_values) / np.sqrt(out_values.size)) ** 2
         )
     )
     return depth * 1e6, uncertainty * 1e6, int(in_values.size), int(out_values.size)
@@ -231,7 +232,7 @@ def bin_phase_folded_flux(
     The phase range :math:`[-L,\\,+L]` hours (``limit_hours``) is divided
     into equal-width bins of ``bin_minutes`` / 60 hours each.  Within
     each bin the median flux and its asymptotic standard error
-    (Ivezić et al. 2019, factor 1.253) are computed.  Bins with fewer
+    (Ivezić et al. 2019, factor :math:`\sqrt{\pi/2}`) are computed.  Bins with fewer
     than three samples are left as ``NaN``.
 
     The final (rightmost) bin uses an inclusive upper edge
@@ -301,7 +302,7 @@ def bin_phase_folded_flux(
         if samples.size >= 3:
             median[index] = np.median(samples)
             # Asymptotic standard error of the median (Ivezić et al. 2019, Eq. 3.37).
-            error[index] = 1.253 * np.std(samples) / np.sqrt(samples.size)
+            error[index] = SAMPLE_MEDIAN_STANDARD_ERROR_FACTOR * np.std(samples) / np.sqrt(samples.size)
 
     return centers, median, error
 

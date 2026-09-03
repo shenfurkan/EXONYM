@@ -150,8 +150,6 @@ def simulate_EB(
     F_EB = EB_fluxratio / (1.0 - EB_fluxratio)
 
     k = R_EB_solar / R_s_solar
-    if abs(k - 1.0) < 1e-6:
-        k *= 0.999
     a_rs = a_cm / (R_s_solar * Rsun)
 
     primary_flux = _batman_transit(

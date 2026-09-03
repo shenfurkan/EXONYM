@@ -14,6 +14,7 @@ Scientific boundary:
 
 from __future__ import annotations
 
+from fractions import Fraction
 import hashlib
 import json
 import math
@@ -24,7 +25,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from .inputs import BTJD_TIME_SYSTEM, EPHEMERIS_CONFIG_NAMES, load_transit_ephemeris
+from .inputs import (
+    BTJD_TIME_SYSTEM,
+    EPHEMERIS_CONFIG_NAMES,
+    is_complete_candidate_ephemeris,
+    load_transit_ephemeris,
+)
 from .workspace import CandidateWorkspace, validate_signal_suffix
 
 
@@ -45,7 +51,16 @@ EPOCH_TOLERANCE_DURATION_MULTIPLIER = 1.0
 DURATION_RELATIVE_TOLERANCE = 0.5
 # Only adjacent first-order j:(j-1) resonances and their reciprocals are
 # comparison candidates; higher-order ratios are not silently promoted.
-HARMONIC_FACTORS = (0.5, 0.6667, 0.75, 0.8, 1.0, 1.25, 1.3333, 1.5, 2.0)
+# Resonances are derived dynamically using the standard fractions module (AGENTS.md Rule 10 & Rule 13).
+def _derive_first_order_mmr_factors(max_j: int = 5) -> Tuple[float, ...]:
+    ratios = {Fraction(1, 1)}
+    for j in range(2, max_j + 1):
+        ratios.add(Fraction(j, j - 1))
+        ratios.add(Fraction(j - 1, j))
+    return tuple(float(r) for r in sorted(ratios))
+
+
+HARMONIC_FACTORS = _derive_first_order_mmr_factors()
 
 # Every automatic source must state its field names, duration unit, and whether
 # the retained epoch is safe to compare with a candidate BJD_TDB ephemeris.
@@ -286,17 +301,14 @@ def _candidate_ephemeris(
     period = _finite(ephemeris.get("period_days"))
     epoch = _finite(ephemeris.get("epoch_btjd"))
     duration_days = _finite(ephemeris.get("duration_days"))
-    field_sources = ephemeris.get("field_sources")
     if (
-        source == "synthetic-demo"
+        not is_complete_candidate_ephemeris(ephemeris)
         or period is None
         or period <= 0
         or epoch is None
         or duration_days is None
         or duration_days <= 0
         or ephemeris.get("time_system") != BTJD_TIME_SYSTEM
-        or not isinstance(field_sources, dict)
-        or any(field_sources.get(name) in (None, "synthetic-demo") for name in ("period_days", "epoch_btjd", "duration_days"))
     ):
         raise ValueError("known-signal matching requires a complete candidate-derived ephemeris")
     path = _ephemeris_input_path(workspace, signal, source)

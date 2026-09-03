@@ -37,7 +37,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .inputs import load_light_curve_table, load_transit_ephemeris
+from .inputs import is_complete_candidate_ephemeris, load_light_curve_table, load_transit_ephemeris
 from .lightcurve import phase_hours
 from .workspace import CandidateWorkspace
 
@@ -493,25 +493,6 @@ def sinusoid_amplitude_posterior(
     }
 
 
-def _synthetic_rotation_table() -> Dict[str, np.ndarray]:
-    """Deterministic demonstration light curve with an injected rotation signal."""
-    rng = np.random.default_rng(seed=29)
-    rotation_period_days = 5.0
-    amplitude = 400e-6
-    cadence_days = 120.0 / 86400.0
-    time = np.arange(0.0, 27.0, cadence_days)
-    flux = 1.0 + amplitude * np.sin(2.0 * np.pi * time / rotation_period_days)
-    flux = flux + rng.normal(0.0, 150e-6, size=time.shape)
-    flux_err = np.full_like(flux, 150e-6)
-    sector_values = np.ones(time.size, dtype=int)
-    return {
-        "time": time,
-        "flux": flux,
-        "flux_err": flux_err,
-        "sector": sector_values,
-    }
-
-
 def run_stellar_activity(workspace: CandidateWorkspace) -> Path:
     """Run the stellar activity analysis and write outputs/stellar_activity_results.json."""
     outputs_dir = workspace.path / "outputs"
@@ -523,11 +504,7 @@ def run_stellar_activity(workspace: CandidateWorkspace) -> Path:
     source = "candidate-data"
 
     ephemeris = load_transit_ephemeris(workspace)
-    required_fields = ("period_days", "epoch_btjd", "duration_days")
-    can_mask_transits = ephemeris.get("source") != "synthetic-demo" and all(
-        ephemeris.get("field_sources", {}).get(field) != "synthetic-demo"
-        for field in required_fields
-    )
+    can_mask_transits = is_complete_candidate_ephemeris(ephemeris)
     if can_mask_transits:
         phase_days = phase_hours(
             table["time"], ephemeris["period_days"], ephemeris["epoch_btjd"]
@@ -567,6 +544,7 @@ def run_stellar_activity(workspace: CandidateWorkspace) -> Path:
         best_index = int(np.argmax(powers))
         best_period = float(periods[best_index])
         best_power = float(powers[best_index])
+        period_grid_range_days = [float(np.min(periods)), float(np.max(periods))]
         frequency = 1.0 / periods
         try:
             window = sampling_window_diagnostics(
@@ -575,14 +553,20 @@ def run_stellar_activity(workspace: CandidateWorkspace) -> Path:
         except ValueError:
             continue
         baseline_days = float(np.max(time[mask]) - np.min(time[mask]))
+        finite_analytic_fap = (
+            float(analytic_white_noise_fap)
+            if math.isfinite(float(analytic_white_noise_fap))
+            else None
+        )
         segment_results.append(
             {
                 "sector": int(sector_value),
                 "n_points": int(np.sum(mask)),
                 "baseline_days": baseline_days,
+                "period_search_range_days": period_grid_range_days,
                 "best_period_days": round(best_period, 4),
                 "max_power": round(best_power, 4),
-                "analytic_white_noise_false_alarm_probability": analytic_white_noise_fap,
+                "analytic_white_noise_false_alarm_probability": finite_analytic_fap,
                 "sampling_window": window,
             }
         )
@@ -606,10 +590,17 @@ def run_stellar_activity(workspace: CandidateWorkspace) -> Path:
     rotation_period = summary["weighted_mean_period_days"]
     rotation_posterior = weighted_percentile_summary(selected_periods, selected_powers)
     amplitude_posterior = sinusoid_amplitude_posterior(time, flux, flux_err, rotation_period)
-    best_analytic_white_noise_fap = min(
-        segment["analytic_white_noise_false_alarm_probability"]
+    finite_analytic_faps = [
+        value
         for segment in segment_results
-    )
+        for value in [segment["analytic_white_noise_false_alarm_probability"]]
+        if value is not None
+    ]
+    best_analytic_white_noise_fap = min(finite_analytic_faps) if finite_analytic_faps else None
+    period_search_range_days = [
+        min(segment["period_search_range_days"][0] for segment in segment_results),
+        max(segment["period_search_range_days"][1] for segment in segment_results),
+    ]
 
     payload = {
         "schema_version": "1.0",
@@ -620,7 +611,11 @@ def run_stellar_activity(workspace: CandidateWorkspace) -> Path:
         "validation_eligible": False,
         "transit_mask_status": transit_mask_status,
         "method": "Generalized Lomb-Scargle per segment with sampling-window and harmonic-persistence diagnostics",
-        "period_search_range_days": [PERIOD_MIN_DAYS, PERIOD_MAX_DAYS],
+        "period_search_range_days": period_search_range_days,
+        "period_search_range_interpretation": (
+            "Envelope of the cadence- and baseline-derived GLS grids recorded "
+            "for individual segments; each segment's exact grid bounds are in segments[]."
+        ),
         "rotation_period_days": round(rotation_period, 4),
         "rotation_period_std_days": summary["weighted_std_period_days"],
         "rotation_period_posterior_days": rotation_posterior,
