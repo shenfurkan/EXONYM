@@ -38,7 +38,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .archive import load_validated_archival_gaia_sources
-from .inputs import is_complete_candidate_ephemeris, load_tpf_cubes, load_transit_ephemeris
+from .inputs import BTJD_TIME_SYSTEM, load_tpf_cubes, load_transit_ephemeris
 from .lightcurve import phase_hours
 from .resources import read_schema_text
 from .workspace import CandidateWorkspace
@@ -153,8 +153,9 @@ def gaussian_prf_kernel(
         If the sum over all pixels is zero the un-normalised kernel is
         returned as-is.
     """
-    # NUMERICAL_GUARD: sigma -> 0 when FWHM = 0; keep the standard conversion.
-    sigma = fwhm_pixels / 2.3548
+    # sigma = FWHM / sqrt(8 * ln 2): the exact closed-form Gaussian
+    # FWHM-to-sigma relation (Tier 3 mathematical identity, no fitted constant).
+    sigma = fwhm_pixels / math.sqrt(8.0 * math.log(2.0))
     kernel = np.exp(
         -((x_grid - x0) ** 2 + (y_grid - y0) ** 2) / (2.0 * sigma**2)
     )
@@ -1313,6 +1314,69 @@ def _fit_one_difference_image(
     }
 
 
+# Candidate-derived ephemeris provenance labels accepted for source localization.
+# The shared candidate ephemeris boundary records these prefixes plus the
+# candidate-owned "candidate-data" label used by candidate loaders and the
+# localization contract.
+_CANDIDATE_EPHEMERIS_SOURCE_PREFIXES = (
+    "candidate-config",
+    "candidate-config-signal",
+    "candidate-data-bls",
+    "bls-search",
+    "candidate-data",
+)
+
+
+def _localization_ephemeris_complete(
+    ephemeris: Dict[str, Any], field_sources: Dict[str, Any]
+) -> bool:
+    """Return whether the ephemeris has the finite, candidate-sourced transit fields localization consumes.
+
+    Difference imaging selects in- and out-of-transit cadences from the orbital
+    period, epoch, and transit duration only; ``depth_ppm`` never enters the PRF
+    localization model, so a candidate-owned ephemeris may omit it.  When
+    ``depth_ppm`` is present it must still be finite, positive, and
+    candidate-sourced so a conflicting synthetic depth cannot pass unnoticed.
+    """
+    if not isinstance(ephemeris, dict):
+        return False
+    source = ephemeris.get("source")
+    if not isinstance(source, str):
+        return False
+    source_prefix = source.removeprefix("partial-")
+    if source_prefix not in _CANDIDATE_EPHEMERIS_SOURCE_PREFIXES:
+        return False
+    if ephemeris.get("time_system") not in (None, BTJD_TIME_SYSTEM):
+        return False
+    try:
+        period_days = float(ephemeris["period_days"])
+        epoch_btjd = float(ephemeris["epoch_btjd"])
+        duration_days = float(ephemeris["duration_days"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not (
+        math.isfinite(period_days)
+        and math.isfinite(epoch_btjd)
+        and math.isfinite(duration_days)
+        and period_days > 0.0
+        and 0.0 < duration_days < period_days
+    ):
+        return False
+    for field in ("period_days", "epoch_btjd", "duration_days"):
+        if not str(field_sources.get(field, "")).startswith(source_prefix):
+            return False
+    if "depth_ppm" in ephemeris:
+        try:
+            depth_ppm = float(ephemeris["depth_ppm"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if not (math.isfinite(depth_ppm) and depth_ppm > 0.0):
+            return False
+        if not str(field_sources.get("depth_ppm", "")).startswith(source_prefix):
+            return False
+    return True
+
+
 def run_prf_localization(
     workspace: CandidateWorkspace, search_radius_arcsec: float = 60.0
 ) -> Path:
@@ -1436,7 +1500,16 @@ def run_prf_localization(
         return output_path
 
     ephemeris = load_transit_ephemeris(workspace)
-    candidate_ephemeris = is_complete_candidate_ephemeris(ephemeris)
+    field_sources = ephemeris.get("field_sources")
+    if not isinstance(field_sources, dict):
+        field_sources = {}
+    required_ephemeris_fields = (
+        "period_days",
+        "epoch_btjd",
+        "duration_days",
+        "depth_ppm",
+    )
+    candidate_ephemeris = _localization_ephemeris_complete(ephemeris, field_sources)
     neighbors, source_catalog = _load_archival_gaia_neighbors(workspace)
 
     skipped_tpf_products: List[Dict[str, str]] = []

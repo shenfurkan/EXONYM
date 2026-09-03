@@ -146,7 +146,6 @@ def _macro_lines(
     suffix = ".{0}".format(signal.lstrip(".")) if signal else ""
     posterior = fit.get("posterior", {}) if isinstance(fit, dict) else {}
     ephemeris = fit.get("ephemeris", {}) if isinstance(fit, dict) else {}
-    sed_posterior = sed.get("posterior", {}) if isinstance(sed, dict) else {}
     fpp = vet.get("FPP") if isinstance(vet, dict) else None
     nfpp = vet.get("NFPP") if isinstance(vet, dict) else None
     lines = [
@@ -161,8 +160,8 @@ def _macro_lines(
         r"\renewcommand{\ExonymImpactParameter}{%s}" % _posterior_latex(posterior.get("impact_parameter"), 4),
         r"\renewcommand{\ExonymLimbDarkeningOne}{%s}" % _posterior_latex(posterior.get("u1"), 4),
         r"\renewcommand{\ExonymLimbDarkeningTwo}{%s}" % _posterior_latex(posterior.get("u2"), 4),
-        r"\renewcommand{\ExonymStellarTeff}{%s}" % _posterior_latex(sed_posterior.get("teff_k"), 1),
-        r"\renewcommand{\ExonymStellarRadius}{%s}" % _posterior_latex(sed_posterior.get("radius_solar"), 3),
+        r"\renewcommand{\ExonymStellarTeff}{Not inferred by SED diagnostic}",
+        r"\renewcommand{\ExonymStellarRadius}{Not inferred by SED diagnostic}",
         r"\renewcommand{\ExonymFpp}{%s}" % _value_latex(fpp, 6),
         r"\renewcommand{\ExonymNfpp}{%s}" % _value_latex(nfpp, 6),
         r"\renewcommand{\ExonymClaimEligibility}{false}",

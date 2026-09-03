@@ -11,9 +11,12 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 from .workspace import CandidateWorkspace
+
+
+_MIST_BC_SED_STATUS = "exploratory-mist-v1.2-bolometric-correction-diagnostic"
 
 
 def _sha256(path: Path) -> str:
@@ -47,6 +50,72 @@ def _stage(
     }
 
 
+def _mist_bc_sed_stage(workspace: CandidateWorkspace) -> Dict[str, Any]:
+    """Report SED coverage only for the current claim-ineligible MIST contract."""
+    output = "outputs/sed_fit_results.json"
+    path = workspace.path / output
+    unavailable = {
+        "name": "sed",
+        "status": "unavailable",
+        "evidence": [],
+        "reason": "No current MIST v1.2 diagnostic contract output is available.",
+    }
+    if (
+        not path.is_file()
+        or path.is_symlink()
+        or not path.resolve().is_relative_to(workspace.path.resolve())
+    ):
+        return unavailable
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return unavailable
+    if not isinstance(payload, dict):
+        return unavailable
+    if (
+        payload.get("schema_version") != 2
+        or payload.get("candidate_id") != workspace.candidate_id
+        or payload.get("source") != "candidate-data"
+        or payload.get("scientific_status") != _MIST_BC_SED_STATUS
+        or payload.get("validation_eligible") is not False
+        or payload.get("claim_eligible") is not False
+    ):
+        return unavailable
+    input_provenance = payload.get("input_provenance")
+    if not isinstance(input_provenance, Mapping):
+        return unavailable
+    artifacts = input_provenance.get("input_artifacts")
+    manifest_artifact = input_provenance.get("input_manifest_artifact")
+    if (
+        not isinstance(artifacts, list)
+        or not artifacts
+        or not isinstance(manifest_artifact, Mapping)
+        or not all(isinstance(artifact, Mapping) for artifact in artifacts)
+    ):
+        return unavailable
+    for artifact in [manifest_artifact, *artifacts]:
+        relative = artifact.get("path")
+        expected_sha256 = artifact.get("sha256")
+        if not isinstance(relative, str) or not isinstance(expected_sha256, str):
+            return unavailable
+        artifact_path = workspace.path / relative
+        if (
+            Path(relative).is_absolute()
+            or ".." in Path(relative).parts
+            or not artifact_path.is_file()
+            or artifact_path.is_symlink()
+            or not artifact_path.resolve().is_relative_to(workspace.path.resolve())
+            or _sha256(artifact_path) != expected_sha256
+        ):
+            return unavailable
+    return {
+        "name": "sed",
+        "status": "succeeded",
+        "evidence": [{"path": output, "sha256": _sha256(path)}],
+        "reason": "Candidate-owned MIST v1.2 bolometric-correction diagnostic output is present and hash recorded.",
+    }
+
+
 def build_analysis_status(workspace: CandidateWorkspace) -> Path:
     """Write the candidate-local analysis coverage record."""
     raw_dir = workspace.path / "data" / "raw"
@@ -74,7 +143,7 @@ def build_analysis_status(workspace: CandidateWorkspace) -> Path:
         _stage(workspace, "archive", "outputs/archival_vetting_report.json"),
         _stage(workspace, "localization", "outputs/prf_localization_results.json", "TPF/PRF localization was not applicable or unavailable."),
         _stage(workspace, "activity", "outputs/stellar_activity_results.json"),
-        _stage(workspace, "sed", "outputs/sed_fit_results.json", "Candidate-owned broadband photometry or stellar priors are unavailable."),
+        _mist_bc_sed_stage(workspace),
         _stage(workspace, "dilution", "outputs/dilution_sensitivity_results.json"),
         _stage(workspace, "transit_fit", "outputs/mcmc_transit_fit.json", "Candidate-derived stellar parameters or fit inputs are unavailable."),
         _stage(workspace, "ttv", "outputs/ttv_analysis_results.json", "Candidate-derived stellar parameters or complete timing inputs are unavailable."),

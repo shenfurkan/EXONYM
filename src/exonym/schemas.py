@@ -1961,17 +1961,25 @@ def validate_schemas(
                         candidate_id = sed_fit_instance.get("candidate_id")
                         if candidate_id is not None and candidate_id != workspace_dir.name:
                             report.add(sed_fit_path, "schema-violation", "SED result candidate_id does not match its workspace")
-                        calibration_assets = sed_fit_instance.get("calibration_assets")
-                        if sed_fit_instance.get("calibrated") is True and isinstance(calibration_assets, dict):
-                            input_artifacts = calibration_assets.get("input_artifacts")
+                        input_provenance = sed_fit_instance.get("input_provenance")
+                        if isinstance(input_provenance, dict):
+                            input_artifacts = input_provenance.get("input_artifacts")
+                            manifest_artifact = input_provenance.get("input_manifest_artifact")
                             if isinstance(input_artifacts, list):
                                 _validate_artifacts(
                                     report,
                                     sed_fit_path,
                                     workspace_dir,
                                     input_artifacts,
-                                    "SED response-integrated inputs",
+                                    "SED MIST bolometric-correction inputs",
                                 )
+                            _validate_artifacts(
+                                report,
+                                sed_fit_path,
+                                workspace_dir,
+                                [manifest_artifact],
+                                "SED MIST input manifest",
+                            )
                         mist_check = sed_fit_instance.get("mist_main_sequence_check")
                         if isinstance(mist_check, dict):
                             artifacts = [
@@ -2125,8 +2133,15 @@ def validate_schemas(
                     ("stellar_parameters_artifact", "SED stellar parameters"),
                 ):
                     _validate_artifacts(report, record_path, workspace_dir, [instance.get(field)], artifact_label)
-                _validate_artifacts(report, record_path, workspace_dir, instance.get("atmosphere_spectra"), "SED atmosphere")
-                _validate_artifacts(report, record_path, workspace_dir, instance.get("filter_responses"), "SED filter response")
+                mist = instance.get("mist")
+                table_artifacts = mist.get("table_artifacts") if isinstance(mist, dict) else None
+                _validate_artifacts(
+                    report,
+                    record_path,
+                    workspace_dir,
+                    table_artifacts,
+                    "SED MIST bolometric-correction archive",
+                )
             elif record_path.name == "tess_prf.manifest.json":
                 template_path = workspace_dir / "data" / "external" / "tess_prf.fits"
                 if not template_path.is_file() or instance.get("prf_sha256") != _file_sha256(template_path):

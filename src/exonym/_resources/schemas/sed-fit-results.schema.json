@@ -1,36 +1,90 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.invalid/schemas/sed-fit-results-1.0.json",
-  "title": "Candidate-local response-integrated exploratory SED result",
+  "$id": "https://example.invalid/schemas/sed-fit-results-2.0.json",
+  "title": "Candidate-local MIST v1.2 bolometric-correction SED diagnostic",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "candidate_id", "work_package", "generated_utc", "source", "scientific_status", "validation_eligible", "method", "calibrated", "calibration_status", "calibration_assets", "caveats"],
+  "required": ["schema_version", "candidate_id", "work_package", "generated_utc", "source", "scientific_status", "validation_eligible", "claim_eligible", "method", "input_provenance", "table_metadata", "fixed_atmosphere", "fit", "photometry", "caveats"],
   "properties": {
-    "schema_version": {"const": "1.0"},
+    "schema_version": {"const": 2},
     "candidate_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
     "work_package": {"const": "SED_FIT"},
     "generated_utc": {"type": "string", "format": "date-time"},
-    "source": {"type": "string", "minLength": 1},
-    "scientific_status": {"const": "exploratory-response-integrated-fit"},
+    "source": {"const": "candidate-data"},
+    "scientific_status": {"const": "exploratory-mist-v1.2-bolometric-correction-diagnostic"},
     "validation_eligible": {"const": false},
-    "method": {"type": "string", "minLength": 1},
-    "calibrated": {"type": "boolean"},
-    "calibration_status": {"enum": ["verified-response-integrated-fitzpatrick99-rv31", "uncalibrated"]},
-    "calibration_assets": {"type": "object", "additionalProperties": false, "properties": {"extinction_law": {"const": "Fitzpatrick 1999 R_V=3.1"}, "independent_filter_count": {"type": "integer", "minimum": 5}, "input_artifacts": {"type": "array", "minItems": 11, "items": {"$ref": "#/$defs/artifact"}}, "reason": {"type": "string", "minLength": 1}}},
-    "input_photometry": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/input-photometry"}},
-    "posterior": {"type": "object", "additionalProperties": false, "required": ["teff_k", "logg_cgs", "feh", "rstar_over_distance", "av_mag"], "properties": {"teff_k": {"$ref": "#/$defs/summary"}, "logg_cgs": {"$ref": "#/$defs/summary"}, "feh": {"$ref": "#/$defs/summary"}, "rstar_over_distance": {"$ref": "#/$defs/summary"}, "av_mag": {"$ref": "#/$defs/summary"}}},
-    "photometry": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/photometry-row"}},
-    "fit_quality": {"type": "object", "minProperties": 1, "additionalProperties": true},
+    "claim_eligible": {"const": false},
+    "method": {"const": "MIST v1.2 bolometric-correction table interpolation with profiled apparent bolometric magnitude and A_V"},
+    "input_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input_manifest_artifact", "input_artifacts"],
+      "properties": {
+        "input_manifest_artifact": {"$ref": "#/$defs/artifact"},
+        "input_artifacts": {"type": "array", "minItems": 3, "items": {"$ref": "#/$defs/artifact"}}
+      }
+    },
+    "table_metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["release", "bc_table_release", "rv", "magnitude_system", "interpolation"],
+      "properties": {
+        "release": {"const": "MIST v1.2"},
+        "bc_table_release": {"const": "BC_tables/v1"},
+        "rv": {"type": "number", "exclusiveMinimum": 0},
+        "magnitude_system": {"const": "Vega"},
+        "interpolation": {"const": "multilinear-rectilinear-no-extrapolation"}
+      }
+    },
+    "fixed_atmosphere": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["teff_k", "logg_cgs", "feh_dex"],
+      "properties": {
+        "teff_k": {"type": "number"},
+        "logg_cgs": {"type": "number"},
+        "feh_dex": {"type": "number"}
+      }
+    },
+    "fit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["av_mag", "apparent_bolometric_mag", "chi_square", "degrees_of_freedom"],
+      "properties": {
+        "av_mag": {"type": "number"},
+        "apparent_bolometric_mag": {"type": "number"},
+        "chi_square": {"type": "number", "minimum": 0},
+        "degrees_of_freedom": {"type": "integer", "minimum": 1}
+      }
+    },
+    "photometry": {"type": "array", "minItems": 3, "items": {"$ref": "#/$defs/photometry-row"}},
     "caveats": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
   },
-  "allOf": [
-    {"if": {"properties": {"calibrated": {"const": true}}}, "then": {"required": ["input_photometry", "posterior", "photometry", "fit_quality"], "properties": {"calibration_status": {"const": "verified-response-integrated-fitzpatrick99-rv31"}, "calibration_assets": {"required": ["extinction_law", "independent_filter_count", "input_artifacts"]}}}},
-    {"if": {"properties": {"calibrated": {"const": false}}}, "then": {"properties": {"calibration_status": {"const": "uncalibrated"}, "calibration_assets": {"required": ["reason"]}}}}
-  ],
   "$defs": {
-    "summary": {"type": "object", "additionalProperties": false, "required": ["p16", "median", "p84", "plus", "minus"], "properties": {"p16": {"type": "number"}, "median": {"type": "number"}, "p84": {"type": "number"}, "plus": {"type": "number", "minimum": 0}, "minus": {"type": "number", "minimum": 0}}},
-    "input-photometry": {"type": "object", "additionalProperties": false, "required": ["band", "mag", "error"], "properties": {"band": {"type": "string", "minLength": 1}, "mag": {"type": "number"}, "error": {"type": "number", "exclusiveMinimum": 0}}},
-    "photometry-row": {"type": "object", "additionalProperties": false, "required": ["band", "observed_mag", "total_error_mag", "model_mag_at_posterior_median", "residual_mag"], "properties": {"band": {"type": "string", "minLength": 1}, "observed_mag": {"type": "number"}, "total_error_mag": {"type": "number", "exclusiveMinimum": 0}, "model_mag_at_posterior_median": {"type": "number"}, "residual_mag": {"type": "number"}}},
-    "artifact": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "role"], "properties": {"path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "role": {"type": "string", "minLength": 1}}}
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "role"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "role": {"type": "string", "minLength": 1}
+      }
+    },
+    "photometry-row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["catalog", "catalog_band", "mist_column", "observed_mag", "uncertainty_mag", "bc_mag_at_fit", "model_mag", "residual_mag"],
+      "properties": {
+        "catalog": {"type": "string", "minLength": 1},
+        "catalog_band": {"type": "string", "minLength": 1},
+        "mist_column": {"type": "string", "minLength": 1},
+        "observed_mag": {"type": "number"},
+        "uncertainty_mag": {"type": "number", "exclusiveMinimum": 0},
+        "bc_mag_at_fit": {"type": "number"},
+        "model_mag": {"type": "number"},
+        "residual_mag": {"type": "number"}
+      }
+    }
   }
 }

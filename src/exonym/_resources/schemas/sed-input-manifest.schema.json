@@ -1,22 +1,73 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.invalid/schemas/sed-input-manifest-1.0.json",
-  "title": "Candidate-local response-integrated SED calibration input",
+  "$id": "https://example.invalid/schemas/sed-input-manifest-2.0.json",
+  "title": "Candidate-local MIST v1.2 bolometric-correction SED input",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "candidate_id", "purpose", "photometry_artifact", "stellar_parameters_artifact", "atmosphere_spectra", "filter_responses"],
+  "required": ["schema_version", "candidate_id", "purpose", "photometry_artifact", "stellar_parameters_artifact", "mist", "photometry"],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"const": 2},
     "candidate_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
-    "purpose": {"const": "response-integrated-sed-calibration"},
+    "purpose": {"const": "mist-v1.2-bolometric-correction-diagnostic"},
     "photometry_artifact": {"$ref": "#/$defs/artifact"},
     "stellar_parameters_artifact": {"$ref": "#/$defs/artifact"},
-    "atmosphere_spectra": {"type": "array", "minItems": 4, "items": {"$ref": "#/$defs/spectrum"}},
-    "filter_responses": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/filter"}}
+    "mist": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["release", "bc_table_release", "rv", "table_artifacts"],
+      "properties": {
+        "release": {"const": "MIST v1.2"},
+        "bc_table_release": {"const": "BC_tables/v1"},
+        "rv": {"type": "number", "exclusiveMinimum": 0},
+        "table_artifacts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/table-artifact"}}
+      }
+    },
+    "photometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["measurements"],
+      "properties": {
+        "measurements": {"type": "array", "minItems": 3, "items": {"$ref": "#/$defs/measurement"}}
+      }
+    }
   },
   "$defs": {
-    "artifact": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "role"], "properties": {"path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "role": {"type": "string", "minLength": 1}}},
-    "spectrum": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "role", "teff_k", "logg_cgs", "feh"], "properties": {"path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "role": {"type": "string", "minLength": 1}, "teff_k": {"type": "number"}, "logg_cgs": {"type": "number"}, "feh": {"type": "number"}}},
-    "filter": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "role", "band", "zero_point_flux_jy"], "properties": {"path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "role": {"type": "string", "minLength": 1}, "band": {"type": "string", "minLength": 1}, "zero_point_flux_jy": {"type": "number", "exclusiveMinimum": 0}}}
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "role"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "role": {"type": "string", "minLength": 1}
+      }
+    },
+    "table-artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "role", "table_kind", "source_url"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "role": {"type": "string", "minLength": 1},
+        "table_kind": {"enum": ["ubvriplus", "wise"]},
+        "source_url": {"type": "string", "format": "uri", "pattern": "^https://waps\\.cfa\\.harvard\\.edu/MIST/BC_tables/v1/"}
+      },
+      "oneOf": [
+        {"properties": {"table_kind": {"const": "ubvriplus"}, "source_url": {"const": "https://waps.cfa.harvard.edu/MIST/BC_tables/v1/UBVRIplus.txz"}}},
+        {"properties": {"table_kind": {"const": "wise"}, "source_url": {"const": "https://waps.cfa.harvard.edu/MIST/BC_tables/v1/WISE.txz"}}}
+      ]
+    },
+    "measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["catalog", "catalog_band", "mist_column", "magnitude_system"],
+      "properties": {
+        "catalog": {"type": "string", "minLength": 1},
+        "catalog_band": {"type": "string", "minLength": 1},
+        "mist_column": {"type": "string", "minLength": 1},
+        "magnitude_system": {"const": "Vega"}
+      }
+    }
   }
 }

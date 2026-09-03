@@ -1656,45 +1656,6 @@ def test_sed_recovers_synthetic_photometry():
     assert posterior["logg_cgs"]["median"] == pytest.approx(4.438, abs=0.3)
 
 
-def test_sed_blackbody_uses_single_catalog_temperature_prior(monkeypatch):
-    import exonym.sed as sed
-
-    stellar = {
-        "teff_k": 5700.0,
-        "logg_cgs": 4.4,
-        "feh": 0.0,
-        "mass_solar": 1.0,
-        "radius_solar": 1.0,
-        "parallax_mas": 10.0,
-        "parallax_mas_err": 0.05,
-    }
-    captured = {}
-
-    def fake_run(log_probability, start, n_walkers, burn_in, production, seed):
-        captured["log_probability"] = log_probability
-        captured["start"] = np.asarray(start, dtype=float)
-        samples = np.tile(np.asarray(start, dtype=float), (4, 1))
-        return samples, SimpleNamespace(acceptance_fraction=np.full(n_walkers, 0.5))
-
-    monkeypatch.setattr(sed, "_run_emcee", fake_run)
-    monkeypatch.setattr(
-        sed,
-        "blackbody_model_magnitudes",
-        lambda teff_k, log_radius_over_distance, av_mag, band_data: np.zeros(len(band_data)),
-    )
-
-    sed._fit_blackbody([("J", 0.0, 0.1)], stellar, n_walkers=4, burn_in=1, production=1)
-
-    log_probability = captured["log_probability"]
-    start = captured["start"]
-    center = float(log_probability(start))
-    lower = float(log_probability(start + np.array([-100.0, 0.0, 0.0])))
-    upper = float(log_probability(start + np.array([100.0, 0.0, 0.0])))
-
-    assert center - lower == pytest.approx(0.125)
-    assert center - upper == pytest.approx(0.125)
-
-
 def test_sed_blackbody_rejects_invalid_parallax_draws_before_summaries(monkeypatch):
     import exonym.sed as sed
 
@@ -1772,34 +1733,6 @@ def test_sed_percentile_summary():
     assert summary["median"] == pytest.approx(5.0)
     assert summary["p16"] < summary["median"] < summary["p84"]
     assert summary["plus"] == pytest.approx(summary["p84"] - summary["median"])
-
-
-def test_sed_fit_requires_candidate_owned_photometry(tmp_path, monkeypatch):
-    from exonym.sed import run_sed_fit
-    from exonym.workspace import create_candidate
-
-    workspace = create_candidate(tmp_path, "sed-no-photometry")
-    monkeypatch.setattr("exonym.sed.load_stellar_parameters", lambda _: {"teff_k": 5700.0})
-    monkeypatch.setattr("exonym.sed.load_photometry", lambda _: None)
-
-    with pytest.raises(RuntimeError, match="candidate-owned broadband photometry"):
-        run_sed_fit(workspace)
-    assert not (workspace.path / "outputs" / "sed_fit_results.json").exists()
-
-
-def test_sed_fit_fails_closed_without_a_response_integrated_grid(tmp_path, monkeypatch):
-    from exonym.sed import run_sed_fit
-    from exonym.workspace import create_candidate
-
-    workspace = create_candidate(tmp_path, "sed-grid-required")
-    monkeypatch.setattr(
-        "exonym.sed.load_photometry",
-        lambda _: {"2MASS": {"J": {"mag": 10.0, "error": 0.02}}},
-    )
-
-    with pytest.raises(RuntimeError, match="response-integrated"):
-        run_sed_fit(workspace)
-    assert not (workspace.path / "outputs" / "sed_fit_results.json").exists()
 
 
 # ---------------------------------------------------------------------------
