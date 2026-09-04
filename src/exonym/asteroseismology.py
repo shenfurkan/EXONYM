@@ -6,8 +6,8 @@ Estimates solar-like p-mode stellar oscillation envelope parameters:
 
 From high-cadence light curves via background-whitened Lomb-Scargle power spectral
 densities (PSD), and derives fundamental stellar properties (M_star, R_star, rho_star, log_g)
-using canonical asteroseismic scaling relations (Kjeldsen & Bedding 1995, Huber et al. 2011,
-Chaplin et al. 2014).
+using the retained Huber et al. (2011) and Chaplin et al. (2014) scaling
+references.
 
 Scaling Relations:
     (R / R_sun) = (nu_max / nu_max_sun) * (Delta_nu / Delta_nu_sun)^-2 * (Teff / Teff_sun)^(1/2)
@@ -22,6 +22,28 @@ Scientific Boundary:
     The output is an exploratory scaling diagnostic.  It is not mode
     identification, a calibrated stellar inference, planet validation, or a
     lifecycle decision.
+
+Units and verified provenance
+-----------------------------
+Cadence time is ``BTJD_TDB`` days; the native PSD frequency axis is uHz; PSD
+uses Astropy's declared ``psd`` normalization; whitened power is dimensionless;
+``T_eff`` is K; ``nu_max`` and ``Delta_nu`` are uHz; mass/radius are
+``M_sun``/``R_sun``; density is solar-normalized or g cm^-3 as named; and
+surface gravity is ``log10(cm s^-2)``.  The primary scaling references retained
+locally are Huber et al. (2011), ADS ``2011ApJ...743..143H``, DOI
+``10.1088/0004-637X/743/2/143``, and Chaplin et al. (2014), ADS
+``2014ApJS..210....1C``, DOI ``10.1088/0067-0049/210/1/1``.
+
+The relation is a solar-like-oscillation scaling diagnostic, not mode
+identification or a calibrated stellar posterior.  It is most informative for
+solar-like oscillators through giants, with documented systematic risk for
+evolved stars and model-dependent ``Delta_nu`` corrections.  Unsupported
+cadence/frequency coverage, nonfinite observables, invalid correction evidence,
+or an unavailable adapter fail closed; no result can alter ``claim_eligible``.
+The retained registry does not yet contain the primary source for the
+Harvey-style background parametrization; that model is therefore documented as
+a bounded preprocessing diagnostic rather than a separately calibrated physical
+measurement.
 """
 
 from __future__ import annotations
@@ -499,11 +521,10 @@ def seismic_mass_radius(
     prior (solar reference by default) closes the system.
 
     .. note:: Systematic bias in Delta-nu
-        The classic Kjeldsen & Bedding (1995) scaling relation for Delta-nu
-        carries a known 5–15% systematic offset driven by near-surface effects.
-        A caller may apply ``dnu_correction_factor`` only after retaining its
-        own candidate-owned calibration evidence. This helper does not select
-        a correction grid or infer a factor from stellar parameters.
+        Solar-like ``Delta-nu`` scaling can carry regime-dependent systematic
+        error. A caller may apply ``dnu_correction_factor`` only after retaining
+        its own candidate-owned calibration evidence. This helper does not
+        select a correction grid or infer a factor from stellar parameters.
         ``dnu_correction_factor`` multiplies the raw Lomb-Scargle Delta-nu
          estimate before the ratio is computed (default 1.0 = no correction).
     """

@@ -9,6 +9,19 @@ Scientific boundary:
     A finite false-positive probability remains evidence from its recorded
     assumptions. Claim creation is disabled until provenance-bound observed
     photometry and calibrated scene constraints are integrated.
+
+Primary source, units, and fail-closed contract
+------------------------------------------------
+TRICERATOPS/TREX scenario context is Giacalone et al. (2021), ADS
+``2021AJ....161...24G``, DOI ``10.3847/1538-3881/abd184``.  Parsed FPP and
+NFPP are finite dimensionless probabilities in `[0, 1]`; input period is days,
+depth ppm, duration hours, dynamic exposure days/seconds as named, and observed
+flux/error is normalized relative flux.  Strict finite JSON, a candidate-owned
+hash-bound ephemeris/light curve, valid scene artifacts, and a real engine
+result are required.  Missing runtime, malformed output, fallback execution,
+or incomplete scene evidence writes an unresolved/unavailable record, not a
+scientific rejection.  Even a finite FPP/NFPP always preserves
+``claim_eligible: false`` because calibrated source-scene integration is absent.
 """
 
 from __future__ import annotations

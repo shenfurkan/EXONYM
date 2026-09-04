@@ -5,6 +5,19 @@ star simulations, and contrast-curve data for a single TESS target.
 
 The class is candidate-neutral: all target-specific data is passed via
 constructor arguments or loaded from candidate-owned files.
+
+Units, provenance, and fail-closed contract
+-------------------------------------------
+The scene contract implements the input side of Giacalone et al. (2021), ADS
+``2021AJ....161...24G``, DOI ``10.3847/1538-3881/abd184``, with the background
+population from Girardi et al. (2005), ADS ``2005A&A...436..895G``, DOI
+``10.1051/0004-6361:20042352``.  Coordinates are ICRS degrees; mass/radius are
+``M_sun``/``R_sun``; temperature is K; TESS magnitude and contrast are mag and
+delta-mag; parallax is mas; contrast separation is arcsec; and background count
+is an integer count.  The retained TRILEGAL cache and SHA-256 binding are
+required.  Missing/nonfinite scene fields, nonmonotonic contrast curves,
+duplicate neighbors, or a hash mismatch raises instead of supplying a fallback.
+The scene is conditional scenario input, not source attribution or a claim.
 """
 
 from __future__ import annotations

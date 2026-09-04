@@ -14,6 +14,19 @@ Scientific Boundary:
 References:
     methods/tls_search.md and methods/detrending-and-transit-inference.md
     document the search and preprocessing assumptions used by survey controls.
+
+Verified sources, units, and hard boundary
+------------------------------------------
+The retained BLS source is Kovács, Zucker & Mazeh (2002), ADS
+``2002A&A...391..369K``, DOI ``10.1051/0004-6361:20020802``; the optional TLS
+source is Hippke & Heller (2019), ADS ``2019A&A...623A..39H``, DOI
+``10.1051/0004-6361/201834672``.  Survey configuration labels period/window in
+days, duration in hours, depth in ppm, phase as a dimensionless fraction, and
+recovery/comparison results as dimensionless.  Candidate data remain BTJD days
+and normalized flux/error.  Missing raw provenance, non-frozen configuration,
+invalid records, or unavailable data blocks the affected run.  A survey alert
+or finite injection-recovery fraction remains `claim_eligible: false` and is
+not a population-completeness or validation result.
 """
 
 from __future__ import annotations

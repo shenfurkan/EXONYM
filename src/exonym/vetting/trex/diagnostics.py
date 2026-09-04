@@ -6,7 +6,15 @@ diagnostic aid, never a scientific claim.
 
 References
 ----------
-* Giacalone et al. (2021, AJ, 161, 24), Section 4.2.
+* Giacalone et al. (2021), ADS ``2021AJ....161...24G``, DOI
+  ``10.3847/1538-3881/abd184``, Section 4.2.
+
+``lnZ`` is dimensionless log evidence; FPP, NFPP, and scenario probabilities
+are dimensionless.  ``TrexDiagnostic.value`` and ``threshold`` use the unit of
+their named diagnostic (probability for FPP/NFPP).  Numerical anomalies and
+all-``-inf`` scenarios are explicitly degenerate, never passes.  `TrexResult`
+always retains ``claim_eligible=False`` because scenario probabilities are not
+yet linked to a calibrated, provenance-bound scene-model claim path.
 """
 
 from __future__ import annotations

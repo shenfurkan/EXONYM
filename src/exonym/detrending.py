@@ -18,6 +18,20 @@ Scientific Boundary:
 References:
     methods/detrending-and-transit-inference.md documents the backend models,
     units, and limitations used by this module.
+
+Primary literature, units, and failure boundary
+------------------------------------------------
+The Wotan backend is Hippke et al. (2019), ADS ``2019AJ....158..143H``, DOI
+``10.3847/1538-3881/ab3984``.  The Celerite Matérn-3/2 implementation is
+Foreman-Mackey et al. (2017), ADS ``2017AJ....154..220F``, DOI
+``10.3847/1538-3881/aa9332``.  Times are ``BTJD_TDB`` days, flux/trend/error
+arrays are dimensionless normalized relative flux, windows and GP length scales
+are days, and sector labels are positive mission integers.  Celerite requires
+reported finite positive per-cadence errors; it never invents covariance from a
+scatter estimate.  Missing raw provenance, sector labels, a complete
+candidate-derived ephemeris for a mask, an optional backend, or a finite trend
+fails without a processed science artifact.  Detrending remains preprocessing;
+it cannot set ``claim_eligible``.
 """
 
 from __future__ import annotations

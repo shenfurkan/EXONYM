@@ -7,6 +7,17 @@ and ``nsamples`` parameters.
 
 All functions operate on phase-folded time arrays relative to transit
 midpoint.
+
+Verified sources, units, and failure boundary
+----------------------------------------------
+Mandel & Agol (2002) is retained as ADS ``2002ApJ...580L.171M``, DOI
+``10.1086/345520``; the Batman implementation is Kreidberg (2015), ADS
+``2015PASP..127.1161K``, DOI ``10.1086/683602``.  Phase-relative time, period,
+epoch, and dynamic exposure use days; semimajor axis uses cm; radii use
+``R_earth``/``R_sun`` as named; inclination/periastron use degrees; eccentricity,
+limb darkening, flux ratios, and normalized model flux are dimensionless.
+Nonfinite/nonpositive exposure is rejected before Batman runs.  These are
+conditional scenario forward models and cannot set ``claim_eligible``.
 """
 
 from __future__ import annotations

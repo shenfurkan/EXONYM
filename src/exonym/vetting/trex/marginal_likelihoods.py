@@ -9,6 +9,18 @@ Architecture:
     2. Compute geometric transit probability (b, a_Rs, rp_rs).
     3. For transiting draws, evaluate the Mandel-Agol likelihood.
     4. Compute lnZ = log(mean(exp(lnL + lnprior))) via _log_mean_exp.
+
+Units, verified source, and failure boundary
+---------------------------------------------
+The scenario framework is Giacalone et al. (2021), ADS
+``2021AJ....161...24G``, DOI ``10.3847/1538-3881/abd184``.  Time/period/exposure
+are days; flux and sigma are normalized relative flux; depth is ppm; masses and
+radii are solar/Earth units as named; semimajor axis is cm; contrast separation
+is arcsec; parallax is mas; and log evidence, priors, FPP/NFPP, and scenario
+probabilities are dimensionless.  Geometrically impossible draws contribute
+zero weight; numerical anomalies are surfaced by the normalization status.
+Missing/invalid scene values or exposure is rejected.  This Monte Carlo output
+is conditional diagnostic evidence and never claim-eligible.
 """
 
 from __future__ import annotations
@@ -370,7 +382,9 @@ def compute_fpp_nfpp(lnZ: np.ndarray) -> Tuple[float, float, np.ndarray, str]:
     # NFPP = sum of all neighbour-scenario probabilities
     nfpp = np.sum(probs[N_TARGET_SCENARIOS:]) if n_total > N_TARGET_SCENARIOS else 0.0
 
-    return float(fpp), float(nfpp), probs, norm_status
+    fpp_clean = max(0.0, min(1.0, float(fpp))) if np.isfinite(fpp) else float("nan")
+    nfpp_clean = max(0.0, min(1.0, float(nfpp))) if np.isfinite(nfpp) else float("nan")
+    return fpp_clean, nfpp_clean, probs, norm_status
 
 
 __all__ = [

@@ -13,6 +13,18 @@ inferring unavailable values.
 Scientific Boundary:
     Loader output indicates availability and binding of input evidence. It does
     not establish a detection, source association, or scientific claim.
+
+Unit and fail-closed contract
+-----------------------------
+TESS time is returned only as ``BTJD_TDB`` days after a declared FITS time
+system/reference check.  Flux and ``flux_err`` are dimensionless normalized
+relative flux; sector labels are positive integers; transit period/duration are
+days; epoch is BTJD; and depth is ppm.  Stellar fields retain their named K,
+``log10(cm s^-2)``, dex, ``M_sun``, and ``R_sun`` units.  This module is an I/O
+and provenance boundary, not an astrophysical relation; therefore no paper is
+attached to its parsing logic.  Missing files, nonfinite values, incompatible
+time systems, invalid provenance, or unavailable reported errors remain
+unavailable and cannot set ``claim_eligible``.
 """
 
 from __future__ import annotations

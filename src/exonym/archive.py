@@ -15,6 +15,19 @@ Scientific boundary:
     Archive availability, crowding summaries, and quality flags are screening
     evidence only. They neither calibrate a photometric scene model nor create
     a novelty, disposition, or validation claim.
+
+Units, retained reference, and fail-closed boundary
+----------------------------------------------------
+Archive positions are ICRS degrees; separations are arcsec or mas as named;
+proper motions are mas yr^-1; parallax is mas; catalog magnitudes/errors are
+mag; and provider time values retain their declared scale rather than being
+silently converted.  The exact Pogson error propagation used here is supported
+by Evans et al. (2018), ADS ``2018A&A...616A...4E``, DOI
+``10.1051/0004-6361/201832756``.  Provider availability, response completeness,
+and selection functions are external evidence limitations, not formulas this
+module resolves.  Network failure, malformed response, missing target context,
+or a search radius below the stated crowding boundary is recorded as unavailable
+or blocked, never as an empty sky or a claim-eligible result.
 """
 
 from __future__ import annotations

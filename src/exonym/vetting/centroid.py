@@ -3,7 +3,7 @@
 ``Z_centroid`` evaluates whether the transit signal originates on the target
 star or an offset background source:
 
-    Z = sqrt((d_ra*cos(dec))^2 + (d_dec)^2) / sigma_centroid
+    Z = sqrt(dalpha_cosdelta^2 + d_dec^2) / sigma_centroid
 
 All inputs must be finite, and ``sigma_centroid`` must be positive. A missing,
 sentinel, or non-finite uncertainty is an unresolved source-location test, not
@@ -17,6 +17,17 @@ Scientific boundary:
     A finite significance is conditional on the supplied difference-image
     uncertainty and reference frame. It is a source-location screen, not a
     calibrated PRF localization result or a validation claim.
+
+Units, retained context, and fail-closed boundary
+--------------------------------------------------
+The difference-image context is Bryson et al. (2013), ADS
+``2013PASP..125..889B``, DOI ``10.1086/671767``.  Input offsets and their
+one-sigma uncertainty are on-sky arcsec; declination is ICRS degrees; the
+returned offset score and Rayleigh-tail probability are dimensionless.  The
+function requires finite inputs, physical declination, and strictly positive
+uncertainty.  It does not estimate a calibrated PRF covariance or source scene;
+an invalid measurement is unresolved rather than passing, and no result can set
+``claim_eligible``.
 """
 
 from __future__ import annotations

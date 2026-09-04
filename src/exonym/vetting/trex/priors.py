@@ -13,6 +13,21 @@ Implements the astrophysical priors described in Giacalone et al. (2021):
 All sampling functions operate on arrays of uniform random draws in [0, 1)
 and return the corresponding parameter samples.  Log-prior functions compute
 the (log) prior probability density at given parameter values.
+
+Verified sources, units, and limits
+-----------------------------------
+The retained sources are Fressin et al. (2013), ADS ``2013ApJ...766...81F``,
+DOI ``10.1088/0004-637X/766/2/81``; Moe & Di Stefano (2017), ADS
+``2017ApJS..230...15M``, DOI ``10.3847/1538-4365/aa6fb6``; Raghavan et al.
+(2010), ADS ``2010ApJS..190....1R``, DOI ``10.1088/0067-0049/190/1/1``; and
+Winters et al. (2019), ADS ``2019AJ....157..216W``, DOI
+``10.3847/1538-3881/ab05dc``.  Radius draws are Earth radii, primary mass is
+solar mass, periods are days, inclinations/arguments are degrees, separations
+are arcsec or AU as named, parallax is mas, and log priors are dimensionless.
+The Winters relation is limited to its documented M-dwarf range; out-of-range
+or nonfinite draws must be rejected rather than extrapolated.  These priors are
+conditional scenario assumptions, not population validation, and cannot set
+``claim_eligible``.
 """
 
 from __future__ import annotations

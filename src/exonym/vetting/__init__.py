@@ -10,6 +10,17 @@ Scientific boundary:
     These helpers do not calibrate a scene model or a population false-positive
     probability. A passing diagnostic therefore never establishes a discovery
     or validation claim on its own.
+
+Units and verified provenance
+-----------------------------
+Odd/even depth statistics use a shared declared depth unit (normally ppm) and
+return dimensionless sigma; centroid offsets/errors are arcsec and return a
+dimensionless score/probability; ellipsoidal inputs are named solar/AU/K/degree
+quantities and return ppm.  Difference-image context is Bryson et al. (2013),
+ADS ``2013PASP..125..889B``, DOI ``10.1086/671767``; leading ellipsoidal context
+is Morris (1985), ADS ``1985ApJ...295..143M``, DOI ``10.1086/163359``.  Invalid
+or incomplete inputs are unresolved, never passing, and no exported helper can
+set ``claim_eligible``.
 """
 
 from .centroid import centroid_gate, centroid_offset_pvalue, centroid_offset_z

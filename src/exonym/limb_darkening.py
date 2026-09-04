@@ -6,10 +6,21 @@ atmosphere profiles using candidate-owned effective temperature, surface
 gravity, and metallicity measurements, then records the finite per-band
 ``u1`` and ``u2`` coefficients with their uncertainties.
 
-The implementation follows the quadratic-law context documented in the
-project's Perryman transit-photometry note.  The artifact is a prior for later
-light-curve modelling, not a fitted stellar-intensity measurement, validation
-constraint, or candidate disposition.
+The artifact is a prior for later light-curve modelling, not a fitted
+stellar-intensity measurement, validation constraint, or candidate disposition.
+
+Primary literature, units, and failure boundary
+------------------------------------------------
+The physical TESS atmosphere-grid context is Claret (2017), ADS
+``2017A&A...600A..30C``, DOI ``10.1051/0004-6361/201629705``; the stored
+triangular coordinate transform is Kipping (2013), ADS
+``2013MNRAS.435.2152K``, DOI ``10.1093/mnras/stt1435``.  Inputs are
+candidate-owned ``teff_k`` in K, ``logg_cgs`` in ``log10(cm s^-2)``, and
+``feh`` in dex, each with a positive uncertainty in the same named unit.
+Outputs ``u1``, ``u2``, ``q1``, and ``q2`` are dimensionless.  Missing LDTk,
+missing/invalid stellar parameters, nonfinite coefficients, filter mismatch, or
+workspace mismatch fails without a prior artifact.  A prior is not a stellar
+measurement and cannot set ``claim_eligible``.
 """
 
 from __future__ import annotations

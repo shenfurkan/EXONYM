@@ -2,8 +2,7 @@
 
 Measures per-transit timing deviations (O - C) from a refitted linear ephemeris
 for diagnostic investigation of possible gravitational perturbations from
-non-transiting companions and resonant multi-planet systems
-(Agol et al. 2005, Holman & Murray 2005):
+non-transiting companions and resonant multi-planet systems:
 
 1. Linear Ephemeris Reference:
    T_calc(N) = T_0 + N * P_orb
@@ -26,6 +25,20 @@ Scientific Boundary:
     Per-epoch timings and resonance super-periods are exploratory diagnostics.
     They do not establish a TTV detection, a perturber, a planet claim, or a
     candidate lifecycle transition.
+
+Verified sources, units, and failure boundary
+----------------------------------------------
+Template flux uses Mandel & Agol (2002), ADS ``2002ApJ...580L.171M``, DOI
+``10.1086/345520``.  The retained first-order-resonance source is Lithwick,
+Xie & Wu (2012), ADS ``2012ApJ...761..122L``, DOI
+``10.1088/0004-637X/761/2/122``; Kepler iteration is Danby & Burkardt (1983),
+ADS ``1983CeMec..31...95D``, DOI ``10.1007/BF01686811``.  Times/periods retain
+their declared candidate time system in days (normally ``BTJD_TDB``); O-C is
+minutes; timing uncertainties use their named minutes/days unit; formal
+``dP/dt`` retains declared period/time units; and BIC is dimensionless.  A
+missing/tampered fit, incompatible time system, insufficient timing coverage,
+nonfinite template, or failed solver writes no timing interpretation.  Neither
+a super-period nor a quadratic ephemeris can set ``claim_eligible``.
 """
 
 from __future__ import annotations

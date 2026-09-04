@@ -13,6 +13,18 @@ Scientific Boundary:
 References:
     methods/tls_search.md and methods/detrending-and-transit-inference.md
     describe the search and preprocessing limitations used by these controls.
+
+Verified source, units, and failure boundary
+--------------------------------------------
+The BLS control calls the retained Kovács, Zucker & Mazeh (2002) method, ADS
+``2002A&A...391..369K``, DOI ``10.1051/0004-6361:20020802``.  Time is
+``BTJD_TDB`` days, normalized flux is dimensionless, sectors are positive
+integers, window/duration/period are days, injection depths are ppm or
+dimensionless relative deficit as named, and recovery fractions are
+dimensionless.  Invalid cadence shapes, nonfinite values, unsuitable windows,
+or absent real candidate photometry raise rather than produce an alert.  These
+finite controls do not calibrate survey completeness, reliability, or
+``claim_eligible``.
 """
 
 from __future__ import annotations

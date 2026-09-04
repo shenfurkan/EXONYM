@@ -13,6 +13,16 @@ Scientific boundary:
     A small statistic means this particular screen found no resolved odd/even
     discrepancy; it does not establish a planetary origin or a validation
     claim.
+
+Units and fail-closed boundary
+------------------------------
+Odd/even depths and their errors must share one explicit unit (normally ppm or
+dimensionless normalized relative flux); the returned Z score is dimensionless
+sigma.  This is elementary independent-error propagation rather than a distinct
+retained astrophysical relation, so no paper citation is fabricated.  Nonfinite
+or nonpositive errors must be rejected by the caller/guard; a small Z only means
+this screen did not resolve an alternating depth and cannot set
+``claim_eligible``.
 """
 
 from __future__ import annotations

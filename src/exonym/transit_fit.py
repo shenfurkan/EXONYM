@@ -11,8 +11,10 @@ spherical planet. The specific intensity profile is
     I(\\mu) / I(1) = 1 - u_1 (1 - \\mu) - u_2 (1 - \\mu)^2
 
 where :math:`\\mu = \\cos\\theta` and :math:`\\theta` is the angle between the
-line of sight and the local surface normal (Claret 2000).  The free limb-darkening
-parameters are sampled in Kipping (2013) coordinates
+line of sight and the local surface normal.  TESS-grid coefficient context is
+Claret (2017), ADS ``2017A&A...600A..30C``, DOI
+``10.1051/0004-6361/201629705``.  The free limb-darkening parameters are sampled
+in Kipping (2013) coordinates
 
 .. math::
 
@@ -77,14 +79,28 @@ ephemerides, and photometric time-series are loaded dynamically from the candida
 
 References
 ----------
-- Mandel & Agol, *ApJL* 580, L171 (2002)
-- Kipping, *MNRAS* 435, 2152 (2013)
-- Seager & Mallen-Ornelas, *ApJ* 585, 1038 (2003)
-- Sozzetti et al., *ApJ* 664, 1190 (2007)
-- Eastman et al., *PASP* 125, 83 (2013)
-- Goodman & Weare, *Comm. Appl. Math. Comput. Sci.* 5, 65 (2010)
-- Speagle, *MNRAS* 493, 3132 (2020)
-- Foreman-Mackey et al., *PASP* 125, 306 (2013)
+- Mandel & Agol (2002), ADS ``2002ApJ...580L.171M``, DOI ``10.1086/345520``.
+- Kreidberg (2015), ADS ``2015PASP..127.1161K``, DOI ``10.1086/683602``.
+- Kipping (2013), ADS ``2013MNRAS.435.2152K``, DOI ``10.1093/mnras/stt1435``.
+- Seager & Mallen-Ornelas (2003), ADS ``2003ApJ...585.1038S``, DOI
+  ``10.1086/346105``; Sozzetti et al. (2007), ADS ``2007ApJ...664.1190S``,
+  DOI ``10.1086/519214``.
+- Eastman, Gaudi & Agol (2013), ADS ``2013PASP..125...83E``, DOI
+  ``10.1086/669497``.
+
+Units, applicability, and fail-closed contract
+------------------------------------------------
+Times are ``BTJD_TDB`` days; input flux/error and forward-model flux are
+dimensionless normalized relative flux; period/duration are days; exposure is
+candidate-derived seconds; density is solar-normalized or g cm^-3 as named;
+``rp_rs``, ``a_rs``, ``q1``, ``q2``, and eccentricity are dimensionless; angles
+are degrees; and reported depths/errors are ppm.  The model assumes an opaque
+spherical occultor and quadratic limb darkening, with a circular solution unless
+the eccentric parameterization is selected.  Missing Batman, invalid dynamic
+exposure, unbound photometry/ephemeris, missing stellar uncertainty, nonfinite
+likelihood, or a posterior draw outside physical geometry fails rather than
+clips or substitutes a result.  The posterior and optional log evidence are
+descriptive diagnostics and never set ``claim_eligible``.
 """
 
 from __future__ import annotations

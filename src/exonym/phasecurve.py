@@ -7,7 +7,7 @@ components based on the BEER (Beaming, Ellipsoidal, and Reflection/emission) mod
    Circular-orbit basis term; a hotspot offset or eccentric orbit requires a
    dedicated brightness-map model rather than this diagnostic basis.
 2. Doppler Beaming / Boosting: A_beam * sin(phi)
-   Relativistic modulation proportional to radial velocity K_RV / c (Loeb & Gaudi 2003).
+   BEER-basis modulation proportional to radial velocity K_RV / c.
 3. Tidal Ellipsoidal Variations: -A_ellip * cos(2*phi)
    Tidal distortion of the host star by the companion, producing double-frequency modulation
    with maxima at quadrature (phi = 0.25, 0.75) and minima at conjunctions.
@@ -17,15 +17,35 @@ components based on the BEER (Beaming, Ellipsoidal, and Reflection/emission) mod
    candidate-local eccentric transit posterior supplies a marginalized
    eclipse phase and duration template.
 
-Uncertainties and covariances are estimated via a Generalized Estimating Equations (GEE)
-Huber-White cluster-sandwich covariance estimator (Liang & Zeger 1986) grouped into 0.5-day
-time blocks to remain robust against correlated red noise and stellar granulation.
+Uncertainties and covariances are estimated with a finite-sample-corrected
+cluster-sandwich estimator grouped into day-based time blocks to expose some
+within-block residual correlation.
 
 Scientific Boundary:
     This is an exploratory circular-harmonic regression with a secondary-eclipse
     control.  Its amplitudes and formal significances are not calibrated
     detection probabilities, physical amplitude measurements, or validation
     evidence on their own.
+
+Verified sources, units, and failure boundary
+----------------------------------------------
+The retained BEER source is Faigler & Mazeh (2011), ADS
+``2011MNRAS.415.3921F``, DOI ``10.1111/j.1365-2966.2011.19011.x``; the
+ellipsoidal context is Morris (1985), ADS ``1985ApJ...295..143M``, DOI
+``10.1086/163359``; and secondary/phase-curve interpretation is Shporer (2017),
+ADS ``2017PASP..129g2001S``, DOI ``10.1088/1538-3873/aa7112``.  Input time is
+``BTJD_TDB`` days; flux/error are dimensionless normalized relative flux;
+orbital phase and eccentricity are dimensionless; component amplitudes/errors
+are ppm; covariance is ppm^2 after output scaling; duration/block widths are
+days; and posterior angles are radians where named.  The regression is circular
+unless a hash-matched eccentric posterior supplies only its secondary-control
+template.  Missing coverage, invalid ephemeris, nonpositive error, or
+mismatched posterior template fails; the result is never calibrated source
+assignment, detection probability, or ``claim_eligible`` evidence.
+
+The retained local corpus does not yet contain a primary source for the exact
+cluster-sandwich implementation or its block construction.  Its covariance is
+therefore a robust regression diagnostic, not a calibrated red-noise model.
 """
 
 from __future__ import annotations
@@ -47,7 +67,8 @@ from .workspace import CandidateWorkspace
 # ASTROPHYSICAL_PROVENANCE:
 # 1. Primary transit masking width: half duration (0.5 * T14) expanded by a 30% baseline
 # buffer (0.5 * 1.3 = 0.65) to ensure ingress/egress wings are completely excluded without
-# encroaching into out-of-transit planetary reflection/emission (Perryman 2018; Shporer 2017).
+# encroaching into out-of-transit planetary reflection/emission. This is a
+# declared diagnostic mask policy, not a separately calibrated physical relation.
 TRANSIT_MASK_BUFFER_FRACTION = 0.30
 PRIMARY_MASK_HALF_DURATIONS = 0.5 * (1.0 + TRANSIT_MASK_BUFFER_FRACTION)
 
@@ -499,7 +520,7 @@ def cluster_sandwich_covariance(
         V = (X^T W X)^-1 [ sum_g (X_g^T W_g r_g r_g^T W_g X_g) ] (X^T W X)^-1
     with finite-sample degree-of-freedom correction:
         c = (G / (G - 1)) * ((N - 1) / (N - P))
-    
+
     The 'bread' matrix uses a Moore-Penrose pseudo-inverse (np.linalg.pinv) to safely
     handle collinear design columns (e.g. duplicate baseline offsets across overlapping sectors).
 

@@ -8,6 +8,14 @@ coordinate or trusts candidate metadata as a replacement for archive evidence.
 Scientific boundary:
     A region file is a review visualisation. It is not an astrometric fit,
     localization calibration, or evidence of the origin of a photometric dip.
+
+Unit and fail-closed contract
+-----------------------------
+Region coordinates are copied as finite ICRS/FK5 degrees from a validated
+candidate-local archival report.  DS9 labels are text and the output is a
+visualization file, not an astrometric model.  Missing/invalid archive evidence,
+nonfinite coordinates, or an empty valid source list fails without a region
+file; no export can set ``claim_eligible``.
 """
 
 from __future__ import annotations

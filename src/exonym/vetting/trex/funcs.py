@@ -9,6 +9,24 @@ This module provides:
 * Keplerian orbital mechanics (semi-major axis, impact parameter).
 
 All functions are pure NumPy/SciPy with no side effects.
+
+Verified provenance and units
+-----------------------------
+Retained stellar-relation context is Torres, Andersen & Giménez (2010), ADS
+``2010A&ARv..18...67T``, DOI ``10.1007/s00159-009-0027-7``; TESS catalog
+context for the implemented 2MASS J/Ks transform is Stassun et al. (2018), ADS
+``2018AJ....156..102S``, DOI ``10.3847/1538-3881/aad050``. Keplerian helpers
+use CGS mass in g, radius and semi-major axis in cm, period in days converted
+through the IAU/CODATA seconds standard, and return cm or dimensionless ratios
+as named. Magnitudes and
+delta-mag are mag; flux and surface-brightness ratios are dimensionless;
+temperatures are K; inclination/periastron are degrees.  Interpolation is only
+a conditional scenario approximation over the retained grid; invalid/nonfinite
+values or a contrast outside the measured curve raise.  The exact published
+source of each embedded CDWRF node and the pivot-wavelength monochromatic TESS
+surface-brightness surrogate is not yet registered in `literature/`; neither
+may be interpreted as a calibrated stellar characterization.  These helpers
+are inputs to claim-ineligible TREX diagnostics, never stellar characterization.
 """
 
 from __future__ import annotations

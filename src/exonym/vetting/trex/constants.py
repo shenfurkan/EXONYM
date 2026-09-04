@@ -9,9 +9,16 @@ Giacalone et al. (2021).
 
 References
 ----------
-* IAU Resolution B3 (2015): nominal solar and planetary conversion constants.
-* CODATA 2018: Newtonian gravitational constant and related values.
+* Prša et al. (2016), ADS ``2016AJ....152...41P``, DOI
+  ``10.3847/0004-6256/152/2/41``: IAU 2015 B3 nominal solar and planetary
+  conversion constants.
+* Tiesinga et al. (2021), ADS ``2021RvMP...93b5010T``, DOI
+  ``10.1103/RevModPhys.93.025010``: CODATA 2018 fundamental constants.
 * IAU 2012 Resolution B2: astronomical unit (149 597 870 700 m, exact).
+
+All exported names document CGS/SI/nominal-solar units in their suffixes or
+inline comments.  This standards adapter consumes no candidate data and cannot
+produce a physical inference or affect ``claim_eligible``.
 """
 
 from __future__ import annotations

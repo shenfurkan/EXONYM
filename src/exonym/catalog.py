@@ -6,15 +6,26 @@ astrometric, atmospheric-scale-height, and transmission observables from their
 explicit physical inputs; they are useful for planning, not fitted evidence.
 
 Astrophysical rationale:
-    The Doppler and astrometric helpers follow the two-body scaling relations
-    summarized in the project's Perryman radial-velocity and astrometry note.
-    Input and return units are encoded in their public function names and
-    docstrings so callers cannot silently mix catalog conventions.
+    The Doppler and astrometric helpers are unit-explicit two-body planning
+    scalings. Input and return units are encoded in their public function names
+    and docstrings so callers cannot silently mix catalog conventions.
 
 Scientific boundary:
     These estimates do not consume candidate observations, uncertainty models,
     or a scene model. They must not be interpreted as a detection or validation
     result.
+
+Units, provenance gap, and failure boundary
+-------------------------------------------
+The helper names encode all inputs and returns: Earth/solar masses and radii,
+AU, pc, K, km, m s^-1, microarcsec, and ppm.  IAU 2015 nominal values and
+CODATA 2018 constants are verified in `literature/README.md` as ADS
+``2016AJ....152...41P`` / DOI ``10.3847/0004-6256/152/2/41`` and ADS
+``2021RvMP...93b5010T`` / DOI ``10.1103/RevModPhys.93.025010``.  The current
+repository does not retain a primary source for every convenience planning
+scaling in this module; they therefore remain fail-closed positive-input
+calculators, not calibrated characterisation relations.  A nonpositive physical
+input raises, and no output can set ``claim_eligible``.
 """
 
 from __future__ import annotations

@@ -14,6 +14,18 @@ Scientific Boundary:
 References:
     methods/literature_notes/perryman_handbook/
     04_false_positives_vetting_diagnostics.md documents the diagnostic context.
+
+Units and fail-closed boundary
+------------------------------
+Times are ``BTJD_TDB`` days, period/duration are days, flux is dimensionless
+normalized relative flux, depth/error is ppm, and odd/even or half-phase
+significance is dimensionless sigma.  The median standard-error factor is the
+analytic form `sqrt(pi/2)`; the retained registry has no primary paper for this
+specific screening implementation, so scatter-based errors are explicitly not
+correlated-noise or population-calibrated uncertainties.  Missing candidate
+ephemeris, insufficient in/out-of-window cadence, nonfinite arrays, or an
+unbound detrending/search product returns unavailable/raises rather than a pass.
+This screening artifact cannot set ``claim_eligible``.
 """
 
 from __future__ import annotations

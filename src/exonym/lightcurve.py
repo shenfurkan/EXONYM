@@ -1,17 +1,16 @@
-"""Target-independent helpers for phase-folded transit light curves.
+r"""Target-independent helpers for phase-folded transit light curves.
 
 Scientific foundations
 ----------------------
-* **Transit geometry** — Perryman (2018, The Exoplanet Handbook, §2):
-  contact points T₁–T₄, circular-orbit duration equations, impact
-  parameter *b* = a cos *i* / R_*, and the V-shape statistic for
-  distinguishing U-shaped planetary transits from V-shaped grazing
-  eclipsing binaries.
-* **Robust depth estimation** — Ivezić et al. (2019, Statistics, Data
-  Mining, and Machine Learning in Astronomy): asymptotic standard error
-  of the median :math:`\sigma_{\text{med}} = \sqrt{\pi/(2N)}\,\sigma`
-  (:data:`~exonym.constants.SAMPLE_MEDIAN_STANDARD_ERROR_FACTOR`), median-binned phase-folded light
-  curves, and quadrature propagation of independent errors.
+* **Transit geometry** — Seager & Mallen-Ornelas (2003), ADS
+  ``2003ApJ...585.1038S``, DOI ``10.1086/346105``: circular-orbit duration
+  equations and impact parameter context.
+* **Robust depth estimation** — the asymptotic median standard-error factor
+  :math:`\sigma_{\text{med}} = \sqrt{\pi/(2N)}\,\sigma`
+  (:data:`~exonym.constants.SAMPLE_MEDIAN_STANDARD_ERROR_FACTOR`) and
+  quadrature propagation are exact statistical forms under independent-noise
+  assumptions.  The local registry does not retain a primary source for this
+  estimator; it is not a correlated-noise uncertainty model.
 * **Limb-darkening parametrisation** — Kipping (2013, MNRAS 435, 2152):
   triangular sampling transform between quadratic (*u*₁, *u*₂) and
   hyper-cube (*q*₁, *q*₂) coordinates.
@@ -26,6 +25,17 @@ Units convention
   through the IAU 2015 nominal-radius ratio in :mod:`exonym.constants`.
 * Density: g cm⁻³ (CGS); the solar normalization is reproducibly derived
   from IAU nominal solar constants and CODATA G.
+
+Verified literature and limits
+------------------------------
+The quadratic-coordinate transform is Kipping (2013), ADS
+``2013MNRAS.435.2152K``, DOI ``10.1093/mnras/stt1435``.  The circular transit
+density/contact context is Seager & Mallen-Ornelas (2003), ADS
+``2003ApJ...585.1038S``, DOI ``10.1086/346105``.  These helpers require a
+positive declared period and finite compatible arrays; circular contact
+geometry or coefficients fail. Their depth/error summaries are descriptive robust
+statistics and cannot create a detection, source
+assignment, or ``claim_eligible`` result.
 """
 
 from __future__ import annotations
@@ -133,7 +143,7 @@ def robust_transit_depth(
                 - \\operatorname{median}(\\mathbf{f}_{\\text{in}}).
 
     The standard error of each median uses the exact asymptotic factor
-    :math:`\\sqrt{\\pi/2}` (Ivezić et al. 2019, Eq. 3.37), giving
+    :math:`\\sqrt{\\pi/2}`, giving
     :math:`\\sigma_{\\text{med}} = \\sqrt{\\pi/(2N)}\\,\\sigma`.
     The quadrature-sum of the in- and out-of-transit median errors yields
     the combined depth uncertainty.
@@ -143,8 +153,9 @@ def robust_transit_depth(
     * **in-transit**: :math:`|\\phi| < T_{\\text{dur}}/2`
     * **out-of-transit**: :math:`1.2\\,T_{\\text{dur}} < |\\phi| < 2.5\\,T_{\\text{dur}}`
 
-    The 1.2× buffer guards against ingress/egress contamination in the
-    baseline window (Perryman §4.3.1).  The 2.5× outer cap limits
+    The 1.2× buffer and 2.5× outer cap are declared diagnostic-window
+    controls: the former limits ingress/egress contamination and the latter
+    limits
     contamination from phase-curve variability and adjacent transits.
 
     Parameters
@@ -198,7 +209,7 @@ def robust_transit_depth(
     finite = np.isfinite(hours) & np.isfinite(values)
     in_transit = finite & (np.abs(hours) < 0.5 * duration_hours)
     # ASTROPHYSICAL_HEURISTIC: 1.2× buffer avoids ingress/egress bleed
-    # into the out-of-transit baseline (Perryman §4.3.1).
+    # into the declared out-of-transit baseline; it is not a calibrated law.
     out_of_transit = finite & (np.abs(hours) > 1.2 * duration_hours) & (
         np.abs(hours) < 2.5 * duration_hours
     )
@@ -209,8 +220,8 @@ def robust_transit_depth(
 
     depth = float(np.median(out_values) - np.median(in_values))
     # NUMERICAL_GUARD: asymptotic median-error factor sqrt(pi/2)
-    # (Ivezić et al. 2019, Eq. 3.37).  Standard errors are propagated in
-    # quadrature, assuming independent in/out samples.
+    # Standard errors are propagated in quadrature, assuming independent
+    # in/out samples; this does not model correlated photometric noise.
     uncertainty = float(
         np.sqrt(
             (SAMPLE_MEDIAN_STANDARD_ERROR_FACTOR * np.std(in_values) / np.sqrt(in_values.size)) ** 2
@@ -233,7 +244,8 @@ def bin_phase_folded_flux(
     The phase range :math:`[-L,\\,+L]` hours (``limit_hours``) is divided
     into equal-width bins of ``bin_minutes`` / 60 hours each.  Within
     each bin the median flux and its asymptotic standard error
-    (Ivezić et al. 2019, factor :math:`\sqrt{\pi/2}`) are computed.  Bins with fewer
+    (the exact independent-sample factor :math:`\\sqrt{\\pi/2}`) are computed.
+    Bins with fewer
     than three samples are left as ``NaN``.
 
     The final (rightmost) bin uses an inclusive upper edge
@@ -302,7 +314,7 @@ def bin_phase_folded_flux(
         # estimate is minimally constrained.
         if samples.size >= 3:
             median[index] = np.median(samples)
-            # Asymptotic standard error of the median (Ivezić et al. 2019, Eq. 3.37).
+            # Exact asymptotic independent-sample median standard-error form.
             error[index] = SAMPLE_MEDIAN_STANDARD_ERROR_FACTOR * np.std(samples) / np.sqrt(samples.size)
 
     return centers, median, error
@@ -332,8 +344,9 @@ def calculate_contact_durations(
     solar radii.
 
     **Scaled semi-major axis.**  From Kepler's Third Law and the
-    definition of mean stellar density :math:`\\rho_*` (Perryman §2;
-    Seager & Mallén-Ornelas 2003):
+    definition of mean stellar density :math:`\\rho_*` (Seager &
+    Mallen-Ornelas 2003, ADS ``2003ApJ...585.1038S``, DOI
+    ``10.1086/346105``):
 
     .. math::
 
@@ -345,7 +358,7 @@ def calculate_contact_durations(
     reproducible nominal-solar normalization in :mod:`exonym.constants`.
 
     **Eccentricity factor.**  For an orbit with eccentricity *e* and
-    argument of periastron :math:`\\omega` (Perryman §2, Eq. 2.26):
+    argument of periastron :math:`\\omega`:
 
     .. math::
 
@@ -376,8 +389,7 @@ def calculate_contact_durations(
 
         T_{12} = T_{34} = \\tfrac{1}{2}(T_{14} - T_{23}).
 
-    **V-shape statistic.**  Dimensionless morphology diagnostic
-    (Perryman §2):
+    **V-shape statistic.**  Dimensionless morphology diagnostic:
 
     .. math::
 
@@ -467,13 +479,15 @@ def calculate_contact_durations(
     rho_solar_gcm3 = SOLAR_MEAN_DENSITY_G_CM3
     rho_star_gcm3 = m_star_solar / (r_star_solar**3) * rho_solar_gcm3
     period_sec = period_days * SECONDS_PER_DAY
-    # a / R_* from Kepler's Third Law (Perryman §2; Seager & Mallén-Ornelas 2003).
+    # a / R_* from Kepler's Third Law and the circular density relation of
+    # Seager & Mallen-Ornelas (2003), ADS 2003ApJ...585.1038S.
     a_over_r = (
         (GRAVITATIONAL_CONSTANT_CGS * (period_sec**2) * rho_star_gcm3)
         / (3.0 * math.pi)
     ) ** (1.0 / 3.0)
 
-    # Eccentricity correction factor (Perryman §2, Eq. 2.26).
+    # Eccentricity conjunction correction; the circular-contact result remains
+    # a geometric diagnostic rather than a fitted eccentric model.
     ecc_factor = math.sqrt(1.0 - eccentricity**2) / (
         1.0 + eccentricity * math.sin(math.radians(omega_deg))
     )

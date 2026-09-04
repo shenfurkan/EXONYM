@@ -6,13 +6,13 @@ modulation amplitudes from out-of-transit photometric time-series.
 Key Scientific Steps:
 1. Planetary Transit Masking: Masks all primary transit windows ($\pm 0.75 \times T_{14}$)
    to prevent transit box harmonics from creating spurious rotation signals.
-2. Generalized Lomb-Scargle (GLS) Periodogram (Zechmeister & Kürster 2009):
-    Fits a floating-mean sinusoid across cadence- and baseline-derived periods.
+2. Astropy generalized Lomb-Scargle (GLS) periodogram:
+     Fits a floating-mean sinusoid across cadence- and baseline-derived periods.
 3. Sampling-window and cross-sector harmonic diagnostics:
    Preserve cadence-window features and whether segment peaks are compatible with
    one fundamental frequency or its first harmonic.
 4. Analytic White-noise FAP and Harmonic Modulation Semi-Amplitude:
-   The Baluev-style GLS probability is retained as a white-noise reference only;
+    The Astropy GLS probability is retained as a white-noise reference only;
    it is not a red-noise or population-calibrated activity probability.
    Fits out-of-transit flux $y(t) = A_1 \cos(2\pi t / P) + A_2 \sin(2\pi t / P) + C$,
    extracting total starspot amplitude $A = \sqrt{A_1^2 + A_2^2}$ in ppm.
@@ -25,6 +25,24 @@ Scientific boundary:
     probability are descriptive diagnostics. They do not model evolving spots
     or correlated noise and therefore cannot establish an activity cause,
     candidate rejection, or validation claim without independent evidence.
+
+Units, provenance, and applicability
+------------------------------------
+``time`` is candidate-owned ``BTJD_TDB`` in days; ``flux`` and optional
+``flux_err`` are dimensionless normalized relative flux; period outputs are
+days; frequencies are day^-1; sinusoid amplitudes are ppm; and the analytic
+white-noise FAP is dimensionless.  Fewer than the required finite cadences,
+non-positive supplied errors, invalid period bounds, or unavailable candidate
+photometry raise an error or write no activity report.  The implementation
+delegates GLS and its analytic FAP to Astropy.  The retained local registry has
+no primary GLS/FAP paper matching this implementation, so the FAP remains a
+backend reference rather than a calibrated astrophysical probability.
+
+The only retained rotation-context sources are McQuillan, Mazeh & Aigrain
+(2014), ADS ``2014ApJS..211...24M``, DOI ``10.1088/0067-0049/211/2/24``, and
+Vanderburg et al. (2016), ADS ``2016ApJS..222...14V``, DOI
+``10.3847/0067-0049/222/1/14``.  Neither source converts a GLS peak into a
+rotation claim for this pipeline; ``claim_eligible`` remains false.
 """
 
 from __future__ import annotations

@@ -9,10 +9,11 @@ time-series without hardcoded candidate designations or ephemerides.
     - ``methods/tls_search.md`` — SDE field definition and use-threads rationale
     - ``methods/detrending-and-transit-inference.md`` — density-duration relation,
       Mandel & Agol 2002 limb darkening
-    - Ivezić et al. 2014 (Statistics, Data Mining, and Machine Learning in Astronomy) —
-      BLS SNR, MAD/biweight estimators, 1.4826 normalisation factor
-    - Perryman 2018 (The Exoplanet Handbook), §2 — transit contact points T₁–T₄,
-      circular-orbit duration relation
+    - Exact robust-normalisation and independent-error identities are stated in
+      :mod:`exonym.constants`; the corresponding statistics text is not yet a
+      retained primary source and is not treated as a calibration reference.
+    - Seager & Mallen-Ornelas 2003, ADS ``2003ApJ...585.1038S``, DOI
+      ``10.1086/346105`` — circular transit-density/duration relation.
 
 1. Box Least Squares (BLS) Search (Kovács, Zucker & Mazeh 2002)
    -------------------------------------------------------------
@@ -36,7 +37,7 @@ time-series without hardcoded candidate designations or ephemerides.
    ``n_periods`` acts as a *floor*, never reducing the number of trials below
    the baseline-duration minimum.
 
-   **BLS SNR** — Following Ivezić §10.3.2, the BLS signal-to-noise is
+   **BLS SNR** — The BLS fitted-depth signal-to-noise is
 
    .. math::
 
@@ -89,7 +90,21 @@ time-series without hardcoded candidate designations or ephemerides.
                 \\frac{\\sqrt{(1+k)^2 - b^2}}{\\sin i}
 
    where *k* = R_p/R_*, *b* = a cos i / R_* (impact parameter), and *i* is the
-   orbital inclination (Perryman §2).
+   orbital inclination.
+
+Verified sources, units, and hard boundary
+-------------------------------------------
+The retained primary BLS source is Kovács, Zucker & Mazeh (2002), ADS
+``2002A&A...391..369K``, DOI ``10.1051/0004-6361:20020802``; TLS is Hippke &
+Heller (2019), ADS ``2019A&A...623A..39H``, DOI
+``10.1051/0004-6361/201834672``; and TLS transit morphology uses Mandel & Agol
+(2002), ADS ``2002ApJ...580L.171M``, DOI ``10.1086/345520``.  Inputs are
+``BTJD_TDB`` days, dimensionless normalized flux, and positive normalized-flux
+errors.  Outputs label period in days, epoch in BTJD, duration in hours or
+days, depth in ppm, and SNR/SDE as dimensionless ranking statistics.  Missing
+real photometry, incompatible time system, invalid grids, or missing TLS
+dependency fails closed.  No search score, alias result, or super-period can
+set ``claim_eligible``.
 
 """
 
@@ -124,13 +139,16 @@ from .workspace import CandidateWorkspace, validate_signal_suffix
 MAX_BLS_PERIOD_TRIALS = 20000
 
 # ASTROPHYSICAL_PROVENANCE:
-# 1. Minimum transit events required to rule out single-event instrumental false alarms (Kovacs et al. 2002; Jenkins et al. 2016).
+# 1. Minimum event count is a declared bounded-search policy, not a calibrated
+# false-alarm probability or a validation threshold.
 MINIMUM_OBSERVED_TRANSIT_EVENTS = 2
 
-# 2. Minimum period search boundary: Ultra-short-period (USP) tidal Roche limit for main-sequence hosts (~12 h; Winn et al. 2018).
+# 2. Minimum period is a declared search configuration in days, not a physical
+# Roche-limit calculation for an individual host.
 DEFAULT_MINIMUM_SEARCH_PERIOD_DAYS = 0.5
 
-# 3. Maximum single-sector period search boundary: Maximum orbital period permitting >= 2 transits in a single TESS sector (~27.4 d / 2; Ricker et al. 2015).
+# 3. Maximum period is a declared single-visit search configuration; multi-visit
+# coverage is evaluated from candidate data rather than inferred from this value.
 DEFAULT_MAXIMUM_SEARCH_PERIOD_DAYS = 15.0
 
 # 4. Default trial density for uniform Fourier frequency grids (Kovacs et al. 2002).
@@ -139,10 +157,11 @@ DEFAULT_BLS_FREQUENCY_TRIALS = 2000
 # 5. Statistical degrees-of-freedom floor for periodic least-squares regression.
 MINIMUM_BLS_SEARCH_CADENCES = 50
 
-# 6. Maximum phase-folded visualization bins to preserve rendering performance without aliasing (Ivezić et al. 2019).
+# 6. Maximum phase-folded visualization bins bounds rendering memory only.
 DEFAULT_VISUALIZATION_BINS = 4000
 
-# 7. Default BLS trial durations spanning short M-dwarf transits to typical FGK main-sequence planetary transits (Perryman 2018; Kovacs et al. 2002).
+# 7. Default duration grid is a declared exploratory-search configuration; it
+# is not a stellar-type-specific physical prior.
 DEFAULT_BLS_DURATION_HOURS = 3.0
 DEFAULT_BLS_DURATION_GRID_HOURS: Tuple[float, ...] = (1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0)
 
@@ -154,7 +173,7 @@ class BLSSearchResult:
     .. note::
         The ``snr`` field is the BLS fitted depth divided by its formal
         uncertainty — a **ranking statistic**, not a calibrated false-alarm
-        probability (see Ivezić §10.3.2 for the BLS SNR derivation).  The
+        probability. The
         ``detection_status`` field is a pipeline-level label reflecting whether
         the peak crossed the candidate-selection threshold; it is not a claim
         of planetary origin.
@@ -285,7 +304,7 @@ def _uncertainties_for_bls(
     ------------------------
     When uncertainties are absent, a robust scatter estimate is computed from
     the **median absolute deviation** (MAD), rescaled to approximate the
-    standard deviation of a Gaussian distribution (Ivezić §3.4.2):
+    standard deviation of a Gaussian distribution:
 
     .. math::
 
@@ -324,7 +343,8 @@ def _uncertainties_for_bls(
         return errors
 
     median = float(np.median(values))
-    # NUMERICAL_GUARD: 1.4826 * MAD ≈ σ for Gaussian noise (Ivezić Eq. 3.37);
+    # NUMERICAL_GUARD: the exact normal-consistency form derives from the
+    # inverse standard-normal CDF and applies only as a robust scatter proxy.
     # the factor is the inverse of the normal CDF at 0.75.
     mad = float(np.median(np.abs(values - median)))
     scatter = 1.4826 * mad
@@ -478,7 +498,7 @@ def find_transits(
     The BLS statistic at each trial period and epoch is the fitted depth
     :math:`\\delta = \\langle y_{\\rm out}\\rangle - \\langle y_{\\rm
     in}\\rangle` divided by its formal uncertainty.  For weighted data with
-    per-cadence errors σᵢ, the BLS SNR reduces to (Ivezić §10.3.2):
+    per-cadence errors σᵢ, the BLS SNR reduces to:
 
     .. math::
 

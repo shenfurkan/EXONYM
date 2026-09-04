@@ -20,6 +20,18 @@ Scientific Guardrail
 All results carry ``claim_eligible=False``.  The module is a statistical
 diagnostic engine only; a discovery claim requires provenance-bound observed
 photometry and calibrated scene-model integration.
+
+Units, primary literature, and fail-closed boundary
+----------------------------------------------------
+The retained method source is Giacalone et al. (2021), ADS
+``2021AJ....161...24G``, DOI ``10.3847/1538-3881/abd184``.  ``time`` is
+phase-relative days, ``flux`` and ``sigma`` are normalized relative flux,
+``period_days`` and ``exptime_days`` are days, ``depth_ppm`` is ppm, stellar
+mass/radius are ``M_sun``/``R_sun``, contrast separations are arcsec, contrast
+is delta-mag, and FPP/NFPP/scenario probabilities are dimensionless.  A
+validated scene, complete retained neighbor/contrast/TRILEGAL inputs, finite
+dynamic exposure, and finite observed photometry are mandatory.  Any absent or
+invalid boundary is unresolved rather than a false-positive conclusion.
 """
 
 from __future__ import annotations

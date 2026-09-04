@@ -10,6 +10,18 @@ Scientific boundary:
     This is a review diagnostic. An empty comparison does not establish
     novelty, while a period or epoch agreement never creates a scientific
     disposition or claim.
+
+Primary source, units, and failure boundary
+-------------------------------------------
+The resonant-repulsion screening scale is Lithwick & Wu (2012), ADS
+``2012ApJ...756L..11L``, DOI ``10.1088/2041-8205/756/1/L11``.  Period and
+duration fields are days unless a provider contract explicitly says hours;
+epochs retain their declared BTJD/BJD time scale; mass/radius inputs to the
+repulsion helper are Earth/solar units as named; and the returned resonance
+width is dimensionless.  Catalog no-match, unavailable retrieval, unsupported
+provider/time scale, nonfinite ephemeris, or ambiguous harmonic parity never
+becomes novelty evidence.  This review comparison cannot set
+``claim_eligible``.
 """
 
 from __future__ import annotations

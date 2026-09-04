@@ -16,6 +16,16 @@ References (Locally retained and verified in literature/)
   Tiesinga et al. (2021, Rev. Mod. Phys. 93, 025010; arXiv:2105.14651).
   Retained locally in `literature/tiesinga_2021_codata_2018.pdf`.
 * IAU Resolution B2 (2012), exact astronomical-unit definition.
+
+Exact retained references and scope
+-----------------------------------
+Prša et al. (2016) is retained as ADS ``2016AJ....152...41P``, DOI
+``10.3847/0004-6256/152/2/41``; Tiesinga et al. (2021) is ADS
+``2021RvMP...93b5010T``, DOI ``10.1103/RevModPhys.93.025010``.  Exported names
+encode SI, CGS, IAU nominal solar/planetary, angular, time, or dimensionless
+conversion units.  This module provides standards, not candidate measurements
+or empirical stellar/planetary relations.  It accepts no candidate data and no
+constant can establish a scientific result or set ``claim_eligible``.
 """
 
 from __future__ import annotations
@@ -89,7 +99,9 @@ NOMINAL_SOLAR_LOGG_CGS: float = math.log10(
 # Verified against isolation.py AST-invariants.
 EARTH_MASS_ONE_JULIAN_YEAR_RV_SEMI_AMPLITUDE_M_PER_S: float = 0.0895
 
-# Asymptotic sample-median standard error factor: sqrt(pi / 2) (Ivezić et al. 2019, Eq. 3.37).
+# Exact asymptotic independent-sample median standard-error factor: sqrt(pi / 2).
+# The retained local bibliography has no primary source for this statistical
+# identity; consumers must not interpret it as correlated-noise calibration.
 # Exact analytical form (Tier 3 mathematical constant).
 SAMPLE_MEDIAN_STANDARD_ERROR_FACTOR: float = math.sqrt(math.pi / 2.0)
 

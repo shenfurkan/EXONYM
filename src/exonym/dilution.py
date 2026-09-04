@@ -14,6 +14,19 @@ References:
     methods/literature_notes/perryman_handbook/
     04_false_positives_vetting_diagnostics.md describes dilution and
     blend-related false-positive context.
+
+Verified catalog context, units, and fail-closed boundary
+----------------------------------------------------------
+The Gaia/TESS catalog context is Stassun et al. (2019), ADS
+``2019AJ....158..138S``, DOI ``10.3847/1538-3881/ab3467``.  Time is
+``BTJD_TDB`` days; pixel flux remains source-native then becomes dimensionless
+normalized aperture flux; depth/error is ppm; Gaia/TESS magnitudes are mag;
+separation is arcsec; and contamination factors/flux ratios are dimensionless.
+The color transform is accepted only in its declared calibration interval;
+missing color, invalid neighbor, incompatible band, or insufficient aperture
+coverage yields unavailable rather than an invented dilution correction.  This
+is neither a calibrated TESS scene model nor source localization and cannot set
+``claim_eligible``.
 """
 
 from __future__ import annotations
@@ -34,7 +47,8 @@ from .workspace import CandidateWorkspace
 QUALITY_HARD_MASK = 24319        # TESS quality bitmask rejecting severe cadences
 APERTURE_HALF_SIZES = (1, 2, 3)  # Half-widths for 3x3, 5x5, and 7x7 pixel bounding boxes
 # ASTROPHYSICAL_HEURISTIC: Maximum fractional transit depth variation across apertures
-# (30%) before flagging potential contamination/blending from an off-target source (Perryman §4.3).
+# (30%) before flagging potential contamination/blending from an off-target
+# source. This is a declared review policy, not a calibrated contamination law.
 APERTURE_VARIATION_STABILITY_THRESHOLD = 0.3
 
 

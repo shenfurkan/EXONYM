@@ -9,6 +9,13 @@ References
   upstream TRICERATOPS ``_log_mean_exp`` in ``_numerics.py``.
 * _normalize_probabilities implements the Bayesian evidence-to-probability
   normalisation described in Giacalone et al. (2021, AJ, 161, 24).
+
+The retained source is ADS ``2021AJ....161...24G``, DOI
+``10.3847/1538-3881/abd184``.  Log weights/evidences and normalized
+probabilities are dimensionless.  These routines implement numerical stability,
+not an astrophysical equation; NaN/+inf and all-``-inf`` evidence are explicit
+anomalous/degenerate statuses rather than clipped probabilities.  Their output
+cannot alter ``claim_eligible``.
 """
 
 from __future__ import annotations

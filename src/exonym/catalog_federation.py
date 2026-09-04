@@ -9,6 +9,18 @@ Scientific boundary:
     Catalog fields are provider-declared measurements with provider-specific
     units and selection effects. This module preserves them for review; it does
     not derive priors, claims, workflow state, or survey-search inputs.
+
+Unit and fail-closed contract
+-----------------------------
+Every provider supplies its own field contract through ``ProviderSpec``:
+coordinates are ICRS degrees, proper motions/uncertainties are mas yr^-1/mas,
+catalog magnitudes are mag, and periods, epochs, and durations retain the
+provider-declared day/hour/time-scale fields.  This module performs no
+astrophysical relation beyond unit-explicit angular/proper-motion propagation
+using Astropy-derived conversions.  Missing coordinate context, an unsupported
+time scale, malformed/nonfinite response, authentication requirement, or
+transport failure is retained as unavailable/ambiguous rather than substituted.
+Catalog retrieval cannot set ``claim_eligible``.
 """
 
 from __future__ import annotations

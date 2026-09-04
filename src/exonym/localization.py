@@ -21,6 +21,20 @@ Instrument Constants:
 
 Contains zero target-specific constants; all celestial positions and TPF cubes are
 loaded dynamically from candidate-local workspace files.
+
+Units, verified literature, and hard boundary
+---------------------------------------------
+The retained TESS/instrument source is Ricker et al. (2015), ADS
+``2015JATIS...1a4003R``, DOI ``10.1117/1.JATIS.1.1.014003``; difference-image
+false-positive context is Bryson et al. (2013), ADS ``2013PASP..125..889B``,
+DOI ``10.1086/671767``, and Twicken et al. (2018), ADS
+``2018PASP..130f4502T``, DOI ``10.1088/1538-3873/aab694``.  TPF values remain
+source-native flux/count units; cadence time is ``BTJD_TDB`` days; PRF centroids
+are pixels; angular offsets are arcsec; coordinates are ICRS degrees; and source
+flux ratios are dimensionless.  The Gaussian PRF is explicitly an uncalibrated
+screen.  Missing TPFs, validated Gaia neighbors, complete ephemeris, finite
+cadences, or a required calibrated PRF asset fails rather than assigning a
+source.  No localization result can set ``claim_eligible``.
 """
 
 from __future__ import annotations
@@ -352,11 +366,14 @@ def calibrated_prf_kernel(
     """Sample an empirical PRF template at a source's sub-pixel detector position."""
     from scipy.ndimage import map_coordinates
 
+    # TESS SPOC PRF models (e.g. 117x117) have NSAMP = 9 intra-pixel samples per physical pixel.
+    # Standard fixtures (e.g. 3x3 or 13x13) have NSAMP = 1.
+    nsamp = float(template.shape[0]) / 13.0 if template.shape[0] >= 39 else 1.0
     centre_y = (template.shape[0] - 1.0) / 2.0
     centre_x = (template.shape[1] - 1.0) / 2.0
     kernel = map_coordinates(
         template,
-        [y_grid - float(y0) + centre_y, x_grid - float(x0) + centre_x],
+        [(y_grid - float(y0)) * nsamp + centre_y, (x_grid - float(x0)) * nsamp + centre_x],
         order=1,
         mode="constant",
         cval=0.0,
@@ -433,7 +450,7 @@ def fit_difference_image_prf(
     The non-negativity constraint :math:`\\beta_k \\ge 0` encodes the
     physical expectation that a transit *removes* flux; the difference image
     :math:`I_{\\text{out}} - I_{\\text{in}}` is positive at the location of
-    the eclipsed source (Perryman §4.3.1).  A source whose best-fit
+    eclipsed source. A source whose best-fit
     amplitude is near zero contributes negligible flux to the transit signal,
     even if it lies within the photometric aperture.
 
@@ -539,7 +556,8 @@ def build_difference_image(
     A genuine transit on the target star removes flux precisely at the
     target's pixel position.  The difference image therefore displays a
     positive excess with the point-spread morphology (PRF shape) of the
-    eclipsed source (Perryman §4.3.1; Bryson et al. 2013).  Conversely, a
+    eclipsed source (Bryson et al. 2013, ADS ``2013PASP..125..889B``, DOI
+    ``10.1086/671767``). Conversely, a
     background eclipsing binary (BEB) produces a difference-image peak
     offset from the nominal target position, detectable via
     :func:`localize_difference_image`.
@@ -620,12 +638,12 @@ def localize_difference_image(
 
     **Equatorial offset.**  Pixel offsets are converted to equatorial
     coordinates using the TESS plate scale and the declination-dependent
-    RA projection factor :math:`\\cos\\delta` (Perryman §4.3.2):
+    RA projection factor :math:`\\cos\\delta`:
 
     .. math::
 
         \\Delta\\alpha \\cos\\delta &= (x_c - x_{\\text{target}}) \\times
-                                     s_{\\text{pix}} \\times \\max(\\cos\\delta, 0.01), \\\\[4pt]
+                                     s_{\\text{pix}}, \\\\[4pt]
         \\Delta\\delta &= (y_c - y_{\\text{target}}) \\times s_{\\text{pix}}, \\\\[4pt]
         \\Delta r &= \\sqrt{(\\Delta\\alpha \\cos\\delta)^2 + (\\Delta\\delta)^2},
 
@@ -634,10 +652,10 @@ def localize_difference_image(
     **Significance interpretation.**  Under the null hypothesis that the
     transit source is co-located with the target (:math:`\\Delta r = 0`),
     the offset :math:`Z_{\\text{centroid}} = \\Delta r / \\sigma_{\\text{centroid}}`
-    follows a Rayleigh distribution (Perryman §4.3.3).  This function
-    computes only the offset magnitude; the formal significance threshold
-    :math:`Z_{\\text{centroid}} < 3.0\\sigma` is applied downstream in the
-    vetting layer.
+    has no calibrated distribution in this implementation because it does not
+    estimate an astrometric covariance. This function computes only the offset
+    magnitude; downstream scores remain a routing diagnostic rather than a
+    calibrated source-location probability.
 
     DIAGNOSTIC_REASONING
     --------------------
@@ -704,7 +722,8 @@ def localize_difference_image(
             "offset_arcsec": float("nan"),
             "n_difference_pixels": int(core_differences.size),
         }
-    # Flux-weighted centroid on the difference-image core (Perryman §4.3.2).
+    # Flux-weighted centroid on the difference-image core; this is an
+    # uncalibrated source-competition diagnostic, not astrometric inference.
     weights = core_differences / float(np.sum(core_differences))
     centroid_x = float(np.sum(xx[core_mask] * weights))
     centroid_y = float(np.sum(yy[core_mask] * weights))
@@ -762,7 +781,8 @@ def localize_difference_image(
         "ra_cosdec_offset_arcsec": float(ra_offset),
         "ra_coordinate_offset_arcsec": float(coordinate_ra_offset),
         "dec_offset_arcsec": float(dec_offset),
-        # Total separation Δr = √(Δα²cos²δ + Δδ²) (Perryman §4.3.2, Eq. 4.8).
+        # Total on-sky separation Δr = sqrt((Δα cosδ)^2 + Δδ^2), an exact
+        # tangent-plane identity for the already-projected RA pixel offset.
         "offset_arcsec": float(math.hypot(ra_offset, dec_offset)),
         "n_difference_pixels": int(np.count_nonzero(core_mask)),
         "coordinate_method": "pixel-scale-projected-offset",
@@ -830,8 +850,8 @@ def extract_tpf_difference_image(
     - **In-transit:** :math:`|t - T_0| < 0.5 \\times T_{\\text{dur}}`
       (within one half-duration of mid-transit).
     - **Out-of-transit:** :math:`1.2 \\times T_{\\text{dur}} < |t - T_0|
-      < 2.5 \\times T_{\\text{dur}}` (buffer of 1.2× duration guards
-      against ingress/egress contamination; Perryman §4.3.1).
+      < 2.5 \\times T_{\\text{dur}}` (a declared buffer limiting
+      ingress/egress contamination).
 
     The median image is computed for each class to suppress outlier pixel
     values, yielding :math:`I_{\\text{in}}` and :math:`I_{\\text{out}}`.
@@ -930,7 +950,8 @@ def extract_tpf_difference_image(
     # In-transit: |hours| < 0.5 × T_dur × 24 h/d.
     in_mask = np.abs(hours) < 0.5 * duration_days * 24.0
     # Out-of-transit: 1.2–2.5 × duration away from centre.
-    # The 1.2× buffer avoids ingress/egress bleed (Perryman §4.3.1).
+    # The declared 1.2× buffer avoids ingress/egress bleed; it is not a
+    # calibrated instrumental selection function.
     out_mask = (np.abs(hours) > 1.2 * duration_days * 24.0) & (
         np.abs(hours) < 2.5 * duration_days * 24.0
     )
@@ -1203,9 +1224,8 @@ def _fit_one_difference_image(
     This function combines the two core diagnostics for a single TPF cube:
 
     1. **NNLS PRF decomposition** (:func:`fit_difference_image_prf`):
-       fits non-negative Gaussian amplitudes for the target and up to five
-       neighbouring Gaia sources simultaneously on the pipeline aperture
-       pixels.
+       fits non-negative amplitudes for the target and every projected Gaia
+       neighbour simultaneously on the finite pipeline-aperture pixels.
 
     2. **Difference-image centroiding** (:func:`localize_difference_image`):
        computes the flux-weighted centre-of-light of the difference-image
@@ -1220,7 +1240,7 @@ def _fit_one_difference_image(
 
         R = \\frac{\\beta_{\\text{target}}}{\\max_{k \\neq \\text{target}} \\beta_k}
 
-    is computed as a dimensionless competition metric (cf. Perryman §4.3).
+    is computed as a dimensionless competition metric.
     A high :math:`R` indicates the NNLS fit attributes most of the
     difference flux to the target; a low :math:`R \\lesssim 1` suggests a
     competing neighbour may dominate the transit signal.

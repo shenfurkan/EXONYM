@@ -52,7 +52,7 @@ NEUTRAL_EXTENSIONS = {
 # directly at the repository root are the operator's unrestricted workspace:
 # extension and identifier rules apply only below the top level. Do not turn
 # this into an allowlist of project source folders.
-EXCLUDED_TOP_LEVEL_DIRECTORIES = {".agents", ".opencode", "images", "assets", "textbooks", "log", "logs", "literature"}
+EXCLUDED_TOP_LEVEL_DIRECTORIES = {".agents", ".opencode", "images", "assets", "textbooks", "log", "logs", "literature", "compare"}
 EXCLUDED_DIRECTORY_NAMES = {".git", "__pycache__", ".pytest_cache"}
 DEBUG_SOURCE_DIRECTORIES = {".github", "policy", "schemas", "src", "templates", "tests"}
 DEBUG_SOURCE_FILES = {".pre-commit-config.yaml", "pyproject.toml"}

@@ -9,6 +9,17 @@ Scientific boundary:
     The leading-order approximation omits detailed stellar response and
     correlated photometric variability. Its gate is a screening input, not a
     companion-mass measurement or a validation conclusion.
+
+Primary source, units, and applicability boundary
+--------------------------------------------------
+The retained leading-order source is Morris (1985), ADS
+``1985ApJ...295..143M``, DOI ``10.1086/163359``.  Inputs are companion/host
+mass in ``M_sun``, host radius in ``R_sun``, semimajor axis in AU, effective
+temperature in K, linear limb/gravity-darkening coefficients dimensionless, and
+inclination in degrees; output amplitude/threshold is ppm.  The envelope switch
+is a screening approximation, not a stellar-atmosphere calculation.  Nonfinite
+or out-of-domain geometry raises; the threshold is routing-only and cannot set
+``claim_eligible``.
 """
 
 from __future__ import annotations

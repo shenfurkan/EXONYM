@@ -5,7 +5,14 @@ cross-platform CA bundle resolution, and candidate-local caching.
 
 References
 ----------
-* Girardi et al. (2005), A&A, 436, 895 – TRILEGAL.
+* Girardi et al. (2005), ADS ``2005A&A...436..895G``, DOI
+  ``10.1051/0004-6361:20042352`` – TRILEGAL.
+
+Coordinates are ICRS degrees; field radius is degrees; limiting magnitude is
+mag; HTTP timeouts/backoff are seconds; and output is an opaque candidate-local
+CSV population realization.  Network failure returns no population file and
+must be handled as unavailable scene evidence, not as zero background stars or
+a claim-eligible result.
 """
 
 from __future__ import annotations

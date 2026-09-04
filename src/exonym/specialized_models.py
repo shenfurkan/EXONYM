@@ -9,6 +9,17 @@ runtime metadata before issuing a normalized report.
 The resulting diagnostics describe one supplied model or hypothesis.  They do
 not compare all physical explanations, create a claim, validate a planet, or
 change lifecycle state.
+
+Unit and fail-closed contract
+-----------------------------
+PlanetSynth inputs/outputs retain declared ``M_jup``, ``R_jup``, Gyr, K, and
+``L_sun`` units.  pyPplusS, Catwoman, and SquishyPlanet adapters retain
+candidate cadence time in days and dimensionless normalized relative flux; fit
+residual RMS and maximum residual are also dimensionless.  These modules do not
+reimplement an external package's physics.  Missing packages, an unverified
+interface, input-schema mismatch, out-of-domain values, nonfinite output, or an
+incorrect model length writes only an unavailable/failed manifest.  Every
+adapter report keeps ``claim_eligible: false``.
 """
 
 from __future__ import annotations

@@ -12,6 +12,21 @@ Scientific boundary:
     and MIST bolometric corrections.  It does not infer a stellar radius,
     luminosity, distance, atmosphere posterior, validation constraint, or
     lifecycle decision.
+
+Primary literature, units, and fail-closed domain
+--------------------------------------------------
+The retained MIST sources are Dotter (2016), ADS ``2016ApJS..222....8D``, DOI
+``10.3847/0067-0049/222/1/8``, and Choi et al. (2016), ADS
+``2016ApJ...823..102C``, DOI ``10.3847/0004-637X/823/2/102``.  Extinction-table
+context is Fitzpatrick (1999), ADS ``1999PASP..111...63F``, DOI
+``10.1086/316293``.  Candidate table axes are ``Teff`` in K, ``logg`` in
+``log10(cm s^-2)``, ``[Fe/H]`` in dex, and ``A_V`` in mag; observed/model Vega
+magnitudes and profiled apparent bolometric magnitude are mag.  Interpolation
+is permitted only inside the retained MIST v1.2 table domain.  A missing or
+hash-mismatched manifest/table, unsupported band, nonfinite magnitude/error, or
+out-of-domain node fails without an SED fit.  This agreement diagnostic does
+not infer distance, radius, luminosity, or a claim and always remains
+``claim_eligible: false``.
 """
 
 from __future__ import annotations

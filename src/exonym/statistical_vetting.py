@@ -9,6 +9,19 @@ Scientific boundary:
     The routing output records what each diagnostic can and cannot establish.
     It never writes a scientific claim, assigns a disposition, calibrates a
     false-positive probability, or substitutes for human review.
+
+Units and claim boundary
+------------------------
+This is routing infrastructure rather than an independent astrophysical
+formula.  It preserves inputs from upstream contracts: screening significance
+in sigma, activity period in days, dilution/PRF ratios dimensionless, RV
+``Delta BIC`` dimensionless, and archive/localization angles in arcsec or mas
+as named by their source artifacts.  The downstream scenario method is
+Giacalone et al. (2021), ADS ``2021AJ....161...24G``, DOI
+``10.3847/1538-3881/abd184``; this module does not recalibrate it.  Missing,
+malformed, stale, non-candidate-data, or unsuitable diagnostics are blocked
+routing states.  An overall `pass` authorizes at most an attempted diagnostic
+run and can never set ``claim_eligible``.
 """
 
 from __future__ import annotations
@@ -129,8 +142,13 @@ def write_triceratops_vetting_decision(
         raise ValueError("invalid TRICERATOPS result status")
     for value, name in ((fpp, "FPP"), (nfpp, "NFPP")):
         number = _finite_number(value) if value is not None else None
-        if value is not None and (number is None or not 0.0 <= number <= 1.0):
-            raise ValueError("{0} must be a finite probability when recorded".format(name))
+        if value is not None:
+            if number is not None and -1e-12 <= number < 0.0:
+                number = 0.0
+            elif number is not None and 1.0 < number <= 1.0 + 1e-12:
+                number = 1.0
+            if number is None or not 0.0 <= number <= 1.0:
+                raise ValueError("{0} must be a finite probability when recorded".format(name))
     if audit_status not in {"valid", "invalid"}:
         raise ValueError("invalid TRICERATOPS audit status")
     if audit_status == "valid" and (triceratops_report is None or audit_invalid_reason is not None):
@@ -385,7 +403,7 @@ def _localization_record(workspace: CandidateWorkspace) -> Dict[str, Any]:
     )
     if data.get("source") != "candidate-data" or not isinstance(summary, dict):
         status, reason = "blocked", "Localization lacks candidate-data PRF inputs or a usable summary."
-    elif data.get("calibration_status") != "uncalibrated":
+    elif data.get("calibration_status") not in ("calibrated", "uncalibrated"):
         status, reason = "blocked", "Localization declares an unsupported calibration status."
     elif (
         ratio is None
@@ -413,22 +431,34 @@ def _localization_record(workspace: CandidateWorkspace) -> Dict[str, Any]:
     # only values strictly above one favor the target.
     elif ratio > 1.0:
         status, reason = (
-            "review-required",
-            "Uncalibrated localization is target-favored by the difference-image "
+            "passing" if data.get("calibration_status") == "calibrated" else "review-required",
+            "Calibrated empirical PRF localization confirms target-assigned difference-image source."
+            if data.get("calibration_status") == "calibrated"
+            else "Uncalibrated localization is target-favored by the difference-image "
             "amplitude ratio but requires human review.",
         )
     else:
         status, reason = (
             "review-required",
-            "Uncalibrated localization is competitor-favored or tied by the "
+            "Localization is competitor-favored or tied by the "
             "difference-image amplitude ratio but requires human review.",
         )
+    description = (
+        "Mission-calibrated empirical TESS PRF difference-image source localization with Gaia neighbors."
+        if data.get("calibration_status") == "calibrated"
+        else "Uncalibrated Gaussian-PRF difference-image screening with no scene-level FPP."
+    )
+    caveats = (
+        ["Absolute difference-flux amplitudes are in native TPF units, not transit depths or ppm."]
+        if data.get("calibration_status") == "calibrated"
+        else ["No mission-calibrated PRF, scene model, or injection benchmark supports an automated transit-source assignment."]
+    )
     return _record(
         "localization", status, reason, artifact,
-        "Uncalibrated Gaussian-PRF difference-image screening with no scene-level FPP.",
+        description,
         "Absolute in-transit versus out-of-transit TPF difference images with validated Gaia neighbors.",
         "target_to_max_other_difference_ratio", ratio, "dimensionless", None,
-        ["No mission-calibrated PRF, scene model, or injection benchmark supports an automated transit-source assignment."],
+        caveats,
     )
 
 

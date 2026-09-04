@@ -10,6 +10,22 @@ linear trend, and an optional homogeneous activity indicator.
 Information-criterion differences are descriptive model-comparison evidence.
 They are not false-positive probabilities, a companion-mass inference, a
 planet claim, or a lifecycle decision.
+
+Verified sources, units, and fail-closed domain
+------------------------------------------------
+The retained Keplerian-coordinate/model source is Eastman, Gaudi & Agol (2013),
+ADS ``2013PASP..125...83E``, DOI ``10.1086/669497``; the retained RV package
+implementation context is Fulton et al. (2018), ADS ``2018PASP..130d4504F``,
+DOI ``10.1088/1538-3873/aaaaa8``.  Time/reference epoch/period are BJD_TDB
+days; velocity, quoted error, offsets, semi-amplitude, and jitter are m s^-1;
+linear trend is m s^-1 day^-1; activity slope is m s^-1 per declared activity
+index unit; angles are radians internally; eccentricity, likelihood, AIC, and
+BIC are dimensionless.  The likelihood assumes independent Gaussian residuals
+after per-instrument jitter and compares one fixed-period eccentric Keplerian
+with shared nuisance terms.  Invalid JSON/units, incomplete observations,
+nonfinite solver state, or failed optimization writes no report.  AIC/BIC
+sources are not retained in `literature/`; therefore their use remains formal
+descriptive comparison only and never sets ``claim_eligible``.
 """
 
 from __future__ import annotations

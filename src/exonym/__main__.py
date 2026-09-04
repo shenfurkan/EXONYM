@@ -36,8 +36,8 @@ Acquisition and data preparation:
 
 Scientific analysis commands:
   asteroseismology  Oscillation envelope, Delta-nu, and seismic M*/R*
-  localization      Sub-pixel PRF transit source localization
-  sed               SED stellar atmosphere posterior fit
+  localization      Exploratory PRF source-competition localization diagnostic
+  sed               MIST bolometric-correction SED agreement diagnostic
   fit               MCMC transit fit with free limb darkening
   phasecurve        Phase curve and secondary eclipse search
   ttv               Transit timing variation (O-C) analysis
@@ -45,7 +45,7 @@ Scientific analysis commands:
   dilution          Aperture robustness and dilution sensitivity
   archive           Query Gaia DR3 and NASA ExoFOP for archival vetting
   rv                Ingest candidate-local RV data and fit a Keplerian model
-  vet               Run TRICERATOPS Monte Carlo FPP simulation
+  vet               Run claim-ineligible TRICERATOPS Monte Carlo FPP diagnostic
   triage            Run automated pre-vetting diagnostic evidence aggregation
 
 Optional specialized-model adapters:
@@ -60,6 +60,12 @@ Paper export:
 This module is intentionally a thin dispatcher. Candidate-specific inputs and
 outputs are delegated to candidate-owning modules; this entry point does not
 turn command success into a scientific claim.
+
+The exact source-module literature, unit, applicability, and fail-closed
+contract is ``docs/scientific-method-contract.md``. CLI values keep their
+subcommand's declared units (for example BTJD/BJD days, duration hours/days,
+ppm, m s^-1, and solar/CGS/SI quantities); the dispatcher does not convert a
+unit, model an observation, or override ``claim_eligible: false``.
 """
 
 from __future__ import annotations
