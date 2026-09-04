@@ -10,9 +10,13 @@ Target-neutral documentation and record templates.
 | `scientific-method-contract.md` | Source-module inventory; verified ADS/DOI formula register; exact unit, applicability, fail-closed, and claim-ineligibility contract |
 | `EXONYM_SCIENTIFIC_ARCHITECTURE_AND_HOW_TO.md#scientific-debugging-and-incident-response` | Evidence-first diagnosis of scientific, numerical, provenance, and optional-engine failures |
 | `discovery-readiness/` | Current survey/discovery capability assessment, remaining calibration gaps, and claim ladder |
-| `../methods/` | Command-level scientific method records and interpretation limits |
-| `../protocols/` and `templates/` | Frozen protocol, handover, gate, and decision record scaffolds |
-| `templates/` | Generic record templates (charter, protocol, dataset, gate, decision, postmortem, handover) |
+| `templates/` | Generic record scaffolds inside `docs/` (charter, protocol, dataset, gate, decision, postmortem, handover, run record) |
+| `../methods/` | Root `methods/`: command-level scientific method records, literature notes, and interpretation limits |
+| `../protocols/` | Root `protocols/`: frozen protocol definitions and their record scaffolds |
+
+The root `templates/` directory is a source-checkout resource (mirrored under
+`src/exonym/_resources/`) and is not a documentation location; `docs/templates/`
+is the documentation record-scaffold directory described above.
 
 Target-specific records never belong here. They live in
 `candidate/<candidate-id>/` (for example under that candidate's `docs/`,

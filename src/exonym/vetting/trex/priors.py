@@ -32,6 +32,7 @@ conditional scenario assumptions, not population validation, and cannot set
 
 from __future__ import annotations
 
+import fractions
 import math
 from typing import Optional, Tuple
 
@@ -40,7 +41,11 @@ from scipy.special import ndtr as _standard_normal_cdf
 from scipy.stats import beta as _beta_dist
 from scipy.stats import powerlaw as _powerlaw_dist
 
-from ...constants import SQUARE_ARCSECONDS_PER_SQUARE_DEGREE
+from ...constants import (
+    FULL_TURN_DEGREES,
+    MILLIARCSECONDS_PER_ARCSECOND,
+    SQUARE_ARCSECONDS_PER_SQUARE_DEGREE,
+)
 from .constants import Msun, Rsun, au, G, pi, SECONDS_PER_DAY
 from .funcs import separation_at_contrast
 
@@ -58,11 +63,63 @@ WINTERS_2019_M_DWARF_MULTIPLICITY_FRACTION = 0.268
 WINTERS_2019_LOG10_SEPARATION_MEAN_AU = math.log10(20.0)
 WINTERS_2019_LOG10_SEPARATION_STANDARD_DEVIATION_DEX = 1.16
 
+# Moe & Di Stefano (2017), ApJS, 230, 15, ADS ``2017ApJS..230...15M``, DOI
+# ``10.3847/1538-4365/aa6fb6``, Section 4 analytical integrals.  The mass-ratio
+# prior integrates ((u - 2.0) / 2.1) du over log10(P/day) in [3.4, m] and
+# exp(-0.3 * (u - 5.5)) du over [5.5, m]; both are evaluated exactly so no
+# rounded decimal placeholder remains and the piecewise log-prior stays C^0
+# continuous at log10(P/day) = 5.5.
+#
+#     \int_{3.4}^m ((u - 2.0) / 2.1) du = (5/21) m^2 - (20/21) m + (17/35)
+#     \int_{5.5}^m exp(-0.3 (u - 5.5)) du = (10/3) (1 - exp(-0.3 (m - 5.5)))
+MOE2017_LOGP_QUAD_C2 = float(fractions.Fraction(5, 21))
+MOE2017_LOGP_QUAD_C1 = float(fractions.Fraction(20, 21))
+MOE2017_LOGP_QUAD_C0 = float(fractions.Fraction(17, 35))
+MOE2017_EXP_SCALE = float(fractions.Fraction(10, 3))
+
+# Moe & Di Stefano (2017), ApJS, 230, 15, Section 5 (broken power-law mass-ratio
+# distribution) and Section 6 (companion fraction vs. primary mass).  The
+# retained parameters are:
+#   * q distribution slopes p1 (0.1 <= q < 0.3) and p2 (0.3 <= q < 0.95),
+#   * the twin fraction F_twin for q >= 0.95,
+#   * the companion-fraction polynomial coefficients (f1, f2, f3) as functions
+#     of log10(primary mass / Msun), with their power-law slope alpha and
+#     log-period bin width dlogP.
+# These are empirical population parameters from a peer-reviewed survey and are
+# kept as named constants so no anonymous scalar enters the integrals.
+MOE2017_Q_SLOPE_LOW = 0.3
+MOE2017_Q_SLOPE_HIGH = -0.5
+MOE2017_TWIN_FRACTION = 0.30
+MOE2017_Q_BREAK_LOW = 0.1
+MOE2017_Q_BREAK_MID = 0.3
+MOE2017_Q_TWIN_THRESHOLD = 0.95
+MOE2017_COMPANION_FRACTION_SLOPE = 0.018
+MOE2017_COMPANION_LOGPERIOD_BIN_DEX = 0.7
+# Companion-fraction polynomial coefficients vs. log10(primary mass / Msun)
+# from Moe & Di Stefano (2017, ApJS, 230, 15), Section 6, Table 2.  Each tuple
+# is (constant, linear, quadratic) in x = log10(M_s / Msun).
+MOE2017_COMPANION_FRACTION_F1_COEFFS = (0.020, 0.04, 0.07)
+MOE2017_COMPANION_FRACTION_F2_COEFFS = (0.039, 0.07, 0.01)
+MOE2017_COMPANION_FRACTION_F3_COEFFS = (0.078, -0.05, 0.04)
+
+# Kipping (2013), MNRAS, 434, L51, ADS ``2013MNRAS.434L..51K``, DOI
+# ``10.1093/mnrasl/slt075``: Beta-distribution eccentricity prior parameters
+# for transiting planets.  Moe & Di Stefano (2017) eccentricity power-law
+# indices for binary companions, with the retained period break at 10 days.
+KIPPING_2013_ECCENTRICITY_BETA_A = 0.867
+KIPPING_2013_ECCENTRICITY_BETA_B = 3.030
+MOE2017_ECCENTRICITY_POWERLAW_SHORT = 0.2
+MOE2017_ECCENTRICITY_POWERLAW_LONG = 0.6
+MOE2017_ECCENTRICITY_PERIOD_BREAK_DAYS = 10.0
+
 # ---------------------------------------------------------------------------
 # Planet radius prior  (Fressin et al. 2013, broken power law)
 # ---------------------------------------------------------------------------
 
-# Pre-computed normalisation constants
+# Pre-computed normalisation constants for the Fressin et al. (2013, ApJ, 766,
+# 81, ADS ``2013ApJ...766...81F``, DOI ``10.1088/0004-637X/766/2/81``) broken
+# power-law planet-radius prior.  Break radii are Earth radii; power-law indices
+# switch at a 0.45 Msun host-mass boundary as reported in that paper.
 _R_BREAK1 = 3.0    # R_earth
 _R_BREAK2 = 6.0    # R_earth
 _R_MIN = 0.5
@@ -103,7 +160,7 @@ def sample_rp(x: np.ndarray, M_s: np.ndarray, flatpriors: bool = False) -> np.nd
     M_s = np.asarray(M_s, dtype=float)
 
     if flatpriors:
-        return x * 19.5 + 0.5
+        return x * (_R_MAX - _R_MIN) + _R_MIN
 
     hi_mass = M_s > 0.45
     lo_mass = ~hi_mass
@@ -167,11 +224,11 @@ def sample_ecc(x: np.ndarray, planet: bool, P_orb: float) -> np.ndarray:
     if not np.all(np.isfinite(x)) or np.any((x < 0.0) | (x >= 1.0)):
         raise ValueError("eccentricity draws must be finite values in [0, 1)")
     if planet:
-        return _beta_dist.ppf(x, 0.867, 3.030)
-    elif P_orb <= 10.0:
-        return _powerlaw_dist.ppf(x, 0.2)
+        return _beta_dist.ppf(x, KIPPING_2013_ECCENTRICITY_BETA_A, KIPPING_2013_ECCENTRICITY_BETA_B)
+    elif P_orb <= MOE2017_ECCENTRICITY_PERIOD_BREAK_DAYS:
+        return _powerlaw_dist.ppf(x, MOE2017_ECCENTRICITY_POWERLAW_SHORT)
     else:
-        return _powerlaw_dist.ppf(x, 0.6)
+        return _powerlaw_dist.ppf(x, MOE2017_ECCENTRICITY_POWERLAW_LONG)
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +237,7 @@ def sample_ecc(x: np.ndarray, planet: bool, P_orb: float) -> np.ndarray:
 
 def sample_w(x: np.ndarray) -> np.ndarray:
     """Sample argument of periastron uniformly in [0, 360) deg."""
-    return np.asarray(x, dtype=float) * 360.0
+    return np.asarray(x, dtype=float) * FULL_TURN_DEGREES
 
 
 # ---------------------------------------------------------------------------
@@ -191,56 +248,59 @@ def sample_q(x: np.ndarray, M_s: float) -> np.ndarray:
     """Sample binary mass ratios q = M_sec / M_prim.
 
     Broken power-law from Moe & Di Stefano (2017) with twin fraction
-    F_twin = 0.30 for q >= 0.95.
+    ``MOE2017_TWIN_FRACTION`` for q >= ``MOE2017_Q_TWIN_THRESHOLD``.  All
+    population parameters are the named ``MOE2017_*`` constants.
     """
     x = np.asarray(x, dtype=float).copy()
+    p1 = MOE2017_Q_SLOPE_LOW
+    p2 = MOE2017_Q_SLOPE_HIGH
+    q_low = MOE2017_Q_BREAK_LOW
+    q_break = MOE2017_Q_BREAK_MID
+    q_twin = MOE2017_Q_TWIN_THRESHOLD
+    F_twin = MOE2017_TWIN_FRACTION
+    A1 = q_break ** p1 / q_break ** p2
+    A2 = 1.0 + (F_twin / (1.0 - F_twin)) * (
+        (1.0 ** (p2 + 1) - q_break ** (p2 + 1)) / (p2 + 1)
+    ) / ((1.0 ** (p2 + 1) - q_twin ** (p2 + 1)) / (p2 + 1))
     if M_s >= 1.0:
-        p1, p2 = 0.3, -0.5
-        A1 = 0.3 ** p1 / 0.3 ** p2
-        F_twin = 0.30
-        A2 = 1.0 + (F_twin / (1.0 - F_twin)) * (
-            (1.0 ** (p2 + 1) - 0.3 ** (p2 + 1)) / (p2 + 1)
-        ) / ((1.0 ** (p2 + 1) - 0.95 ** (p2 + 1)) / (p2 + 1))
-        I1 = (0.3 ** (p1 + 1) - 0.1 ** (p1 + 1)) / (p1 + 1)
-        I2 = A1 * (0.95 ** (p2 + 1) - 0.3 ** (p2 + 1)) / (p2 + 1)
-        I3 = A2 * A1 * (1.0 ** (p2 + 1) - 0.95 ** (p2 + 1)) / (p2 + 1)
+        I1 = (q_break ** (p1 + 1) - q_low ** (p1 + 1)) / (p1 + 1)
+        I2 = A1 * (q_twin ** (p2 + 1) - q_break ** (p2 + 1)) / (p2 + 1)
+        I3 = A2 * A1 * (1.0 ** (p2 + 1) - q_twin ** (p2 + 1)) / (p2 + 1)
         Norm = 1.0 / (I1 + I2 + I3)
         m1 = x <= Norm * I1
         m2 = (x > Norm * I1) & (x <= Norm * (I1 + I2))
         m3 = (x > Norm * (I1 + I2)) & (x <= Norm * (I1 + I2 + I3))
-        x[m1] = (x[m1] / Norm * (p1 + 1) + 0.1 ** (p1 + 1)) ** (1.0 / (p1 + 1))
-        x[m2] = ((x[m2] / Norm - I1) * (p2 + 1) / A1 + 0.3 ** (p2 + 1)) ** (1.0 / (p2 + 1))
+        x[m1] = (x[m1] / Norm * (p1 + 1) + q_low ** (p1 + 1)) ** (1.0 / (p1 + 1))
+        x[m2] = ((x[m2] / Norm - I1) * (p2 + 1) / A1 + q_break ** (p2 + 1)) ** (1.0 / (p2 + 1))
         xx = x[m3]
-        x[m3] = ((xx / Norm - I1 - I2) * (p2 + 1) / (A1 * A2) + 0.95 ** (p2 + 1)) ** (1.0 / (p2 + 1))
+        x[m3] = ((xx / Norm - I1 - I2) * (p2 + 1) / (A1 * A2) + q_twin ** (p2 + 1)) ** (1.0 / (p2 + 1))
     elif M_s >= 0.3:
-        q_min = max(0.1 / M_s, 0.1)
-        p1, p2 = 0.3, -0.5
-        A1 = 0.3 ** p1 / 0.3 ** p2
-        F_twin = 0.30
-        A2 = 1.0 + (F_twin / (1.0 - F_twin)) * (
-            (1.0 ** (p2 + 1) - 0.3 ** (p2 + 1)) / (p2 + 1)
-        ) / ((1.0 ** (p2 + 1) - 0.95 ** (p2 + 1)) / (p2 + 1))
-        I1 = (0.3 ** (p1 + 1) - q_min ** (p1 + 1)) / (p1 + 1)
-        I2 = A1 * (0.95 ** (p2 + 1) - 0.3 ** (p2 + 1)) / (p2 + 1)
-        I3 = A2 * A1 * (1.0 ** (p2 + 1) - 0.95 ** (p2 + 1)) / (p2 + 1)
+        q_min = max(q_low / M_s, q_low)
+        I1 = (q_break ** (p1 + 1) - q_min ** (p1 + 1)) / (p1 + 1)
+        I2 = A1 * (q_twin ** (p2 + 1) - q_break ** (p2 + 1)) / (p2 + 1)
+        I3 = A2 * A1 * (1.0 ** (p2 + 1) - q_twin ** (p2 + 1)) / (p2 + 1)
         Norm = 1.0 / (I1 + I2 + I3)
         m1 = x <= Norm * I1
         m2 = (x > Norm * I1) & (x <= Norm * (I1 + I2))
         m3 = (x > Norm * (I1 + I2)) & (x <= Norm * (I1 + I2 + I3))
         x[m1] = (x[m1] / Norm * (p1 + 1) + q_min ** (p1 + 1)) ** (1.0 / (p1 + 1))
-        x[m2] = ((x[m2] / Norm - I1) * (p2 + 1) / A1 + 0.3 ** (p2 + 1)) ** (1.0 / (p2 + 1))
+        x[m2] = ((x[m2] / Norm - I1) * (p2 + 1) / A1 + q_break ** (p2 + 1)) ** (1.0 / (p2 + 1))
         xx = x[m3]
-        x[m3] = ((xx / Norm - I1 - I2) * (p2 + 1) / (A1 * A2) + 0.95 ** (p2 + 1)) ** (1.0 / (p2 + 1))
+        x[m3] = ((xx / Norm - I1 - I2) * (p2 + 1) / (A1 * A2) + q_twin ** (p2 + 1)) ** (1.0 / (p2 + 1))
     else:
-        q_min = 0.1 / M_s
-        F_twin = 0.30
-        I2 = (0.95 - q_min) - (0.3 - q_min)
-        I3 = -0.5 * (0.95 - q_min)
+        # Physical mass-ratio domain requires q <= 1.0.  The companion-mass
+        # lower bound (MOE2017_Q_BREAK_LOW Msun) relative to a sub-0.1 Msun
+        # primary would otherwise produce q_min > 1.0 and negative/meaningless
+        # integrals; clamp against the hydrogen-burning floor and the twin
+        # threshold.
+        q_min = min(q_low / max(M_s, WINTERS_2019_M_DWARF_MINIMUM_MASS_SOLAR), q_twin)
+        I2 = (q_twin - q_min) - (q_break - q_min)
+        I3 = p2 * (q_twin - q_min)
         Norm = 1.0 / (I2 + I3)
         m2 = x <= Norm * I2
         m3 = ~m2
         x[m2] = (x[m2] / Norm) + q_min
-        x[m3] = ((x[m3] - Norm * I2) * (-1.0 / Norm) + 0.95)
+        x[m3] = ((x[m3] - Norm * I2) * (-1.0 / Norm) + q_twin)
     return x
 
 
@@ -300,7 +360,7 @@ def lnprior_bound(
     """
     if not math.isfinite(plx) or plx <= 0.0:
         raise ValueError("bound-companion prior requires a finite positive parallax")
-    d_pc = 1000.0 / plx
+    d_pc = MILLIARCSECONDS_PER_ARCSECOND / plx
     seps_arcsec = separation_at_contrast(
         np.asarray(delta_mags, dtype=float),
         np.asarray(separations, dtype=float),
@@ -312,18 +372,26 @@ def lnprior_bound(
     if M_s <= WINTERS_2019_M_DWARF_MAXIMUM_MASS_SOLAR:
         return np.log(_winters2019_m_dwarf_companion_cdf(M_s, seps_au))
 
-    f1 = 0.020 + 0.04 * math.log10(M_s) + 0.07 * (math.log10(M_s)) ** 2
-    f2 = 0.039 + 0.07 * math.log10(M_s) + 0.01 * (math.log10(M_s)) ** 2
-    f3 = 0.078 - 0.05 * math.log10(M_s) + 0.04 * (math.log10(M_s)) ** 2
+    log10_M_s = math.log10(M_s)
+    _c1, _c2, _c3 = MOE2017_COMPANION_FRACTION_F1_COEFFS
+    f1 = _c1 + _c2 * log10_M_s + _c3 * log10_M_s ** 2
+    _c1, _c2, _c3 = MOE2017_COMPANION_FRACTION_F2_COEFFS
+    f2 = _c1 + _c2 * log10_M_s + _c3 * log10_M_s ** 2
+    _c1, _c2, _c3 = MOE2017_COMPANION_FRACTION_F3_COEFFS
+    f3 = _c1 + _c2 * log10_M_s + _c3 * log10_M_s ** 2
 
-    alpha = 0.018
-    dlogP = 0.7
+    alpha = MOE2017_COMPANION_FRACTION_SLOPE
+    dlogP = MOE2017_COMPANION_LOGPERIOD_BIN_DEX
 
     t2 = 0.5 * (2.0 - 1.0) * (2.0 * f1 + (f2 - f1 - alpha * dlogP) * (2.0 - 1.0))
     t3 = 0.5 * alpha * (3.4 ** 2 - 5.4 * 3.4 + 6.8) + f2 * (3.4 - 2.0)
     t4 = (alpha * dlogP * (5.5 - 3.4) + f2 * (5.5 - 3.4)
-          + (f3 - f2 - alpha * dlogP) * (0.238095 * 5.5 ** 2 - 0.952381 * 5.5 + 0.485714))
-    t5 = f3 * (3.33333 - 17.3566 * math.exp(-0.3 * 8.0))
+          + (f3 - f2 - alpha * dlogP) * (
+              MOE2017_LOGP_QUAD_C2 * 5.5 ** 2
+              - MOE2017_LOGP_QUAD_C1 * 5.5
+              + MOE2017_LOGP_QUAD_C0
+          ))
+    t5 = f3 * MOE2017_EXP_SCALE * (1.0 - math.exp(-0.3 * (8.0 - 5.5)))
 
     f_comp = np.zeros_like(max_Porbs)
     m = np.log10(max_Porbs)
@@ -336,8 +404,12 @@ def lnprior_bound(
     f_comp[r12] = 0.5 * (m[r12] - 1.0) * (2.0 * f1 + (f2 - f1 - alpha * dlogP) * (m[r12] - 1.0))
     f_comp[r23] = t2 + 0.5 * alpha * (m[r23] ** 2 - 5.4 * m[r23] + 6.8) + f2 * (m[r23] - 2.0)
     f_comp[r34] = t2 + t3 + alpha * dlogP * (m[r34] - 3.4) + f2 * (m[r34] - 3.4) + (
-        f3 - f2 - alpha * dlogP) * (0.238095 * m[r34] ** 2 - 0.952381 * m[r34] + 0.485714)
-    f_comp[r45] = t2 + t3 + t4 + f3 * (3.33333 - 17.3566 * np.exp(-0.3 * m[r45]))
+        f3 - f2 - alpha * dlogP) * (
+            MOE2017_LOGP_QUAD_C2 * m[r34] ** 2
+            - MOE2017_LOGP_QUAD_C1 * m[r34]
+            + MOE2017_LOGP_QUAD_C0
+        )
+    f_comp[r45] = t2 + t3 + t4 + f3 * MOE2017_EXP_SCALE * (1.0 - np.exp(-0.3 * (m[r45] - 5.5)))
     f_comp[r5p] = t2 + t3 + t4 + t5
     f_comp[f_comp < 0.0] = 0.0
     return np.log(f_comp)

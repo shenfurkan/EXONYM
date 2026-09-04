@@ -40,7 +40,7 @@ phase zero.
 The circular harmonic terms remain a circular basis. The secondary template
 does not model a planetary brightness map, hotspot offsets, ephemeris
 uncertainty, light-travel time, a full occultation light curve, or correlated
-photometric noise. The transit posterior is exploratory and its paramete
+photometric noise. The transit posterior is exploratory and its parameter
 uncertainty is only used to construct the diagnostic box control. Review the
 candidate-local fit, chain diagnostics, and phase-curve output together before
 making an astrophysical interpretation.

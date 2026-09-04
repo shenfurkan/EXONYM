@@ -6,7 +6,7 @@ status, while a workflow phase describes its position in the analysis sequence.
 `exonym advance` evaluates both.
 
 Scientific disposition, publication, human-review status, and retention class
-are separate metadata axes. Retention is an operational label only: it neve
+are separate metadata axes. Retention is an operational label only: it never
 authorizes deleting or moving candidate data.
 
 ## States
@@ -64,7 +64,7 @@ does not alter lifecycle state, gate records, claims, or scientific eligibility.
 Each checkpoint manifest follows `checkpoint-manifest.schema.json`; both save
 and restore validate that manifest before accepting the checkpoint.
 
-`survey auto-vet` and `survey run-loop` are bounded execution helpers. Thei
+`survey auto-vet` and `survey run-loop` are bounded execution helpers. Their
 engine-run manifests and failed-step records are evidence of execution status,
 not a lifecycle transition, disposition, validation result, or claim.
 
@@ -109,7 +109,7 @@ An archived candidate stays at `candidate/<candidate-id>/`. A freeze should:
 4. Verify the manifest from a clean location.
 5. Protect the corresponding commit/tag and external release packages.
 
-While archived: manifest-listed files cannot be edited, deleted, renamed, o
+While archived: manifest-listed files cannot be edited, deleted, renamed, or
 regenerated in place. Corrections use new versioned files with explicit
 supersession links. Reopening preserves the old snapshot before new work.
 
@@ -135,7 +135,7 @@ mechanism and is never a citable scientific release.
 
 A release claim must state the highest completed layer.
 
-The layer does not alter a method's scientific applicability. Before a review o
+The layer does not alter a method's scientific applicability. Before a review or
 release, use [`scientific-method-contract.md`](scientific-method-contract.md)
 to check the exact unit/time-scale contract, primary-source provenance, and
 fail-closed boundary of every formula-bearing source module. In particular,

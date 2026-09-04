@@ -13,7 +13,7 @@ For each retained light-curve segment, the command fits a floating-mean
 generalized Lomb-Scargle periodogram over the configured period interval. When
 positive per-cadence flux errors are available, they are passed to GLS. The
 reported analytic white-noise false-alarm probability is the backend's
-single-segment, independent-noise extreme-value reference. It is not valid fo
+single-segment, independent-noise extreme-value reference. It is not valid for
 time-correlated stellar variability, evolving spots, detrending systematics,
 or the total number of analysis choices.
 

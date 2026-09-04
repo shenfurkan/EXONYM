@@ -171,7 +171,7 @@ The optional TRICERATOPS integration compares planetary and eclipsing scenarios 
 Automated triage aggregates screening, archive, localization, activity, dilution, and other pre-vetting records into a routing decision. Triage is not a scientific disposition. A `pass` only allows the final diagnostic vetting attempt when prerequisites exist.
 
 The engine registry separates runtime availability from candidate-local execution
-provenance. `engine run` writes input/output hashes and status manifests fo
+provenance. `engine run` writes input/output hashes and status manifests for
 runnable diagnostics; missing dependencies and empty outputs remain explicit
 blocked records. `survey auto-vet` and `survey run-loop` use the same bounded
 candidate-data sequence, retain independent step failures, and never change

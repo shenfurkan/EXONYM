@@ -124,6 +124,7 @@ from .constants import (
     PARTS_PER_MILLION,
     SAMPLE_MEDIAN_STANDARD_ERROR_FACTOR,
     SECONDS_PER_DAY,
+    SECONDS_PER_MINUTE,
     SOLAR_MEAN_DENSITY_G_CM3,
 )
 from .inputs import (
@@ -148,11 +149,25 @@ BIN_MINUTES = 8.0           # Default phase-binning resolution (minutes)
 SUPERSAMPLE_FACTOR = 7      # Numerical exposure integration sub-sampling factor
 # SCIENTIFIC_BOUNDARY: the folded/binned display uses a coarser effective
 # integration time; this is not the native-cadence posterior exposure.
-FITTED_BIN_EXPOSURE_SECONDS = BIN_MINUTES * 60.0
+FITTED_BIN_EXPOSURE_SECONDS = BIN_MINUTES * SECONDS_PER_MINUTE
 # PERFORMANCE_BOUND: multi-sector fits use deterministic per-product median
 # binning by default. This keeps every selected sector while bounding the
 # likelihood workload; the loader records the policy in its returned table.
 FIT_MAX_POINTS_PER_PRODUCT = 4000
+
+# emcee walker initial proposal dispersions for the seven core transit
+# parameters (index order mirrors ``_accelerated_initial_theta``).  These are
+# proposal-scale (jump) widths, not posterior uncertainties; each is a
+# dimensionless relative perturbation in the parameter's native unit.
+EMCEE_CPU_CORE_PROPOSAL_DISPERSIONS: Tuple[float, ...] = (
+    0.003,   # rp_rs  planet-to-star radius ratio perturbation width
+    0.03,    # log_rho_star  log mean stellar density perturbation width
+    0.03,    # impact_parameter  b perturbation width
+    0.0002,  # out-of-transit baseline flux perturbation width
+    0.15,    # log_jitter  photometric white-noise perturbation width
+    0.03,    # q1  Kipping (2013) triangular limb-darkening perturbation width
+    0.03,    # q2  Kipping (2013) triangular limb-darkening perturbation width
+)
 
 # Checkpoint files are an operational recovery aid.  They must remain plain
 # NumPy arrays and scalar values so ``--resume`` never deserializes Python
@@ -993,7 +1008,7 @@ def _fit_emcee_cpu(
     effective_walkers = max(n_walkers, 2 * ndim)
     rng = np.random.default_rng(seed)
     scales = np.full(ndim, 0.01, dtype=float)
-    scales[:7] = np.asarray([0.003, 0.03, 0.03, 0.0002, 0.15, 0.03, 0.03])
+    scales[:7] = np.asarray(EMCEE_CPU_CORE_PROPOSAL_DISPERSIONS, dtype=float)
     cursor = 7
     if data.eccentric:
         scales[cursor:cursor + 2] = 0.01
@@ -2097,9 +2112,9 @@ def _log_prior(
     - **LDTk prior** (optional): Gaussian terms on ``(u1, u2)`` derived
       from the candidate's limb-darkening table, anchored to the
       Husser et al. (2013) PHOENIX grid via Parviainen & Aigrain (2015).
-    - **impact_parameter**: unbounded prior with a rectangular guard
-      at :math:`b \\le 1.2` allowing for grazing transits slightly
-      beyond the stellar limb.
+    - **impact_parameter**: prior bounded at :math:`0 \le b < 1 + r_p`
+      enforcing the exact physical geometric transit condition (Perryman 2018,
+      Section 6.2.2).
     - **eccentricity**: flat prior on :math:`(\\sqrt{e}\\cos\\omega,
       \\sqrt{e}\\sin\\omega)` with physical bound :math:`e < 1`.
 
@@ -2118,7 +2133,7 @@ def _log_prior(
     if not (
         0.0005 < rp < 0.5
         and -2.0 < log_rho < 1.5
-        and 0.0 <= b < 1.2
+        and 0.0 <= b < 1.0 + rp
         and bool(np.all((0.95 < baselines) & (baselines < 1.05)))
         and JITTER_LOG_LOWER < log_jitter < JITTER_LOG_UPPER
         and 0.0 < q1 < 1.0

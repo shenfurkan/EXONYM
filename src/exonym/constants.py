@@ -43,6 +43,7 @@ HOURS_PER_DAY: float = float(_u.day.to(_u.hour))
 MINUTES_PER_HOUR: float = float(_u.hour.to(_u.min))
 MINUTES_PER_DAY: float = float(_u.day.to(_u.min))
 SECONDS_PER_HOUR: float = float(_u.hour.to(_u.s))
+SECONDS_PER_MINUTE: float = float(_u.min.to(_u.s))
 JULIAN_YEAR_DAYS: float = float(_u.yr.to(_u.day))
 ARCSECONDS_PER_DEGREE: float = float(_u.deg.to(_u.arcsec))
 MILLIARCSECONDS_PER_ARCSECOND: float = float(_u.arcsec.to(_u.mas))
@@ -95,7 +96,15 @@ NOMINAL_SOLAR_LOGG_CGS: float = math.log10(
     (NOMINAL_SOLAR_MASS_PARAMETER_M3_S2 / NOMINAL_SOLAR_RADIUS_M**2) * 100.0
 )
 
-# Conventional Earth-mass/one-Julian-year Doppler planning normalization (Lovis & Fischer 2010).
+# Conventional Earth-mass/one-Julian-year Doppler planning normalization
+# (Lovis & Fischer 2010, in "Exoplanets" (S. Seager, ed.), ADS
+# ``2010exop.book...27L``; the circular, edge-on RV semi-amplitude for one
+# Earth mass orbiting one solar mass at 1 AU).  The coefficient is the exact
+# numeric evaluation of
+#
+#     K = (2 pi G / P)^(1/3) * (M_p sin i) / (M_* + M_p)^(2/3)
+#
+# reduced to its conventional m s^-1 per Earth-mass-per-Julian-year scale.
 # Verified against isolation.py AST-invariants.
 EARTH_MASS_ONE_JULIAN_YEAR_RV_SEMI_AMPLITUDE_M_PER_S: float = 0.0895
 

@@ -2,7 +2,7 @@
 
 ## Current implementation status
 
-This document specifies the Gaussian-process (GP) treatment intended fo
+This document specifies the Gaussian-process (GP) treatment intended for
 future light-curve analyses.  The current production commands do **not** fit
 a GP noise model.  In particular, the white-noise jitter term used by the
 transit-fitting workflow is not a GP and must not be described as one in a
@@ -55,7 +55,7 @@ It provides once-mean-square-differentiable variations and is often a useful
 starting comparison model for smoothly correlated photometric residuals.  It
 is a model choice, not a project-wide default.
 
-### Stochastically driven, damped harmonic oscillato
+### Stochastically driven, damped harmonic oscillator
 
 For celerite-compatible implementations, a stochastically driven harmonic
 oscillator (SHO) is commonly specified through the power spectral density

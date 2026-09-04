@@ -91,7 +91,8 @@ class ArchivalVettingService:
     ESA_GAIA_TAP_URL = "https://gea.esac.esa.int/tap-server/tap/sync"
     AIP_GAIA_TAP_URL = "https://gaia.aip.de/tap/sync"
     MIRROR_GAIA_TAP_URL = "https://gaia.gec.asiaa.sinica.edu.tw/tap-server/tap/sync"
-    ESA_GAIA_TABLE = "gaiadr3.gaia_source_lite"
+    ESA_GAIA_TABLE = "gaiadr3.gaia_source"
+    ESA_GAIA_FLAME_TABLE = "gaiadr3.astrophysical_parameters"
     MIRROR_GAIA_TABLE = "gaiadr3.gaia_source"
     VIZIER_GAIA_CATALOG = "I/355/gaiadr3"
     TARGET_PRESENCE_ARCSEC = 2.0
@@ -272,12 +273,41 @@ class ArchivalVettingService:
         factor.  Legacy rows without those columns still parse; their
         magnitude errors remain unmeasured (``None``) instead of fabricated.
         """
+        source_alias = "gs"
+        flame_alias = "flame"
+        source_columns = (
+            f"{source_alias}.source_id, {source_alias}.ra, {source_alias}.dec, "
+            f"{source_alias}.phot_g_mean_mag, {source_alias}.phot_bp_mean_mag, "
+            f"{source_alias}.phot_rp_mean_mag, {source_alias}.ruwe, {source_alias}.pmra, "
+            f"{source_alias}.pmdec, {source_alias}.ref_epoch, "
+            f"DISTANCE(POINT('ICRS', {source_alias}.ra, {source_alias}.dec), "
+            f"POINT('ICRS', {ra}, {dec}))*{ARCSECONDS_PER_DEGREE} AS sep_arcsec, "
+            f"{source_alias}.phot_g_mean_flux, {source_alias}.phot_g_mean_flux_error, "
+            f"{source_alias}.phot_bp_mean_flux, {source_alias}.phot_bp_mean_flux_error, "
+            f"{source_alias}.phot_rp_mean_flux, {source_alias}.phot_rp_mean_flux_error"
+        )
+        flame_columns = (
+            f", {flame_alias}.mass_flame, {flame_alias}.radius_flame, "
+            f"{flame_alias}.evolstage_flame, {flame_alias}.flags_flame, "
+            f"{flame_alias}.age_flame, {flame_alias}.mass_flame_lower, "
+            f"{flame_alias}.mass_flame_upper, {flame_alias}.radius_flame_lower, "
+            f"{flame_alias}.radius_flame_upper, {flame_alias}.age_flame_lower, "
+            f"{flame_alias}.age_flame_upper"
+        )
+        if base_url == self.ESA_GAIA_TAP_URL and table_name == self.ESA_GAIA_TABLE:
+            source_clause = (
+                f"FROM {table_name} AS {source_alias} LEFT OUTER JOIN "
+                f"{self.ESA_GAIA_FLAME_TABLE} AS {flame_alias} ON "
+                f"{source_alias}.source_id={flame_alias}.source_id "
+            )
+            selected_columns = source_columns + flame_columns
+        else:
+            source_clause = f"FROM {table_name} AS {source_alias} "
+            selected_columns = source_columns
         tap_query = (
-            f"SELECT source_id, ra, dec, phot_g_mean_mag, phot_bp_mean_mag, phot_rp_mean_mag, ruwe, pmra, pmdec, ref_epoch, "
-            f"DISTANCE(POINT('ICRS', ra, dec), POINT('ICRS', {ra}, {dec}))*{ARCSECONDS_PER_DEGREE} AS sep_arcsec, "
-            f"phot_g_mean_flux, phot_g_mean_flux_error, phot_bp_mean_flux, phot_bp_mean_flux_error, phot_rp_mean_flux, phot_rp_mean_flux_error "
-            f"FROM {table_name} "
-            f"WHERE 1=CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', {ra}, {dec}, {radius_arcsec / ARCSECONDS_PER_DEGREE})) "
+            f"SELECT {selected_columns} {source_clause}"
+            f"WHERE 1=CONTAINS(POINT('ICRS', {source_alias}.ra, {source_alias}.dec), "
+            f"CIRCLE('ICRS', {ra}, {dec}, {radius_arcsec / ARCSECONDS_PER_DEGREE})) "
             f"ORDER BY sep_arcsec ASC"
         )
         url = (
@@ -326,6 +356,23 @@ class ArchivalVettingService:
                 g_flux = g_flux_err = None
                 bp_flux = bp_flux_err = None
                 rp_flux = rp_flux_err = None
+            if len(row) >= 28:
+                mass_flame = _finite_float(row[17])
+                radius_flame = _finite_float(row[18])
+                evolstage_flame = _finite_float(row[19])
+                flags_flame = str(row[20]) if row[20] is not None else None
+                age_flame = _finite_float(row[21])
+                mass_flame_lower = _finite_float(row[22])
+                mass_flame_upper = _finite_float(row[23])
+                radius_flame_lower = _finite_float(row[24])
+                radius_flame_upper = _finite_float(row[25])
+                age_flame_lower = _finite_float(row[26])
+                age_flame_upper = _finite_float(row[27])
+            else:
+                mass_flame = radius_flame = evolstage_flame = flags_flame = age_flame = None
+                mass_flame_lower = mass_flame_upper = None
+                radius_flame_lower = radius_flame_upper = None
+                age_flame_lower = age_flame_upper = None
 
             sources.append(
                 {
@@ -351,6 +398,31 @@ class ArchivalVettingService:
                     else None,
                     "reference_epoch_jyear": float(reference_epoch)
                     if reference_epoch is not None
+                    else None,
+                    "mass_flame": float(mass_flame) if mass_flame is not None else None,
+                    "radius_flame": float(radius_flame) if radius_flame is not None else None,
+                    "evolstage_flame": int(evolstage_flame)
+                    if evolstage_flame is not None and evolstage_flame.is_integer()
+                    else None,
+                    "flags_flame": flags_flame,
+                    "age_flame_gyr": float(age_flame) if age_flame is not None else None,
+                    "mass_flame_lower_solar": float(mass_flame_lower)
+                    if mass_flame_lower is not None
+                    else None,
+                    "mass_flame_upper_solar": float(mass_flame_upper)
+                    if mass_flame_upper is not None
+                    else None,
+                    "radius_flame_lower_solar": float(radius_flame_lower)
+                    if radius_flame_lower is not None
+                    else None,
+                    "radius_flame_upper_solar": float(radius_flame_upper)
+                    if radius_flame_upper is not None
+                    else None,
+                    "age_flame_lower_gyr": float(age_flame_lower)
+                    if age_flame_lower is not None
+                    else None,
+                    "age_flame_upper_gyr": float(age_flame_upper)
+                    if age_flame_upper is not None
                     else None,
                 }
             )
@@ -493,7 +565,7 @@ class ArchivalVettingService:
     ) -> Dict[str, Any]:
         """Cone search Gaia DR3 for celestial sources around target coordinates.
 
-        Queries bounded backends in order (ESA TAP sync gaia_source_lite, CDS
+        Queries bounded backends in order (ESA TAP sync gaia_source, CDS
         VizieR I/355/gaiadr3, AIP Leibniz TAP gaia_source, ASIAA mirror) with
         8-second timeouts and
         adopts the first result validated by a source inside

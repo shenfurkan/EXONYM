@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/trex-scene-manifest-1.0.json",
+  "title": "Candidate-local TREX scene manifest",
+  "description": "Hash-bound, candidate-derived stellar scene evidence for TRICERATOPS/TREX statistical vetting. This artifact binds a target, every resolved Gaia neighbor, a contrast curve, and a retained TRILEGAL/background population; it is scenario input and cannot itself set claim_eligible.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_id",
+    "source",
+    "target",
+    "archival_gaia",
+    "contrast_curve",
+    "background",
+    "resolved_neighbors"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "candidate_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "source": { "const": "candidate-data" },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ra_deg",
+        "dec_deg",
+        "mass_solar",
+        "radius_solar",
+        "teff_k",
+        "parallax_mas",
+        "tess_mag"
+      ],
+      "properties": {
+        "ra_deg": { "type": "number", "minimum": 0.0, "maximum": 360.0 },
+        "dec_deg": { "type": "number", "minimum": -90.0, "maximum": 90.0 },
+        "mass_solar": { "type": "number", "exclusiveMinimum": 0.0 },
+        "radius_solar": { "type": "number", "exclusiveMinimum": 0.0 },
+        "teff_k": { "type": "number", "exclusiveMinimum": 0.0 },
+        "parallax_mas": { "type": "number", "exclusiveMinimum": 0.0 },
+        "tess_mag": { "type": "number" }
+      }
+    },
+    "archival_gaia": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "target_source_id", "neighbor_source_ids"],
+      "properties": {
+        "path": { "const": "outputs/archival_vetting_report.json" },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "target_source_id": { "type": "string", "minLength": 1 },
+        "neighbor_source_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "contrast_curve": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "separations_arcsec", "delta_magnitudes"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^data/external/.*$" },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "separations_arcsec": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "type": "number", "minimum": 0.0 }
+        },
+        "delta_magnitudes": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "type": "number", "minimum": 0.0 }
+        }
+      }
+    },
+    "background": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "model", "star_count"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^data/external/.*$" },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "model": { "enum": ["trilegal", "background"] },
+        "star_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "resolved_neighbors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_id",
+          "mass_solar",
+          "radius_solar",
+          "stellar_parameter_source",
+          "flame_flags",
+          "flame_evolutionary_stage",
+          "delta_mag",
+          "separation_arcsec"
+        ],
+        "properties": {
+          "source_id": { "type": "string", "minLength": 1 },
+          "mass_solar": { "type": "number", "exclusiveMinimum": 0.0 },
+          "radius_solar": { "type": "number", "exclusiveMinimum": 0.0 },
+            "stellar_parameter_source": { "const": "gaia-dr3-flame" },
+            "flame_flags": { "type": "string", "minLength": 2 },
+            "flame_evolutionary_stage": { "type": "integer" },
+            "flame_age_gyr": { "type": ["number", "null"], "exclusiveMinimum": 0.0 },
+          "delta_mag": { "type": "number" },
+          "separation_arcsec": { "type": "number", "exclusiveMinimum": 0.0 }
+        }
+      }
+    }
+  }
+}

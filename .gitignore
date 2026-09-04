@@ -44,12 +44,12 @@ candidate/*
 !candidate/.gitkeep
 
 # DOCUMENTATION AND HOST
-docs/
 *.md
 !/README.md
 !/plan.md
 !/SECURITY.md
 !/CONTRIBUTING.md
+!/docs/**
 !/templates/**/*.md
 !/src/exonym/_resources/templates/**/*.md
 .txt

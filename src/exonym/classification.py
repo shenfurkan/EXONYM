@@ -1,4 +1,25 @@
-"""Conservative batch classification for existing candidate workspaces."""
+"""Conservative administrative batch classification for candidate workspaces.
+
+This module assigns operational retention and review labels to existing
+candidate workspaces based on their lifecycle state and retained machine
+triage evidence.  It does not perform scientific classification, assign a
+planetary disposition, or change publication state.
+
+Scientific boundary:
+    The classification is strictly adminstrative policy bookkeeping.  It never
+    evaluates astrophysical evidence, writes a validation claim, calibrates a
+    false-positive rate, or replaces human review.  Candidates with decisive
+    rejections, triage passes, or statistical-vetting evidence are tagged for
+    review; all others follow lifecycle-based retention defaults.
+
+Unit and claim-invariant contract
+---------------------------------
+All inputs are boolean file-existence checks and string lifecycle labels;
+no astrophysical units or relations appear in this module.  Output retention
+labels ("hot", "warm", "cold") are operational storage hints.  A missing
+triage record, missing lifecycle state, or missing candidate directory does
+not proceed and cannot set ``claim_eligible``.
+"""
 
 from __future__ import annotations
 

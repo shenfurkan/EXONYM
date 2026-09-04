@@ -56,6 +56,6 @@ Every capability above must retain the units and primary-source scope of its
 production caller. The target-neutral
 [`../../scientific-method-contract.md`](../../scientific-method-contract.md)
 indexes every `src/exonym/` module, identifies formula-bearing APIs, and names
-the retained ADS/DOI sources. It also records unresolved provenance gaps rathe
+the retained ADS/DOI sources. It also records unresolved provenance gaps rather
 than treating a convenient planning relation or external catalog transform as a
 calibrated physical result.

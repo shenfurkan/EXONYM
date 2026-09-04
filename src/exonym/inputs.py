@@ -726,6 +726,10 @@ def load_stellar_parameters(workspace: CandidateWorkspace) -> Dict[str, Any]:
         "parallax_mas_err": _first_number(
             payload, ("parallax_mas_err", "parallax_err", "parallax_error", "plx_error")
         ),
+        "tess_mag": _first_number(payload, ("tess_mag", "tmag", "tess")),
+        "phot_g_mean_mag": _first_number(
+            payload, ("phot_g_mean_mag", "gaia_mag", "gmag", "phot_g_mag")
+        ),
     }
     for name, value in values.items():
         if value is not None:

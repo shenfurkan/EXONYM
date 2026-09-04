@@ -729,6 +729,22 @@ def _build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Suppress the interactive telemetry HUD during long-running vetting.",
     )
+    vet_parser.add_argument(
+        "--auto-scene",
+        action="store_true",
+        help="Build the candidate TREX scene automatically when trex_scene.json is missing.",
+    )
+
+    build_scene_parser = commands.add_parser(
+        "build-scene",
+        help="Assemble the candidate-local TREX scene manifest for statistical vetting.",
+    )
+    build_scene_parser.add_argument("candidate_id")
+    build_scene_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Rebuild trex_scene.json even when a manifest already exists.",
+    )
 
     asteroseismology_parser = commands.add_parser(
         "asteroseismology", help="Estimate stellar oscillation envelope and seismic M*/R*."
@@ -1683,6 +1699,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             from contextlib import nullcontext
             import sys
 
+            if args.auto_scene:
+                from .vetting.trex.scene_builder import (
+                    TREX_SCENE_MANIFEST_RELATIVE_PATH,
+                    SceneBuildError,
+                    build_trex_scene_manifest,
+                )
+
+                scene_path = candidate.path / TREX_SCENE_MANIFEST_RELATIVE_PATH
+                if not scene_path.is_file():
+                    try:
+                        build_trex_scene_manifest(candidate)
+                    except SceneBuildError as exc:
+                        raise RuntimeError(
+                            "auto-scene failed: {0}".format(exc)
+                        ) from exc
+
             telemetry_context = nullcontext(None)
             if args.progress and sys.stdout.isatty():
                 from .telemetry import LiveTelemetry
@@ -1727,6 +1759,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             from .localization import run_prf_localization
 
             output = run_prf_localization(candidate, search_radius_arcsec=args.search_radius)
+            print(output.relative_to(repository_root).as_posix())
+            return 0
+
+        if args.command == "build-scene":
+            from .vetting.trex.scene_builder import (
+                TREX_SCENE_MANIFEST_RELATIVE_PATH,
+                SceneBuildError,
+                build_trex_scene_manifest,
+            )
+
+            manifest_path = candidate.path / TREX_SCENE_MANIFEST_RELATIVE_PATH
+            if manifest_path.is_file() and not args.overwrite:
+                print(manifest_path.relative_to(repository_root).as_posix())
+                return 0
+            try:
+                output = build_trex_scene_manifest(candidate)
+            except SceneBuildError as exc:
+                raise RuntimeError("TREX scene build failed: {0}".format(exc)) from exc
             print(output.relative_to(repository_root).as_posix())
             return 0
 

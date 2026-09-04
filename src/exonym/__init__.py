@@ -18,6 +18,17 @@ version or workspace helpers remains possible in a minimal installation.
 
 __version__ = "2.0.1"
 
+# lightkurve emits a UserWarning when its optional ``tpfmodel`` submodule is
+# unavailable because ``oktopus`` is not installed.  The project does not use
+# tpfmodel, so the warning is terminal noise rather than an actionable defect;
+# suppress only that specific message and leave every other warning visible.
+import warnings as _warnings
+
+_warnings.filterwarnings(
+    "ignore",
+    message=r".*the tpfmodel submodule is not available without oktopus installed.*",
+)
+
 from .workspace import (
     CandidateWorkspace,
     create_candidate,

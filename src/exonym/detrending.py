@@ -53,7 +53,7 @@ from scipy.ndimage import median_filter
 from scipy.optimize import minimize
 
 from .remediation import numerical_npz_sha256
-from .workspace import CandidateWorkspace, validate_candidate_id
+from .workspace import CandidateWorkspace, load_candidate, validate_candidate_id
 
 
 SUPPORTED_METHODS = ("running-median", "wotan", "celerite")
@@ -92,9 +92,9 @@ def _trusted_workspace(workspace: CandidateWorkspace) -> Path:
     if not isinstance(workspace, CandidateWorkspace):
         raise TypeError("workspace must be a CandidateWorkspace")
     candidate_id = validate_candidate_id(workspace.candidate_id)
-    expected = (workspace.repository_root.resolve() / "candidate" / candidate_id).resolve()
+    trusted = load_candidate(workspace.repository_root, candidate_id)
     actual = workspace.path.resolve()
-    if actual != expected or not actual.is_dir():
+    if actual != trusted.path.resolve() or not actual.is_dir():
         raise ValueError("workspace path is not the registered candidate workspace")
     return actual
 
