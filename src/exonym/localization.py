@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .archive import load_validated_archival_gaia_sources
+from .constants import ARCSECONDS_PER_DEGREE
 from .inputs import BTJD_TIME_SYSTEM, load_tpf_cubes, load_transit_ephemeris
 from .lightcurve import phase_hours
 from .resources import read_schema_text
@@ -724,15 +725,25 @@ def localize_difference_image(
             denominator = math.sin(dec0) * math.sin(dec) + math.cos(dec0) * math.cos(dec) * math.cos(delta_ra)
             if not math.isfinite(denominator) or denominator <= 0.0:
                 raise ValueError("invalid tangent-plane projection")
-            ra_cosdec_offset = math.degrees(math.cos(dec) * math.sin(delta_ra) / denominator) * 3600.0
-            dec_offset = math.degrees((math.cos(dec0) * math.sin(dec) - math.sin(dec0) * math.cos(dec) * math.cos(delta_ra)) / denominator) * 3600.0
-            ra_coordinate_offset = math.degrees(delta_ra) * 3600.0
+            ra_cosdec_offset = (
+                math.degrees(math.cos(dec) * math.sin(delta_ra) / denominator)
+                * ARCSECONDS_PER_DEGREE
+            )
+            dec_offset = (
+                math.degrees(
+                    (math.cos(dec0) * math.sin(dec)
+                    - math.sin(dec0) * math.cos(dec) * math.cos(delta_ra))
+                    / denominator
+                )
+                * ARCSECONDS_PER_DEGREE
+            )
+            ra_coordinate_offset = math.degrees(delta_ra) * ARCSECONDS_PER_DEGREE
             return {
-                "ra_offset_arcsec": round(ra_cosdec_offset, 4),
-                "ra_cosdec_offset_arcsec": round(ra_cosdec_offset, 4),
-                "ra_coordinate_offset_arcsec": round(ra_coordinate_offset, 4),
-                "dec_offset_arcsec": round(dec_offset, 4),
-                "offset_arcsec": round(math.hypot(ra_cosdec_offset, dec_offset), 4),
+                "ra_offset_arcsec": float(ra_cosdec_offset),
+                "ra_cosdec_offset_arcsec": float(ra_cosdec_offset),
+                "ra_coordinate_offset_arcsec": float(ra_coordinate_offset),
+                "dec_offset_arcsec": float(dec_offset),
+                "offset_arcsec": float(math.hypot(ra_cosdec_offset, dec_offset)),
                 "n_difference_pixels": int(np.count_nonzero(core_mask)),
                 "coordinate_method": "fits-wcs-spherical-tangent-offset",
             }
@@ -747,12 +758,12 @@ def localize_difference_image(
     dec_offset = (centroid_y - float(target_y)) * pixel_scale_arcsec
     coordinate_ra_offset = ra_offset / cos_dec if math.isfinite(cos_dec) and abs(cos_dec) > np.finfo(float).eps else ra_offset
     return {
-        "ra_offset_arcsec": round(ra_offset, 4),
-        "ra_cosdec_offset_arcsec": round(ra_offset, 4),
-        "ra_coordinate_offset_arcsec": round(coordinate_ra_offset, 4),
-        "dec_offset_arcsec": round(dec_offset, 4),
+        "ra_offset_arcsec": float(ra_offset),
+        "ra_cosdec_offset_arcsec": float(ra_offset),
+        "ra_coordinate_offset_arcsec": float(coordinate_ra_offset),
+        "dec_offset_arcsec": float(dec_offset),
         # Total separation Δr = √(Δα²cos²δ + Δδ²) (Perryman §4.3.2, Eq. 4.8).
-        "offset_arcsec": round(math.hypot(ra_offset, dec_offset), 4),
+        "offset_arcsec": float(math.hypot(ra_offset, dec_offset)),
         "n_difference_pixels": int(np.count_nonzero(core_mask)),
         "coordinate_method": "pixel-scale-projected-offset",
     }
@@ -1260,10 +1271,10 @@ def _fit_one_difference_image(
             "separation_arcsec": src["separation_arcsec"],
             "is_target": src["is_target"],
             # Gaia G-band flux ratio from Pogson's law (see _load_archival_gaia_neighbors).
-            "g_band_flux_ratio_vs_target": round(flux_ratio, 8)
+            "g_band_flux_ratio_vs_target": float(flux_ratio)
             if flux_ratio is not None
             else None,
-            "difference_flux_amplitude": round(amplitude, 6),
+            "difference_flux_amplitude": float(amplitude),
         }
     target_amplitude = per_source[str(sources[0]["source_id"])]["difference_flux_amplitude"]
     other_amplitudes = [
@@ -1301,7 +1312,7 @@ def _fit_one_difference_image(
         "difference_flux_units": "TPF FLUX native units",
         "target_difference_flux_amplitude": target_amplitude,
         "max_other_difference_flux_amplitude": max_other,
-        "target_to_max_other_difference_ratio": round(ratio, 3) if ratio is not None else None,
+        "target_to_max_other_difference_ratio": float(ratio) if ratio is not None else None,
         "source_assignment_status": source_assignment_status,
         "source_assignment_interpretable": source_assignment_interpretable,
         "fit_dominant_source_id": str(fit_dominant_id),

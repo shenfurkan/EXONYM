@@ -10,7 +10,8 @@ non-transiting companions and resonant multi-planet systems
    where N is the integer transit epoch cycle.
 
 2. Observed-minus-Calculated (O - C) Residuals:
-   (O - C)_N = (T_obs(N) - T_calc(N)) * 1440.0   [minutes]
+   (O - C)_N = (T_obs(N) - T_calc(N)) * MINUTES_PER_DAY   [minutes],
+   where ``MINUTES_PER_DAY`` is the Astropy-derived standard conversion.
    derived via template cross-correlation with a Mandel & Agol (2002) transit profile.
 
 3. First-Order Mean Motion Resonance (MMR) Super-Periods (Lithwick, Xie & Wu 2012):

@@ -26,7 +26,6 @@ DETREND_METHODS: Tuple[Tuple[str, str], ...] = (
 )
 SEARCH_ENGINES: Tuple[str, ...] = ("bls", "tls")
 PRODUCT_CHOICES: Tuple[str, ...] = ("lc", "tp", "both")
-CADENCE_CHOICES: Tuple[int, ...] = (120, 20)
 MISSIONS: Tuple[str, ...] = ("tess", "kepler", "k2", "plato", "cheops")
 
 _DEFAULT_WINDOW_DAYS = 0.75
@@ -56,17 +55,17 @@ def build_init_argv(
     return argv
 
 
-def build_ingest_argv(
-    candidate_id: str, sectors: Sequence[int], exptime: int, products: str
-) -> List[str]:
-    """Build ``ingest`` arguments from wizard answers."""
+def build_ingest_argv(candidate_id: str, sectors: Sequence[int], products: str) -> List[str]:
+    """Build ``ingest`` arguments without a static cadence selection.
+
+    The archive request retains the official available SPOC products. Scientific
+    cadence is derived later from each candidate-owned FITS product.
+    """
     return [
         "ingest",
         candidate_id,
         "--sectors",
         *[str(value) for value in sectors],
-        "--exptime",
-        str(int(exptime)),
         "--products",
         products,
     ]
@@ -279,19 +278,18 @@ def run_wizard(
     # ---- Step 2: photometry ingestion -------------------------------------
     sector_text = _ask_text(console, "Observed sectors (space-separated integers)")
     sectors = parse_sectors(sector_text)
-    exptime = int(_ask_choice(console, "Cadence (seconds)", CADENCE_CHOICES, 120))
     products = str(_ask_choice(console, "Product type", PRODUCT_CHOICES, "lc"))
     if _show_plan(
         console,
         "Step 2 :: Ingest SPOC photometry",
         [
             ("sectors", " ".join(str(s) for s in sectors)),
-            ("cadence_s", str(exptime)),
+            ("cadence", "derived from downloaded FITS metadata"),
             ("products", products),
         ],
     ):
         if not _execute(
-            "ingest", build_ingest_argv(candidate_id, sectors, exptime, products)
+            "ingest", build_ingest_argv(candidate_id, sectors, products)
         ):
             failures += 1
 

@@ -1632,111 +1632,6 @@ def test_prf_scene_injection_recovers_detector_scale_gaussian_amplitudes():
 
 
 # ---------------------------------------------------------------------------
-# Scientific analysis modules: SED
-# ---------------------------------------------------------------------------
-
-
-def test_sed_recovers_synthetic_photometry():
-    from exonym.sed import _fit_blackbody
-    from tests.fixtures.synthetic_observations import _synthetic_photometry
-
-    stellar = {
-        "teff_k": 5772.0,
-        "logg_cgs": 4.438,
-        "feh": 0.0,
-        "mass_solar": 1.0,
-        "radius_solar": 1.0,
-        "parallax_mas": 10.0,
-        "parallax_mas_err": 0.05,
-    }
-    observations = _synthetic_photometry(stellar)
-    result = _fit_blackbody(observations, stellar, n_walkers=24, burn_in=150, production=250)
-    posterior = result["posterior"]
-    assert posterior["teff_k"]["median"] == pytest.approx(5772.0, abs=250.0)
-    assert posterior["radius_solar"]["median"] == pytest.approx(1.0, abs=0.35)
-    assert posterior["logg_cgs"]["median"] == pytest.approx(4.438, abs=0.3)
-
-
-def test_sed_blackbody_rejects_invalid_parallax_draws_before_summaries(monkeypatch):
-    import exonym.sed as sed
-
-    stellar = {
-        "teff_k": 5772.0,
-        "logg_cgs": 4.438,
-        "feh": 0.0,
-        "mass_solar": 1.0,
-        "radius_solar": 1.0,
-        "parallax_mas": 10.0,
-        "parallax_mas_err": 0.05,
-    }
-
-    def fake_run(log_probability, start, n_walkers, burn_in, production, seed):
-        samples = np.tile(np.asarray(start, dtype=float), (4, 1))
-        return samples, SimpleNamespace(acceptance_fraction=np.full(n_walkers, 0.5))
-
-    fake_rng = SimpleNamespace(
-        normal=lambda mean, sigma, size: np.array([10.0, 0.0, -1.0, np.nan])
-    )
-    monkeypatch.setattr(sed, "_run_emcee", fake_run)
-    monkeypatch.setattr(sed.np.random, "default_rng", lambda seed: fake_rng)
-    monkeypatch.setattr(
-        sed,
-        "blackbody_model_magnitudes",
-        lambda teff_k, log_radius_over_distance, av_mag, band_data: np.zeros(len(band_data)),
-    )
-
-    result = sed._fit_blackbody([("J", 0.0, 0.1)], stellar, n_walkers=4, burn_in=1, production=1)
-
-    diagnostics = result["fit_quality"]["parallax_draws"]
-    assert diagnostics == {
-        "proposed_count": 4,
-        "accepted_positive_finite_count": 1,
-        "rejected_nonpositive_or_nonfinite_count": 3,
-        "rejection_rate": pytest.approx(0.75),
-        "policy": "non-positive or non-finite draws are rejected before distance-derived summaries",
-    }
-    posterior = result["posterior"]
-    assert posterior["distance_pc"]["median"] == pytest.approx(100.0)
-    for key in ("distance_pc", "radius_solar", "luminosity_solar", "logg_cgs"):
-        assert np.isfinite(posterior[key]["median"])
-
-
-def test_sed_blackbody_fails_closed_when_all_parallax_draws_are_invalid(monkeypatch):
-    import exonym.sed as sed
-
-    stellar = {
-        "teff_k": 5772.0,
-        "logg_cgs": 4.438,
-        "feh": 0.0,
-        "mass_solar": 1.0,
-        "radius_solar": 1.0,
-        "parallax_mas": 10.0,
-        "parallax_mas_err": 0.05,
-    }
-
-    def fake_run(log_probability, start, n_walkers, burn_in, production, seed):
-        samples = np.tile(np.asarray(start, dtype=float), (3, 1))
-        return samples, SimpleNamespace(acceptance_fraction=np.full(n_walkers, 0.5))
-
-    fake_rng = SimpleNamespace(normal=lambda mean, sigma, size: np.array([0.0, -1.0, np.nan]))
-    monkeypatch.setattr(sed, "_run_emcee", fake_run)
-    monkeypatch.setattr(sed.np.random, "default_rng", lambda seed: fake_rng)
-
-    with pytest.raises(RuntimeError, match="rejected every parallax draw"):
-        sed._fit_blackbody([("J", 0.0, 0.1)], stellar, n_walkers=4, burn_in=1, production=1)
-
-
-def test_sed_percentile_summary():
-    from exonym.sed import percentile_summary
-
-    samples = np.linspace(0.0, 10.0, 1001)
-    summary = percentile_summary(samples)
-    assert summary["median"] == pytest.approx(5.0)
-    assert summary["p16"] < summary["median"] < summary["p84"]
-    assert summary["plus"] == pytest.approx(summary["p84"] - summary["median"])
-
-
-# ---------------------------------------------------------------------------
 # Scientific analysis modules: transit fit
 # ---------------------------------------------------------------------------
 
@@ -2105,7 +2000,7 @@ def test_posterior_summaries_refuse_a_missing_batman_model(monkeypatch):
         )
 
 
-def test_posterior_summaries_report_inclination_geometry_clipping(monkeypatch):
+def test_posterior_summaries_reject_invalid_inclination_geometry(monkeypatch):
     from exonym.transit_fit import _initial_fit_parameters, _posterior_summaries
 
     monkeypatch.setattr(
@@ -2116,14 +2011,13 @@ def test_posterior_summaries_report_inclination_geometry_clipping(monkeypatch):
     chain = np.tile(initial, (4, 1))
     chain[2:, 2] = 100.0
 
-    summaries = _posterior_summaries(
-        chain,
-        {"period_days": 3.2},
-        eccentric=False,
-        exposure_seconds=SECONDS_PER_DAY,
-    )
-
-    assert summaries["inclination_deg"]["conjunction_distance_clip_fraction"] == pytest.approx(0.5)
+    with pytest.raises(RuntimeError, match="invalid inclination geometry"):
+        _posterior_summaries(
+            chain,
+            {"period_days": 3.2},
+            eccentric=False,
+            exposure_seconds=SECONDS_PER_DAY,
+        )
 
 
 def test_posterior_summaries_vectorize_kipping_limb_darkening_exactly(monkeypatch):

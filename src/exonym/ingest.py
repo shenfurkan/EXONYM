@@ -284,7 +284,7 @@ def ingest_products(
 def fetch_tess_products(
     workspace: CandidateWorkspace,
     sectors: Optional[Sequence[int]] = None,
-    exptime: int = 120,
+    exptime: Optional[int] = None,
     provider: str = "spoc",
     quiet: bool = False,
     workers: int = 4,
@@ -299,7 +299,9 @@ def fetch_tess_products(
     Args:
         workspace: Candidate workspace that supplies the mission identifier.
         sectors: Optional archive-sector selection applied before download.
-        exptime: Requested cadence exposure time in seconds.
+        exptime: Optional archive-product cadence filter in seconds. This
+            selection filter is not used as a scientific integration time;
+            downstream analyses derive exposure from raw FITS metadata.
         provider: Supported official archive provider label.
         quiet: Suppress the ``rich.progress`` display (CI / non-TTY mode).
         workers: Maximum number of concurrent download threads.
@@ -325,7 +327,10 @@ def fetch_tess_products(
         raise ValueError("a TIC identifier is required for TESS ingestion")
     target = "TIC {0}".format(tic)
 
-    search = lk.search_lightcurve(target, author="SPOC", exptime=exptime)
+    search_kwargs = {"author": "SPOC"}
+    if exptime is not None:
+        search_kwargs["exptime"] = exptime
+    search = lk.search_lightcurve(target, **search_kwargs)
     if not search:
         return FetchedProducts()
 
@@ -335,7 +340,7 @@ def fetch_tess_products(
 def fetch_tess_tpfs(
     workspace: CandidateWorkspace,
     sectors: Optional[Sequence[int]] = None,
-    exptime: int = 120,
+    exptime: Optional[int] = None,
     provider: str = "spoc",
     quiet: bool = False,
     workers: int = 4,
@@ -352,7 +357,9 @@ def fetch_tess_tpfs(
     Args:
         workspace: Candidate workspace that supplies the mission identifier.
         sectors: Optional archive-sector selection applied before download.
-        exptime: Requested cadence exposure time in seconds.
+        exptime: Optional archive-product cadence filter in seconds. This
+            selection filter is not used as a scientific integration time;
+            downstream analyses derive exposure from raw FITS metadata.
         provider: Supported official archive provider label.
         quiet: Suppress the ``rich.progress`` display (CI / non-TTY mode).
         workers: Maximum number of concurrent download threads.
@@ -378,7 +385,10 @@ def fetch_tess_tpfs(
         raise ValueError("a TIC identifier is required for TESS ingestion")
     target = "TIC {0}".format(tic)
 
-    search = lk.search_targetpixelfile(target, author="SPOC", exptime=exptime)
+    search_kwargs = {"author": "SPOC"}
+    if exptime is not None:
+        search_kwargs["exptime"] = exptime
+    search = lk.search_targetpixelfile(target, **search_kwargs)
     if not search:
         return FetchedProducts()
 

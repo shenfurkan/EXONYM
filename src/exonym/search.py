@@ -107,7 +107,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .constants import HOURS_PER_DAY, PARTS_PER_MILLION
+from .constants import HOURS_PER_DAY, MINUTES_PER_DAY, PARTS_PER_MILLION
 from .inputs import (
     MINIMUM_BLS_CANDIDATE_SNR,
     PIPELINE_NORMALIZATION,
@@ -1671,8 +1671,9 @@ def compute_linear_ephemeris_residuals(
         n = {\\rm round}\\left(\\frac{t_{\\rm obs} - T_0}{P}\\right),
 
     and the calculated time is :math:`t_{\\rm calc} = T_0 + n P`.  The O−C
-    residual in minutes is :math:`(t_{\\rm obs} - t_{\\rm calc}) \\times
-    1440` (rounded to 4 decimal places).
+    residual in minutes is :math:`(t_{\\rm obs} - t_{\\rm calc})` multiplied
+    by the standard ``MINUTES_PER_DAY`` conversion. Native double precision is
+    retained.
 
     This linear formulation assumes no TTV, orbital decay, apsidal precession,
     or instrument-system clock differences.  Non-finite mid-times are skipped
@@ -1690,7 +1691,7 @@ def compute_linear_ephemeris_residuals(
     Returns
     -------
     Dict[str, Any]
-        ``residuals_minutes`` (list of float, rounded to 4 d.p.) and
+        ``residuals_minutes`` (native-precision list of float) and
         ``n_nonfinite_midtimes`` (int count of skipped non-finite entries).
     """
     if period_days <= 0:
@@ -1708,7 +1709,7 @@ def compute_linear_ephemeris_residuals(
         # Nearest integer epoch: n = round((t_obs − T₀) / P).
         n_epoch = round((t_obs_float - float(epoch_btjd)) / float(period_days))
         t_calc = float(epoch_btjd) + n_epoch * float(period_days)
-        # O−C in days, converted to minutes (×1440), rounded to 0.0001 min.
+        # O−C in days, converted to minutes.
         omc_days = t_obs_float - t_calc
-        residuals_min.append(round(omc_days * 1440.0, 4))
+        residuals_min.append(float(omc_days * MINUTES_PER_DAY))
     return {"residuals_minutes": residuals_min, "n_nonfinite_midtimes": n_nonfinite_midtimes}

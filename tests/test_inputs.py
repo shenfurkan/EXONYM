@@ -161,6 +161,7 @@ def test_detrended_loader_requires_hash_bound_raw_provenance(tmp_path):
         time,
         flux,
         window_days=0.5,
+        flux_err=np.full_like(flux, 0.0001),
         sector=np.full(time.size, 1, dtype=int),
         input_products=[{"path": "data/raw/source.fits", "sha256": raw_digest}],
         transit_mask=transit_mask,
@@ -205,11 +206,13 @@ def test_detrended_loader_rejects_unbound_and_legacy_manifests(tmp_path):
         encoding="utf-8",
     )
     time = np.linspace(0.0, 8.0, 101)
+    flux = 1.0 + 0.001 * np.sin(time)
     result = detrend_candidate(
         workspace,
         time,
-        1.0 + 0.001 * np.sin(time),
+        flux,
         window_days=0.5,
+        flux_err=np.full_like(flux, 0.0001),
         sector=np.full(time.size, 1, dtype=int),
         input_products=[{"path": "data/raw/source.fits", "sha256": raw_digest}],
     )
@@ -272,6 +275,7 @@ def test_detrended_loader_rejects_a_changed_transit_mask_ephemeris(tmp_path):
         time,
         flux,
         window_days=0.5,
+        flux_err=np.full_like(flux, 0.0001),
         sector=np.full(time.size, 1, dtype=int),
         input_products=[{"path": "data/raw/source.fits", "sha256": raw_digest}],
         transit_mask=transit_mask,

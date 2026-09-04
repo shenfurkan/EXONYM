@@ -118,24 +118,45 @@ def filter_candidates(
     return filtered
 
 
-def evaluate_habitable_zone_tag(insolation_earth: float) -> Optional[str]:
-    """Return the metadata tag for the configured insolation interval.
+def evaluate_habitable_zone_tag(
+    insolation_earth: float,
+    inner_flux_earth: float,
+    outer_flux_earth: float,
+) -> Optional[str]:
+    """Apply an evidence-supplied habitable-zone tag boundary.
 
-    The interval is used only to assign a candidate-management tag. It is not
-    a physical characterization or a habitability claim.
+    This administrative helper deliberately does not calculate stellar
+    habitable-zone limits.  Such limits depend on the candidate's stellar
+    effective temperature and the selected Kopparapu et al. (2013, ApJ 765,
+    131; DOI: 10.1088/0004-637X/765/2/131) climate boundary.  Callers must
+    therefore supply both limits from a candidate-owned, reviewed calculation
+    and retain its provenance separately.
 
     Args:
-        insolation_earth: Positive incident flux in Earth-insolation units.
+        insolation_earth: Candidate incident flux in Earth-insolation units.
+        inner_flux_earth: Evidence-derived inner flux boundary in the same
+            units.
+        outer_flux_earth: Evidence-derived outer flux boundary in the same
+            units.
 
     Returns:
-        ``"HabitableZoneCandidate"`` for values in the configured inclusive
-        interval, otherwise ``None``.
+        ``"HabitableZoneCandidate"`` only when the supplied flux lies within
+        the supplied inclusive interval, otherwise ``None``.  The tag is
+        administrative and is not a habitability characterization or claim.
 
     Raises:
-        ValueError: If ``insolation_earth`` is not positive.
+        ValueError: If any supplied flux is non-finite, non-positive, or the
+            interval is inverted.
     """
-    if insolation_earth <= 0:
-        raise ValueError("insolation_earth must be positive")
-    if 0.32 <= insolation_earth <= 1.11:
+    values = (insolation_earth, inner_flux_earth, outer_flux_earth)
+    try:
+        insolation, inner, outer = (float(value) for value in values)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("insolation and habitable-zone boundaries must be finite positive numbers") from exc
+    if not all(value > 0.0 for value in (insolation, inner, outer)):
+        raise ValueError("insolation and habitable-zone boundaries must be positive")
+    if inner > outer:
+        raise ValueError("inner_flux_earth must not exceed outer_flux_earth")
+    if inner <= insolation <= outer:
         return "HabitableZoneCandidate"
     return None

@@ -41,6 +41,7 @@ from .constants import (
     GRAVITATIONAL_CONSTANT_CGS,
     SAMPLE_MEDIAN_STANDARD_ERROR_FACTOR,
     SECONDS_PER_DAY,
+    SECONDS_PER_HOUR,
     SOLAR_MEAN_DENSITY_G_CM3,
 )
 
@@ -507,11 +508,11 @@ def calculate_contact_durations(
     v_stat = (2.0 * t12_sec / t14_sec) if t14_sec > 0 else 1.0
 
     return {
-        "T14_hr": round(t14_sec / 3600.0, 4),
-        "T23_hr": round(t23_sec / 3600.0, 4),
-        "T12_hr": round(t12_sec / 3600.0, 4),
+        "T14_hr": float(t14_sec / SECONDS_PER_HOUR),
+        "T23_hr": float(t23_sec / SECONDS_PER_HOUR),
+        "T12_hr": float(t12_sec / SECONDS_PER_HOUR),
         "grazing": 1.0 if grazing else 0.0,
-        "v_stat": round(v_stat, 4),
+        "v_stat": float(v_stat),
         "geometry_status": "grazing" if grazing else "full-transit",
     }
 

@@ -915,8 +915,8 @@ def run_triceratops_simulation(
             "{1}".format(source, remediation)
         )
 
-    fpp_rounded: Optional[float] = round(fpp, 6) if math.isfinite(fpp) else None
-    nfpp_rounded: Optional[float] = round(nfpp, 6) if math.isfinite(nfpp) else None
+    fpp_value: Optional[float] = float(fpp) if math.isfinite(fpp) else None
+    nfpp_value: Optional[float] = float(nfpp) if math.isfinite(nfpp) else None
 
     report = {
         "method": "TRICERATOPS",
@@ -933,8 +933,8 @@ def run_triceratops_simulation(
             "duration_hours": duration_hrs,
             "source": ephemeris_source,
         },
-        "FPP": fpp_rounded,
-        "NFPP": nfpp_rounded,
+        "FPP": fpp_value,
+        "NFPP": nfpp_value,
         "scenarios": scenarios,
         "source": source,
         "triceratops_error": triceratops_error,
@@ -961,7 +961,12 @@ def run_triceratops_simulation(
     _write_json_atomic(report_path, report)
 
     if source == "trex-monte-carlo":
-        passes = fpp_rounded is not None and nfpp_rounded is not None and fpp_rounded < FPP_THRESHOLD and nfpp_rounded < NFPP_THRESHOLD
+        passes = (
+            fpp_value is not None
+            and nfpp_value is not None
+            and fpp_value < FPP_THRESHOLD
+            and nfpp_value < NFPP_THRESHOLD
+        )
         previous = _existing_vetting_decision()
         triage_status = previous.get("triage_status", "not-run")
         write_triceratops_vetting_decision(
@@ -970,8 +975,8 @@ def run_triceratops_simulation(
             execution_status="succeeded",
             triage_status=triage_status,
             result_status=("review-required" if passes and triage_status == "review-required" else "fpp-pass" if passes else "fpp-fail"),
-            fpp=fpp_rounded,
-            nfpp=nfpp_rounded,
+            fpp=fpp_value,
+            nfpp=nfpp_value,
             input_artifacts=input_snapshot,
             triceratops_report={"path": report_path.relative_to(workspace.path).as_posix(), "sha256": _sha256(report_path)},
             audit_status="valid",

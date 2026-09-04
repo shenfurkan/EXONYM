@@ -32,7 +32,15 @@ SECONDS_PER_DAY: float = float(_u.day.to(_u.s))
 HOURS_PER_DAY: float = float(_u.day.to(_u.hour))
 MINUTES_PER_HOUR: float = float(_u.hour.to(_u.min))
 MINUTES_PER_DAY: float = float(_u.day.to(_u.min))
+SECONDS_PER_HOUR: float = float(_u.hour.to(_u.s))
 JULIAN_YEAR_DAYS: float = float(_u.yr.to(_u.day))
+ARCSECONDS_PER_DEGREE: float = float(_u.deg.to(_u.arcsec))
+MILLIARCSECONDS_PER_ARCSECOND: float = float(_u.arcsec.to(_u.mas))
+MICROHERTZ_TO_CYCLES_PER_DAY: float = float(_u.uHz.to(_u.day**-1))
+SQUARE_ARCSECONDS_PER_SQUARE_DEGREE: float = float((_u.deg**2).to(_u.arcsec**2))
+FULL_TURN_DEGREES: float = math.degrees(math.tau)
+HALF_TURN_DEGREES: float = math.degrees(math.pi)
+RIGHT_ANGLE_DEGREES: float = math.degrees(math.pi / 2.0)
 
 # Fundamental physical constants sourced directly from Astropy CODATA 2018 (Tier 2 Provenance).
 # Tiesinga et al. (2021, Rev. Mod. Phys. 93, 025010; literature/tiesinga_2021_codata_2018.pdf).

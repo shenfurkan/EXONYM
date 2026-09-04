@@ -171,7 +171,13 @@ def test_fetch_tess_products_writes_fits_and_ingests(tmp_path, monkeypatch):
     fake_search = _FakeSearch(table, [object()])
     raw_bytes = b"unaltered-mast-spoc-lightcurve-bytes"
 
-    monkeypatch.setattr(lk, "search_lightcurve", lambda *args, **kwargs: fake_search)
+    search_calls = []
+
+    def search_lightcurve(*args, **kwargs):
+        search_calls.append((args, kwargs))
+        return fake_search
+
+    monkeypatch.setattr(lk, "search_lightcurve", search_lightcurve)
     monkeypatch.setattr(
         lk,
         "search_tesscut",
@@ -188,7 +194,9 @@ def test_fetch_tess_products_writes_fits_and_ingests(tmp_path, monkeypatch):
         return resp
 
     with patch("requests.get", side_effect=_fake_response):
-        products = fetch_tess_products(candidate, exptime=120)
+        products = fetch_tess_products(candidate)
+
+    assert search_calls == [(("TIC 123456789",), {"author": "SPOC"})]
 
     assert len(products) == 1
     staged, source_uri = products[0]
@@ -379,7 +387,7 @@ def test_fetch_tess_tpfs_stages_and_ingests_with_sidecars(tmp_path, monkeypatch)
         return resp
 
     with patch("requests.get", side_effect=_fake_response):
-        products = fetch_tess_tpfs(candidate, exptime=120)
+        products = fetch_tess_tpfs(candidate)
 
     assert len(products) == 2
     for staged, source_uri in products:
@@ -493,4 +501,7 @@ def test_perryman_spectroscopic_and_atmospheric_calculations():
     passed, _ = ellipsoidal_gate(amp_ppm)
     assert passed
 
-    assert evaluate_habitable_zone_tag(0.5) == "HabitableZoneCandidate"
+    assert evaluate_habitable_zone_tag(0.5, 0.3, 1.2) == "HabitableZoneCandidate"
+    assert evaluate_habitable_zone_tag(1.3, 0.3, 1.2) is None
+    with pytest.raises(ValueError, match="inner_flux_earth"):
+        evaluate_habitable_zone_tag(0.5, 1.2, 0.3)

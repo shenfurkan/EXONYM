@@ -750,14 +750,6 @@ def load_photometry(workspace: CandidateWorkspace) -> Optional[Dict[str, Any]]:
     return _read_json(path)
 
 
-def _mad_flux_error(flux: np.ndarray) -> float:
-    median = float(np.median(flux))
-    mad = float(np.median(np.abs(flux - median)))
-    if not np.isfinite(mad) or mad <= 0:
-        return 1.0
-    return float(1.4826 * mad)
-
-
 def _median_bin(
     time: np.ndarray,
     flux: np.ndarray,
@@ -1030,11 +1022,9 @@ def _load_detrended_light_curve_table(
         valid &= np.isfinite(flux_err) & (flux_err > 0)
     time, flux, sector_values = time[valid], flux[valid], sector_values[valid]
     if flux_err is None:
-        flux_err = np.full_like(flux, _mad_flux_error(flux))
-        flux_err_source = "detrended-mad-estimate"
-    else:
-        flux_err = flux_err[valid]
-        flux_err_source = "detrended-reported"
+        return None
+    flux_err = flux_err[valid]
+    flux_err_source = "detrended-reported"
     if sectors is not None:
         selected = np.isin(sector_values, np.asarray(sectors, dtype=int))
         time, flux, flux_err, sector_values = (
@@ -1249,25 +1239,20 @@ def load_light_curve_table(
                     flux_err = None
             except (AttributeError, TypeError, ValueError) as exc:
                 _warnings.warn(
-                    "flux_err unavailable for {0}: {1!r} — using MAD estimate".format(
+                    "skipped {0}: flux_err is unavailable: {1!r}".format(
                         path.name, exc
                     ),
                     stacklevel=2,
                 )
-                flux_err = None
+                continue
             if flux_err is not None and not np.all(np.isfinite(flux_err) & (flux_err > 0)):
                 _warnings.warn(
-                    "flux_err contains non-finite or non-positive values for {0} â€” using MAD estimate".format(
+                    "skipped {0}: flux_err contains non-finite or non-positive values".format(
                         path.name
                     ),
                     stacklevel=2,
                 )
-                flux_err = None
-                flux_err_source = "mad-estimate-invalid-reported"
-            if flux_err is None:
-                flux_err = np.full_like(flux, _mad_flux_error(flux))
-                if flux_err_source == "reported":
-                    flux_err_source = "mad-estimate"
+                continue
             if sector_value in seen_sectors:
                 # Different products from the same TESS sector (e.g. SPOC and
                 # QLP copies) would otherwise double-count one sector and make

@@ -40,6 +40,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .constants import (
+    HOURS_PER_DAY,
+    MICROHERTZ_TO_CYCLES_PER_DAY,
     NOMINAL_SOLAR_EFFECTIVE_TEMPERATURE_K as TEFF_SUN_K,
     SECONDS_PER_DAY,
 )
@@ -58,9 +60,8 @@ DNU_SUN_UHZ = 135.1         # Solar large frequency separation (microHz)
 
 DNU_MIN_UHZ = 30.0          # Minimum trial Delta-nu lag (microHz)
 DNU_MAX_UHZ = 200.0         # Maximum trial Delta-nu lag (microHz) — Solar Δν☉ ≈ 135.1 µHz; must exceed it — Chaplin & Miglio 2013
-# 1 microhertz is exactly 0.0864 cycles per day.  The prior name reversed
-# this conversion direction even though callers used its numeric value correctly.
-CPD_PER_UHZ = 0.0864
+# Exact Astropy-unit conversion from microhertz to cycles per Julian day.
+CPD_PER_UHZ = MICROHERTZ_TO_CYCLES_PER_DAY
 
 
 def _odd_bins(value: float) -> int:
@@ -215,7 +216,9 @@ def fit_harvey_granulation_background(
     tau2_init = 600.0  # seconds (10 minutes)
 
     if numax_guess is not None and math.isfinite(float(numax_guess)):
-        numax_init = float(np.clip(numax_guess, float(np.min(freq)), float(np.max(freq))))
+        numax_init = float(numax_guess)
+        if numax_init < float(np.min(freq)) or numax_init > float(np.max(freq)):
+            raise ValueError("numax_guess lies outside the evaluated frequency grid")
     else:
         numax_init = float(np.median(freq))
     h_osc_init = float(np.max(power) * 0.5)
@@ -581,8 +584,8 @@ def seismic_mass_radius(
     if not math.isfinite(mass) or mass <= 0.0 or not math.isfinite(radius) or radius <= 0.0:
         raise ValueError("asteroseismic scaling inputs produce non-finite stellar parameters")
     return {
-        "mass_solar": round(float(mass), 4),
-        "radius_solar": round(float(radius), 4),
+        "mass_solar": float(mass),
+        "radius_solar": float(radius),
         "method": method,
         "dnu_correction_factor": correction_factor,
         "dnu_corrected_uhz": dnu_corrected,
@@ -1240,12 +1243,17 @@ def run_asteroseismology(
     time = table["time"]
     flux = table["flux"]
     ephemeris = load_transit_ephemeris(workspace)
-    cadence_seconds = 120.0
-    if time.size > 1:
-        cadence_seconds = float(np.median(np.diff(np.sort(time)))) * SECONDS_PER_DAY
+    cadence_intervals_days = np.diff(np.sort(time[np.isfinite(time)]))
+    cadence_intervals_days = cadence_intervals_days[cadence_intervals_days > 0.0]
+    if cadence_intervals_days.size == 0:
+        raise RuntimeError("asteroseismology requires at least two distinct finite cadence times")
+    cadence_seconds = float(np.median(cadence_intervals_days)) * SECONDS_PER_DAY
     can_mask_transits = is_complete_candidate_ephemeris(ephemeris)
     if can_mask_transits:
-        phase_days = phase_hours(time, ephemeris["period_days"], ephemeris["epoch_btjd"]) / 24.0
+        phase_days = (
+            phase_hours(time, ephemeris["period_days"], ephemeris["epoch_btjd"])
+            / HOURS_PER_DAY
+        )
         transit_mask = np.abs(phase_days) >= 0.75 * ephemeris["duration_days"]
         masked_time = time[transit_mask]
         masked_flux = flux[transit_mask]

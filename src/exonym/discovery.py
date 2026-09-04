@@ -285,7 +285,9 @@ def _box_exposure_fraction(
     transit_starts = event_centers - 0.5 * duration_days
     transit_ends = event_centers + 0.5 * duration_days
     overlap = np.maximum(0.0, np.minimum(ends, transit_ends) - np.maximum(starts, transit_starts))
-    return np.clip(overlap / exposure, 0.0, 1.0)
+    if np.any(overlap > exposure):
+        raise RuntimeError("finite-exposure overlap exceeded its cadence duration")
+    return overlap / exposure
 
 
 def inject_box_transit(

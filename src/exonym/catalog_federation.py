@@ -29,6 +29,13 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .archive import load_validated_archival_report
+from .constants import (
+    ARCSECONDS_PER_DEGREE,
+    FULL_TURN_DEGREES,
+    HALF_TURN_DEGREES,
+    MILLIARCSECONDS_PER_ARCSECOND,
+    RIGHT_ANGLE_DEGREES,
+)
 from .workspace import CandidateWorkspace
 
 CATALOG_STATUSES = (
@@ -536,7 +543,12 @@ def _record_astrometry(record: Mapping[str, Any]) -> Optional[Dict[str, float]]:
     """Extract explicitly supplied ICRS astrometry from common catalog field names."""
     ra_value = _finite_record_value(record, "ra", "ra_deg", "ra2000", "raj2000")
     dec_value = _finite_record_value(record, "dec", "dec_deg", "dec2000", "dej2000")
-    if ra_value is None or dec_value is None or not 0.0 <= ra_value < 360.0 or not -90.0 <= dec_value <= 90.0:
+    if (
+        ra_value is None
+        or dec_value is None
+        or not 0.0 <= ra_value < FULL_TURN_DEGREES
+        or not -RIGHT_ANGLE_DEGREES <= dec_value <= RIGHT_ANGLE_DEGREES
+    ):
         return None
     values = {"ra_deg": ra_value, "dec_deg": dec_value}
     aliases = {
@@ -573,8 +585,11 @@ def _propagate_astrometry(values: Mapping[str, float], comparison_jyear: float) 
     cosine_dec = math.cos(math.radians(dec_value))
     if abs(cosine_dec) < 1e-12:
         return None
-    propagated_ra = (ra_value + pmra_value * elapsed_years / (1000.0 * 3600.0 * cosine_dec)) % 360.0
-    propagated_dec = dec_value + pmdec_value * elapsed_years / (1000.0 * 3600.0)
+    mas_per_degree = MILLIARCSECONDS_PER_ARCSECOND * ARCSECONDS_PER_DEGREE
+    propagated_ra = (
+        ra_value + pmra_value * elapsed_years / (mas_per_degree * cosine_dec)
+    ) % FULL_TURN_DEGREES
+    propagated_dec = dec_value + pmdec_value * elapsed_years / mas_per_degree
     ra_error = values.get("ra_uncertainty_mas")
     dec_error = values.get("dec_uncertainty_mas")
     if ra_error is None or dec_error is None:
@@ -592,9 +607,11 @@ def _propagate_astrometry(values: Mapping[str, float], comparison_jyear: float) 
 
 def _separation_mas(first: Mapping[str, float], second: Mapping[str, float]) -> float:
     """Return small-angle ICRS separation in milliarcseconds at one common epoch."""
-    delta_ra = (first["ra_deg"] - second["ra_deg"] + 180.0) % 360.0 - 180.0
+    delta_ra = (
+        first["ra_deg"] - second["ra_deg"] + HALF_TURN_DEGREES
+    ) % FULL_TURN_DEGREES - HALF_TURN_DEGREES
     delta_dec = first["dec_deg"] - second["dec_deg"]
-    return 3600.0 * 1000.0 * math.hypot(
+    return ARCSECONDS_PER_DEGREE * MILLIARCSECONDS_PER_ARCSECOND * math.hypot(
         delta_ra * math.cos(math.radians(second["dec_deg"])), delta_dec
     )
 

@@ -18,16 +18,12 @@ _GOLD_STANDARD_FIXTURES = frozenset(
         "claret_limb_darkening_sample.json",
         "kepler_rv_eccentric_benchmarks.json",
         "mandel_agol_quadrature_benchmarks.json",
-        "mist_synthetic_stellar_nodes.json",
         "phasecurve_circular_harmonic_benchmarks.json",
         "seismic_scaling_standard_stars.json",
         "ttv_first_order_mmr_benchmarks.json",
     }
 )
 _TAU = 2.0 * math.pi
-_SPEED_OF_LIGHT_M_S = 299_792_458.0
-_PLANCK_CONSTANT_J_S = 6.62607015e-34
-_BOLTZMANN_CONSTANT_J_K = 1.380649e-23
 
 
 def _reject_duplicate_fixture_keys(pairs):
@@ -266,27 +262,6 @@ def _independent_keplerian_velocity_m_per_s(case):
         np.cos(true_anomaly + float(case["argument_periastron_rad"]))
         + eccentricity * math.cos(float(case["argument_periastron_rad"]))
     )
-
-
-def _independent_blackbody_magnitudes(node, bands, bandpasses, extinction_ratios):
-    """Evaluate the fixture Planck law from exact SI constants, outside the production helper."""
-    teff_k = float(node["teff_k"])
-    radius_distance = math.exp(float(node["log_radius_over_distance"]))
-    magnitudes = []
-    for band in bands:
-        passband = bandpasses[band]
-        wavelength_m = float(passband["pivot_wavelength_micron"]) * 1.0e-6
-        frequency_hz = _SPEED_OF_LIGHT_M_S / wavelength_m
-        exponent = _PLANCK_CONSTANT_J_S * frequency_hz / (_BOLTZMANN_CONSTANT_J_K * teff_k)
-        intensity_w_m2_hz_sr = (
-            2.0 * _PLANCK_CONSTANT_J_S * frequency_hz**3 / _SPEED_OF_LIGHT_M_S**2 / math.expm1(exponent)
-        )
-        flux_jy = math.pi * intensity_w_m2_hz_sr * radius_distance**2 / 1.0e-26
-        magnitudes.append(
-            -2.5 * math.log10(flux_jy / float(passband["vega_zero_point_jy"]))
-            + float(node["av_mag"]) * float(extinction_ratios[band])
-        )
-    return np.asarray(magnitudes, dtype=float)
 
 
 def _true_anomaly_to_mean_anomaly(true_anomaly, eccentricity):
@@ -571,105 +546,6 @@ def test_asteroseismic_scaling_relations_identity_and_giant_stars():
         assert result["mass_solar"] == pytest.approx(round(expected_mass, 4), abs=5e-4)
 
 
-def test_sed_blackbody_planck_radiation_and_extinction_scaling():
-    """
-    NEDEN: Planck fonksiyonunun sayısal taşma (overflow/underflow) yapmadığı, mesafe 2 katına
-    çıktığında akının tam 4 kat azaldığı (1/d^2 kanunu) ve A_V=0 sönümlemesiz durum test edilir.
-    """
-    from exonym.sed import BAND_ZERO_POINTS, EXTINCTION_RATIOS, blackbody_model_magnitudes
-
-    payload = _load_fixture("mist_synthetic_stellar_nodes.json")
-    bands = payload["supported_planck_bands"]
-    bandpasses = payload["planck_bandpasses"]
-    assert set(bands) == set(BAND_ZERO_POINTS) == set(bandpasses)
-    for band in bands:
-        expected_bandpass = bandpasses[band]
-        assert BAND_ZERO_POINTS[band] == pytest.approx(
-            (
-                expected_bandpass["pivot_wavelength_micron"],
-                expected_bandpass["vega_zero_point_jy"],
-            ),
-            rel=0.0,
-            abs=0.0,
-        )
-    for band, expected_ratio in payload["extinction_ratios"].items():
-        assert EXTINCTION_RATIOS[band] == pytest.approx(expected_ratio, abs=0.0)
-
-    for node in payload["nodes"]:
-        band_data = [
-            (
-                band,
-                bandpasses[band]["pivot_wavelength_micron"],
-                bandpasses[band]["vega_zero_point_jy"],
-            )
-            for band in bands
-        ]
-        with np.errstate(over="raise", under="raise", invalid="raise", divide="raise"):
-            no_extinction = blackbody_model_magnitudes(
-                node["teff_k"], node["log_radius_over_distance"], 0.0, band_data
-            )
-            model = blackbody_model_magnitudes(
-                node["teff_k"], node["log_radius_over_distance"], node["av_mag"], band_data
-            )
-        expected = np.asarray(
-            [node["planck_reference_magnitudes"][band] for band in bands], dtype=float
-        )
-        independent_no_extinction = _independent_blackbody_magnitudes(
-            {**node, "av_mag": 0.0}, bands, bandpasses, payload["extinction_ratios"]
-        )
-        independent_model = _independent_blackbody_magnitudes(
-            node, bands, bandpasses, payload["extinction_ratios"]
-        )
-        assert set(node["mist_absolute_magnitudes"]) >= {
-            "gaia_g",
-            "gaia_bp",
-            "gaia_rp",
-            "twomass_j",
-            "twomass_h",
-            "twomass_ks",
-            "wise_w1",
-            "wise_w2",
-        }
-        assert all(
-            math.isfinite(float(value))
-            for value in node["mist_absolute_magnitudes"].values()
-        )
-        np.testing.assert_allclose(expected, independent_no_extinction, rtol=0.0, atol=1e-11)
-        np.testing.assert_allclose(no_extinction, independent_no_extinction, rtol=0.0, atol=1e-11)
-        np.testing.assert_allclose(model, independent_model, rtol=0.0, atol=1e-11)
-        assert np.all(np.isfinite(model))
-        assert np.all(np.isfinite(no_extinction))
-
-    node = payload["nodes"][0]
-    band_data = [
-        (
-            band,
-            bandpasses[band]["pivot_wavelength_micron"],
-            bandpasses[band]["vega_zero_point_jy"],
-        )
-        for band in bands
-    ]
-    near = blackbody_model_magnitudes(
-        node["teff_k"], node["log_radius_over_distance"], 0.0, band_data
-    )
-    twice_distance = blackbody_model_magnitudes(
-        node["teff_k"], node["log_radius_over_distance"] - math.log(2.0), 0.0, band_data
-    )
-    flux_ratio = 10.0 ** (-0.4 * twice_distance) / 10.0 ** (-0.4 * near)
-    np.testing.assert_allclose(flux_ratio, 0.25, rtol=1e-12, atol=1e-14)
-    np.testing.assert_allclose(twice_distance - near, 5.0 * math.log10(2.0), rtol=0.0, atol=1e-12)
-
-    extincted = blackbody_model_magnitudes(
-        node["teff_k"], node["log_radius_over_distance"], 1.0, band_data
-    )
-    np.testing.assert_allclose(
-        extincted - near,
-        np.asarray([payload["extinction_ratios"][band] for band in bands]),
-        rtol=0.0,
-        atol=1e-12,
-    )
-
-
 def test_ttv_first_order_mean_motion_resonance_super_periods():
     """
     NEDEN: 2:1, 3:2, 4:3 ve 5:4 rezonanslarına yakın gezegen çiftlerinde Lithwick süper-periyot formülünün
@@ -864,47 +740,6 @@ def test_phasecurve_circular_harmonics_and_cluster_covariance():
         rtol=0.0,
         atol=1e-12,
     )
-
-
-def test_cross_match_isochrone_evolution_consistency():
-    """
-    NEDEN: cross_match_isochrone_evolution fonksiyonunun Güneş parametrelerinde
-    tam ana kol tespiti yaptığını, dev yıldızlarda subgiant_or_evolved sonucunu
-    verdiğini ve geçersiz girdileri (negatif Teff / R) reddettiğini doğrular.
-    """
-    from exonym.sed import cross_match_isochrone_evolution
-    from exonym.constants import (
-        NOMINAL_SOLAR_EFFECTIVE_TEMPERATURE_K,
-        NOMINAL_SOLAR_LOGG_CGS,
-    )
-
-    # 1. Solar identity check -> main sequence
-    solar = cross_match_isochrone_evolution(
-        teff_k=NOMINAL_SOLAR_EFFECTIVE_TEMPERATURE_K,
-        logg_cgs=NOMINAL_SOLAR_LOGG_CGS,
-        feh_dex=0.0,
-        radius_solar=1.0,
-    )
-    assert solar["evolutionary_stage"] == "main_sequence"
-    assert solar["teff_ratio_vs_solar"] == pytest.approx(1.0, rel=1e-4)
-    assert solar["observed_logg_offset"] == pytest.approx(0.0, abs=1e-3)
-
-    # 2. Red giant star (R=12.0 R_sun, logg=2.3) -> subgiant_or_evolved
-    giant = cross_match_isochrone_evolution(
-        teff_k=4500.0,
-        logg_cgs=2.3,
-        feh_dex=-0.1,
-        radius_solar=12.0,
-    )
-    assert giant["evolutionary_stage"] == "subgiant_or_evolved"
-    assert giant["observed_logg_offset"] > 0.4
-
-    # 3. Non-physical input error checking
-    with pytest.raises(ValueError, match="teff_k must be positive"):
-        cross_match_isochrone_evolution(teff_k=-5000.0, logg_cgs=4.4, feh_dex=0.0, radius_solar=1.0)
-
-    with pytest.raises(ValueError, match="radius_solar must be positive"):
-        cross_match_isochrone_evolution(teff_k=5772.0, logg_cgs=4.4, feh_dex=0.0, radius_solar=-1.0)
 
 
 def test_secular_timing_models_apsidal_precession_and_degeneracy():

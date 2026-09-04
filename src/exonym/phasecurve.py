@@ -127,18 +127,17 @@ def _circular_phase_summary(phases: np.ndarray) -> Dict[str, Any]:
     median_phase = (reference + median) % 1.0
     upper_phase = (reference + upper) % 1.0
     return {
-        "median": _rounded_phase_fraction(median_phase),
-        "p16": _rounded_phase_fraction(lower_phase),
-        "p84": _rounded_phase_fraction(upper_phase),
+        "median": _phase_fraction(median_phase),
+        "p16": _phase_fraction(lower_phase),
+        "p84": _phase_fraction(upper_phase),
         "credible_interval_wraps_phase_zero": bool(lower_phase > upper_phase),
-        "half_width_phase": round(0.5 * (upper - lower), 8),
+        "half_width_phase": float(0.5 * (upper - lower)),
     }
 
 
-def _rounded_phase_fraction(phase_fraction: float) -> float:
-    """Round a circular phase without serializing the excluded endpoint 1.0."""
-    rounded = round(float(phase_fraction) % 1.0, 8)
-    return 0.0 if rounded >= 1.0 else rounded
+def _phase_fraction(phase_fraction: float) -> float:
+    """Serialize a native-precision circular phase in the half-open interval [0, 1)."""
+    return float(phase_fraction) % 1.0
 
 
 def _true_anomaly_from_mean_anomaly(mean_anomaly: np.ndarray, eccentricity: float) -> np.ndarray:
@@ -633,10 +632,8 @@ def build_design_matrix(
         centered_time[in_sector] = time[in_sector] - np.median(time[in_sector])
         columns.append(centered_time)
         names.append(f"sector_{sector_value}_slope")
-        # Ensure cluster block size adapts dynamically for short-period planets (Cameron et al. 2011)
-        effective_block_days = min(float(block_days), 0.25 * float(period_days))
         local_block = np.floor(
-            (time[in_sector] - np.min(time[in_sector])) / effective_block_days
+            (time[in_sector] - np.min(time[in_sector])) / block_days
         ).astype(int)
         cluster[in_sector] = group_offset + local_block
         group_offset += int(np.max(local_block)) + 1
@@ -881,7 +878,7 @@ def fit_phase_curve_components(
         "n_sectors": int(len(np.unique(sector_values))),
         "n_covariance_clusters": int(n_clusters),
         "primary_mask_half_width_hours": float(primary_mask_half_durations * duration_days * 24.0),
-        "secondary_box_phase": _rounded_phase_fraction(secondary_eclipse_phase),
+        "secondary_box_phase": _phase_fraction(secondary_eclipse_phase),
         "secondary_box_duration_hours": float(
             float(secondary_eclipse_duration_days or duration_days) * 24.0
         ),

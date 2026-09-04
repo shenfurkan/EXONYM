@@ -174,10 +174,19 @@ def separation_at_contrast(
     s = np.asarray(separations, dtype=float)
     c = np.asarray(contrasts, dtype=float)
     order = np.argsort(c)
+    sorted_contrasts = c[order]
+    if (
+        not np.all(np.isfinite(delta_mags))
+        or not np.all(np.isfinite(s))
+        or not np.all(np.isfinite(sorted_contrasts))
+        or np.any(s <= 0.0)
+        or np.any(np.diff(sorted_contrasts) <= 0.0)
+    ):
+        raise ValueError("contrast curve coordinates must be finite, positive, and strictly ordered")
+    if np.any(delta_mags < sorted_contrasts[0]) or np.any(delta_mags > sorted_contrasts[-1]):
+        raise ValueError("requested contrasts lie outside the measured contrast curve")
     spline = InterpolatedUnivariateSpline(c[order], s[order], k=1)
-    result = spline(delta_mags)
-    result = np.clip(result, np.min(s), np.max(s))
-    return result
+    return np.asarray(spline(delta_mags), dtype=float)
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +201,9 @@ def delta_mag_to_flux_ratio(delta_mag: np.ndarray) -> np.ndarray:
 def flux_ratio_to_delta_mag(flux_ratio: np.ndarray) -> np.ndarray:
     """Convert flux ratio to delta-magnitude: dm = -2.5 * log10(F2/F1)."""
     flux_ratio = np.asarray(flux_ratio, dtype=float)
-    return -2.5 * np.log10(np.maximum(flux_ratio, 1e-30))
+    if not np.all(np.isfinite(flux_ratio)) or np.any(flux_ratio <= 0.0):
+        raise ValueError("flux ratios must be finite and strictly positive")
+    return -2.5 * np.log10(flux_ratio)
 
 
 def tess_surface_brightness_ratio(

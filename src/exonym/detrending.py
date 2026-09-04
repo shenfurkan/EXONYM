@@ -426,16 +426,20 @@ def _wotan_trend(
     return np.asarray(trend, dtype=float)
 
 
-def _resolved_errors(values: np.ndarray, errors: Optional[np.ndarray]) -> np.ndarray:
-    """Return finite positive uncertainties required by the celerite GP solver."""
-    if errors is not None:
-        finite_positive = errors[np.isfinite(errors) & (errors > 0)]
-        if finite_positive.size:
-            fallback = float(np.median(finite_positive))
-            return np.where(np.isfinite(errors) & (errors > 0), errors, fallback)
-    centered = values - np.median(values)
-    robust_sigma = float(1.4826 * np.median(np.abs(centered)))
-    return np.full(values.shape, max(robust_sigma, np.finfo(float).eps))
+def _resolved_errors(errors: Optional[np.ndarray]) -> np.ndarray:
+    """Require measured finite positive uncertainties for the celerite GP.
+
+    Celerite conditions its likelihood on the observational covariance. A
+    median replacement or scatter-derived proxy would turn unmeasured noise
+    into fabricated input evidence, so the optional GP backend is unavailable
+    for a series without complete reported cadence uncertainties.
+    """
+    if errors is None:
+        raise ValueError("celerite detrending requires reported per-cadence flux_err")
+    resolved = np.asarray(errors, dtype=float)
+    if resolved.ndim != 1 or not np.all(np.isfinite(resolved) & (resolved > 0.0)):
+        raise ValueError("celerite detrending requires finite positive per-cadence flux_err")
+    return resolved
 
 
 def _celerite_trend(
@@ -477,9 +481,7 @@ def _celerite_trend(
     unmasked_residuals = residuals[unmasked]
     unmasked_time = time[unmasked]
     amplitude = max(float(np.std(unmasked_residuals)), np.finfo(float).eps)
-    unmasked_errors = _resolved_errors(
-        values[unmasked], errors[unmasked] if errors is not None else None
-    )
+    unmasked_errors = _resolved_errors(errors[unmasked] if errors is not None else None)
     try:
         kernel = celerite.terms.Matern32Term(
             log_sigma=float(np.log(amplitude)), log_rho=float(np.log(window_days))

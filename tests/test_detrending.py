@@ -3,6 +3,7 @@
 import hashlib
 import importlib
 import json
+import sys
 
 import numpy as np
 import pytest
@@ -144,6 +145,30 @@ def test_unavailable_optional_backend_writes_no_science_output(tmp_path, monkeyp
     assert not (workspace.path / "data" / "processed" / ("detrended-" + method + ".npz")).exists()
     assert not (workspace.path / "outputs" / ("detrending_manifest." + method + ".json")).exists()
 
+
+def test_celerite_rejects_missing_observational_uncertainties(tmp_path, monkeypatch):
+    workspace = create_candidate(tmp_path, "celerite-requires-errors")
+    time, flux = _synthetic_flux()
+    raw_product = _raw_input_product(workspace)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "celerite",
+        type("Celerite", (), {"terms": object(), "GP": object()})(),
+    )
+
+    with pytest.raises(ValueError, match="reported per-cadence flux_err"):
+        detrend_candidate(
+            workspace,
+            time,
+            flux,
+            method="celerite",
+            window_days=0.5,
+            sector=np.ones(time.size, dtype=int),
+            input_products=[raw_product],
+        )
+    assert not (workspace.path / "data" / "processed" / "detrended-celerite.npz").exists()
+
 def _synthetic_transit_light_curve():
     """Return time, flux, and transit_mask with an injected box transit (depth 0.01)."""
     time = np.linspace(0.0, 8.0, 401)
@@ -254,15 +279,30 @@ def test_detrending_depth_preservation_celerite(tmp_path, monkeypatch):
 
     class _MockTerm:
         def __init__(self, log_sigma, log_rho):
-            pass
+            self.initial_parameters = np.array([log_sigma, log_rho], dtype=float)
 
     class _MockGP:
         def __init__(self, kernel, mean):
-            pass
+            self.parameters = kernel.initial_parameters.copy()
 
         def compute(self, time, yerr):
             observed["condition_time"] = np.asarray(time).copy()
             observed["condition_error"] = np.asarray(yerr).copy()
+
+        def get_parameter_vector(self):
+            return self.parameters.copy()
+
+        def get_parameter_names(self):
+            return ("kernel:log_sigma", "kernel:log_rho")
+
+        def set_parameter_vector(self, parameters):
+            self.parameters = np.asarray(parameters, dtype=float).copy()
+
+        def log_likelihood(self, residuals):
+            return -0.5 * float(np.sum((residuals / 1.0e-4) ** 2))
+
+        def grad_log_likelihood(self, residuals):
+            return np.zeros_like(self.parameters, dtype=float)
 
         def predict(self, y, t, return_cov=False):
             observed["condition_residual"] = np.asarray(y).copy()

@@ -78,7 +78,7 @@ def test_circular_phase_summary_never_serializes_one_as_a_phase_fraction():
     summary = _circular_phase_summary(np.array([0.999999999]))
 
     assert all(0.0 <= summary[key] < 1.0 for key in ("median", "p16", "p84"))
-    assert summary["median"] == 0.0
+    assert summary["median"] == pytest.approx(0.999999999)
 
 
 def test_eccentric_harmonic_basis_differs_from_circular_geometry():

@@ -25,6 +25,7 @@ from scipy.special import ndtr as _standard_normal_cdf
 from scipy.stats import beta as _beta_dist
 from scipy.stats import powerlaw as _powerlaw_dist
 
+from ...constants import SQUARE_ARCSECONDS_PER_SQUARE_DEGREE
 from .constants import Msun, Rsun, au, G, pi, SECONDS_PER_DAY
 from .funcs import separation_at_contrast
 
@@ -353,7 +354,7 @@ def lnprior_background(
         np.asarray(separations, dtype=float),
         np.asarray(contrasts, dtype=float),
     )
-    return np.log((N_comp / 0.1) * (1.0 / 3600.0) ** 2 * seps ** 2)
+    return np.log((N_comp / 0.1) * seps ** 2 / SQUARE_ARCSECONDS_PER_SQUARE_DEGREE)
 
 
 __all__ = [

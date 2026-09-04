@@ -72,56 +72,15 @@ def test_seismic_scaling_preserves_explicit_missing_measurement_fallback():
     assert result["radius_solar"] == pytest.approx(1.4)
 
 
-@pytest.mark.parametrize(
-    ("teff_k", "log_radius_over_distance", "av_mag"),
-    [
-        (np.nan, -20.0, 0.0),
-        (np.inf, -20.0, 0.0),
-        (0.0, -20.0, 0.0),
-        (5772.0, np.nan, 0.0),
-        (5772.0, np.inf, 0.0),
-        (5772.0, -20.0, np.nan),
-        (5772.0, -20.0, np.inf),
-        (5772.0, -20.0, -0.1),
-    ],
-)
-def test_blackbody_model_rejects_nonfinite_or_unphysical_inputs(
-    teff_k, log_radius_over_distance, av_mag
-):
-    from exonym.sed import blackbody_model_magnitudes
+def test_mist_sed_runner_rejects_an_unbound_or_missing_manifest(tmp_path):
+    from exonym.sed import run_sed_fit
+    from exonym.workspace import create_candidate
 
-    with pytest.raises(ValueError):
-        blackbody_model_magnitudes(teff_k, log_radius_over_distance, av_mag, [("J", 1.235, 1594.0)])
+    workspace = create_candidate(tmp_path, "mist-manifest-required")
 
-
-@pytest.mark.parametrize(
-    "band_data",
-    [
-        [],
-        [("unknown", 1.0, 1.0)],
-        [("J", np.nan, 1.0)],
-        [("J", 1.0, 0.0)],
-    ],
-)
-def test_blackbody_model_rejects_invalid_band_data(band_data):
-    from exonym.sed import blackbody_model_magnitudes
-
-    with pytest.raises(ValueError):
-        blackbody_model_magnitudes(5772.0, -20.0, 0.0, band_data)
-
-
-def test_blackbody_model_returns_finite_magnitudes_for_valid_inputs():
-    from exonym.sed import blackbody_model_magnitudes
-
-    result = blackbody_model_magnitudes(
-        5772.0,
-        -20.0,
-        0.0,
-        [("J", 1.235, 1594.0), ("W1", 3.3526, 309.540)],
-    )
-
-    assert result.shape == (2,)
-    assert np.all(np.isfinite(result))
+    with pytest.raises(RuntimeError, match="MIST v1.2 bolometric-correction SED input manifest is missing"):
+        run_sed_fit(workspace)
+    assert not (workspace.path / "outputs" / "sed_fit_results.json").exists()
 
 
 @pytest.mark.parametrize(

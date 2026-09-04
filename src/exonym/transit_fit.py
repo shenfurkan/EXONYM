@@ -773,46 +773,58 @@ def _summarize_accelerated_samples(
     if any(not np.all(np.isfinite(normalized[name])) for name in required):
         raise RuntimeError("transit sampler returned non-finite posterior values")
 
-    # NUMERICAL_GUARD: bounded priors keep typical draws physical, but tail
-    # draws (wide period priors, grazing b, e near unity) must degrade to the
-    # same clipped-edge behaviour as the legacy posterior summaries instead of
-    # aborting an otherwise converged fit.
     period = normalized.get("period", np.full(sample_count, data.period_days, dtype=float))
     t0 = normalized.get("t0", np.full(sample_count, data.t0_days, dtype=float))
     rho_star = normalized.get("rho_star_g_cm3", np.exp(normalized["log_rho_star"]))
     sqe_cosw = normalized.get("sqe_cosw", np.zeros(sample_count, dtype=float))
     sqe_sinw = normalized.get("sqe_sinw", np.zeros(sample_count, dtype=float))
-    if not np.all(np.isfinite(period)) or not np.all(np.isfinite(t0)):
-        raise RuntimeError("transit sampler returned non-finite ephemeris draws")
-    safe_period = np.maximum(period, np.finfo(float).tiny)
-    safe_rho_star = np.maximum(rho_star, np.finfo(float).tiny)
-    eccentricity = np.clip(
-        np.square(sqe_cosw) + np.square(sqe_sinw), 0.0, 1.0 - np.finfo(float).eps
-    )
+    eccentricity = np.square(sqe_cosw) + np.square(sqe_sinw)
+    impact_parameter = normalized["impact_parameter"]
     q1 = normalized["q1"]
     q2 = normalized["q2"]
-    if np.any(q1 < 0.0) or np.any(q1 > 1.0) or np.any(q2 < 0.0) or np.any(q2 > 1.0):
-        raise RuntimeError("transit sampler returned Kipping coordinates outside [0, 1]")
-
-    a_rstar = _accelerated_a_rstar_from_cgs(safe_rho_star, safe_period)
+    valid = (
+        np.isfinite(period)
+        & (period > 0.0)
+        & np.isfinite(t0)
+        & np.isfinite(rho_star)
+        & (rho_star > 0.0)
+        & np.isfinite(impact_parameter)
+        & (impact_parameter >= 0.0)
+        & (impact_parameter < 1.0 + normalized["rp_rstar"])
+        & np.isfinite(eccentricity)
+        & (eccentricity >= 0.0)
+        & (eccentricity < 1.0)
+        & np.isfinite(q1)
+        & (q1 >= 0.0)
+        & (q1 <= 1.0)
+        & np.isfinite(q2)
+        & (q2 >= 0.0)
+        & (q2 <= 1.0)
+    )
+    if not np.all(valid):
+        raise RuntimeError("transit sampler returned posterior draws outside physical support")
+    a_rstar = _accelerated_a_rstar_from_cgs(rho_star, period)
     sqrt_eccentricity = np.sqrt(eccentricity)
-    denominator = np.maximum(1.0 + sqrt_eccentricity * sqe_sinw, np.finfo(float).eps)
+    denominator = 1.0 + sqrt_eccentricity * sqe_sinw
     conjunction_distance = a_rstar * (1.0 - eccentricity) / denominator
     with np.errstate(divide="ignore", invalid="ignore"):
         cosine_inclination = np.where(
             conjunction_distance > 0.0,
-            normalized["impact_parameter"] / conjunction_distance,
+            impact_parameter / conjunction_distance,
             np.nan,
         )
-    finite_projection = np.isfinite(cosine_inclination)
-    if not np.all(np.isfinite(a_rstar)) or not np.any(finite_projection):
-        raise RuntimeError("transit sampler returned no summarizable inclination geometry")
-    clipped_projection = finite_projection & (
-        (cosine_inclination < 0.0) | (cosine_inclination > 1.0)
+    valid_geometry = (
+        np.isfinite(a_rstar)
+        & (a_rstar > 0.0)
+        & np.isfinite(conjunction_distance)
+        & (conjunction_distance > 0.0)
+        & np.isfinite(cosine_inclination)
+        & (cosine_inclination >= 0.0)
+        & (cosine_inclination <= 1.0)
     )
-    inclination_deg = np.degrees(
-        np.arccos(np.clip(cosine_inclination, 0.0, 1.0))
-    )
+    if not np.all(valid_geometry):
+        raise RuntimeError("transit sampler returned posterior draws with invalid inclination geometry")
+    inclination_deg = np.degrees(np.arccos(cosine_inclination))
     sqrt_q1 = np.sqrt(q1)
     u1 = 2.0 * sqrt_q1 * q2
     u2 = sqrt_q1 * (1.0 - 2.0 * q2)
@@ -831,12 +843,6 @@ def _summarize_accelerated_samples(
     }
     result: Dict[str, Any] = {"backend": backend}
     result.update({name: _quantile_summary(values) for name, values in summary_samples.items()})
-    # Preserve the legacy grazing-geometry transparency contract.
-    inclination_summary = dict(result["inclination_deg"])
-    inclination_summary["conjunction_distance_clip_fraction"] = float(
-        np.mean(clipped_projection)
-    )
-    result["inclination_deg"] = inclination_summary
     result["sampler_metadata"] = sampler_metadata
     return result
 
@@ -925,12 +931,18 @@ def _accelerated_initial_theta(data: _AcceleratedTransitFitData) -> np.ndarray:
     observed_depth = max(float(np.median(data.flux) - np.min(data.flux)), 1.0e-8)
     rp_rstar = min(0.95, max(0.005, math.sqrt(observed_depth)))
     scatter = max(float(np.std(data.flux - np.median(data.flux))), float(np.median(data.flux_err)), 1.0e-6)
+    log_scatter = math.log(scatter)
+    initial_log_jitter = (
+        log_scatter
+        if JITTER_LOG_LOWER < log_scatter < JITTER_LOG_UPPER
+        else math.log(JITTER_HALF_CAUCHY_SCALE)
+    )
     values = [
         rp_rstar,
         math.log(data.rho_star_g_cm3),
         0.3,
         float(np.median(data.flux)),
-        float(np.clip(math.log(scatter), JITTER_LOG_LOWER + 0.1, JITTER_LOG_UPPER - 0.1)),
+        initial_log_jitter,
         0.5,
         0.5,
     ]
@@ -984,8 +996,8 @@ def _fit_emcee_cpu(
                 eccentric_radius = float(math.hypot(proposal[7], proposal[8]))
                 if eccentric_radius >= 0.99:
                     continue
-            # Rejection sampling: accept proposal only when log-probability is finite
-            # rather than artificially squashing boundaries via np.clip
+            # Rejection sampling accepts only a finite posterior proposal and
+            # never alters a proposal at a physical boundary.
             if math.isfinite(_accelerated_cpu_log_probability(proposal, data)):
                 p0[walker_index] = proposal
                 break
@@ -1084,14 +1096,19 @@ def _fit_numpyro_gpu(
             t0 = numpyro.sample("t0", dist.Normal(data.t0_days, data.t0_sigma_days))
 
         # Eastman coordinates have a uniform disk prior after the explicit
-        # radius guard below. Use safe values for algebra, then assign -inf to
-        # proposals outside the physical disk without host-side branching.
+        # radius guard below. Invalid proposals receive -inf; algebra uses a
+        # benign branch-local value solely to avoid evaluating undefined roots.
         eccentricity = jnp.square(sqe_cosw) + jnp.square(sqe_sinw)
-        safe_eccentricity = jnp.minimum(eccentricity, 1.0 - machine_epsilon)
+        valid_eccentricity = eccentricity < 1.0
+        safe_eccentricity = jnp.where(valid_eccentricity, eccentricity, 0.0)
         sqrt_eccentricity = jnp.sqrt(safe_eccentricity)
-        conjunction_factor = jnp.maximum(1.0 + sqrt_eccentricity * sqe_sinw, machine_epsilon)
-        safe_period = jnp.maximum(period, machine_epsilon)
-        safe_log_rho_star = jnp.clip(log_rho_star, -50.0, 50.0)
+        valid_period = period > 0.0
+        conjunction_factor_raw = 1.0 + sqrt_eccentricity * sqe_sinw
+        valid_conjunction_factor = conjunction_factor_raw > 0.0
+        conjunction_factor = jnp.where(valid_conjunction_factor, conjunction_factor_raw, 1.0)
+        safe_period = jnp.where(valid_period, period, 1.0)
+        valid_log_rho_star = (log_rho_star > -50.0) & (log_rho_star < 50.0)
+        safe_log_rho_star = jnp.where(valid_log_rho_star, log_rho_star, 0.0)
         rho_star = jnp.exp(safe_log_rho_star)
         a_rstar = jnp.cbrt(
             GRAVITATIONAL_CONSTANT_CGS
@@ -1100,8 +1117,12 @@ def _fit_numpyro_gpu(
             / (3.0 * math.pi)
         )
         conjunction_distance = a_rstar * (1.0 - safe_eccentricity) / conjunction_factor
-        cosine_inclination = impact_parameter / jnp.maximum(conjunction_distance, machine_epsilon)
-        sine_inclination = jnp.sqrt(jnp.maximum(1.0 - jnp.square(cosine_inclination), machine_epsilon))
+        valid_conjunction_distance = conjunction_distance > 0.0
+        safe_conjunction_distance = jnp.where(valid_conjunction_distance, conjunction_distance, 1.0)
+        cosine_inclination = impact_parameter / safe_conjunction_distance
+        valid_cosine_inclination = (cosine_inclination >= 0.0) & (cosine_inclination <= 1.0)
+        safe_cosine_inclination = jnp.where(valid_cosine_inclination, cosine_inclination, 0.0)
+        sine_inclination = jnp.sqrt(1.0 - jnp.square(safe_cosine_inclination))
         sky_speed = (
             2.0
             * math.pi
@@ -1112,13 +1133,13 @@ def _fit_numpyro_gpu(
             * sine_inclination
         )
         valid_geometry = (
-            (period > 0.0)
-            & (log_rho_star > -50.0)
-            & (log_rho_star < 50.0)
-            & (eccentricity < 1.0)
+            valid_period
+            & valid_log_rho_star
+            & valid_eccentricity
+            & valid_conjunction_factor
+            & valid_conjunction_distance
             & (impact_parameter < 1.0 + rp_rstar)
-            & (cosine_inclination >= 0.0)
-            & (cosine_inclination <= 1.0)
+            & valid_cosine_inclination
             & jnp.isfinite(a_rstar)
             & jnp.isfinite(sky_speed)
             & (sky_speed > 0.0)
@@ -2455,20 +2476,14 @@ def _posterior_summaries(
     if chain.ndim != 2 or chain.shape[1] != len(names):
         raise ValueError("transit posterior chain has an invalid sector layout")
     integration_seconds = _require_observational_exposure_seconds(exposure_seconds)
-    posteriors: Dict[str, Dict[str, float]] = {}
-    for index, name in enumerate(names):
-        posteriors[name] = _quantile_summary(chain[:, index])
-
-    rp_samples = chain[:, 0]
-    rho_samples = 10.0 ** chain[:, 1]
-    b_samples = chain[:, 2]
+    sample_count = chain.shape[0]
+    rp_samples = np.asarray(chain[:, 0], dtype=float)
+    rho_samples = 10.0 ** np.asarray(chain[:, 1], dtype=float)
+    b_samples = np.asarray(chain[:, 2], dtype=float)
     q1_index = 4 + n_sectors
     q2_index = 5 + n_sectors
     q1_samples = chain[:, q1_index]
     q2_samples = chain[:, q2_index]
-    a_rs_samples = np.array(
-        [stellar_density_a_rs(rho, ephemeris["period_days"]) for rho in rho_samples]
-    )
     if eccentric:
         se_cos_samples = chain[:, 6 + n_sectors]
         se_sin_samples = chain[:, 7 + n_sectors]
@@ -2477,6 +2492,32 @@ def _posterior_summaries(
     else:
         eccentricity_samples = np.zeros_like(rp_samples)
         omega_samples = np.full_like(rp_samples, 90.0)
+    valid_draws = (
+        np.isfinite(rp_samples)
+        & (rp_samples > 0.0)
+        & np.isfinite(rho_samples)
+        & (rho_samples > 0.0)
+        & np.isfinite(b_samples)
+        & (b_samples >= 0.0)
+        & (b_samples < 1.0 + rp_samples)
+        & np.isfinite(q1_samples)
+        & (q1_samples >= 0.0)
+        & (q1_samples <= 1.0)
+        & np.isfinite(q2_samples)
+        & (q2_samples >= 0.0)
+        & (q2_samples <= 1.0)
+        & np.isfinite(eccentricity_samples)
+        & (eccentricity_samples >= 0.0)
+        & (eccentricity_samples < 1.0)
+    )
+    if not np.all(valid_draws):
+        raise RuntimeError(
+            "transit posterior contains draws outside physical support or with invalid inclination geometry"
+        )
+    a_rs_samples = np.asarray(
+        [stellar_density_a_rs(rho, ephemeris["period_days"]) for rho in rho_samples],
+        dtype=float,
+    )
     conjunction_distance_samples = np.asarray(
         [
             conjunction_distance_a_rs(a_rs, eccentricity_value, omega_value)
@@ -2487,13 +2528,19 @@ def _posterior_summaries(
         dtype=float,
     )
     projection_samples = b_samples / conjunction_distance_samples
-    # NUMERICAL_GUARD: ``arccos`` only accepts the physical projection range.
-    # Retain the edge-on mapping for legacy posterior summaries, but expose how
-    # often a sampled impact parameter exceeded the conjunction distance.
-    inclination_clipped = np.isfinite(projection_samples) & (
-        (projection_samples < 0.0) | (projection_samples > 1.0)
+    valid_geometry = (
+        np.isfinite(conjunction_distance_samples)
+        & (conjunction_distance_samples > 0.0)
+        & np.isfinite(projection_samples)
+        & (projection_samples >= 0.0)
+        & (projection_samples <= 1.0)
     )
-    inc_samples = np.degrees(np.arccos(np.clip(projection_samples, 0.0, 1.0)))
+    if not np.all(valid_geometry):
+        raise RuntimeError("transit posterior contains draws with invalid inclination geometry")
+    inc_samples = np.degrees(np.arccos(projection_samples))
+    posteriors: Dict[str, Dict[str, float]] = {}
+    for index, name in enumerate(names):
+        posteriors[name] = _quantile_summary(chain[:, index])
     area_ppm = (rp_samples**2) * PARTS_PER_MILLION
     # COVARIANCE_GUARD: thin the joint parameter matrix with a uniform stride
     # so every evaluated tuple is an actual posterior draw. Independent
@@ -2547,11 +2594,7 @@ def _posterior_summaries(
     u1_samples = 2.0 * sqrt_q1 * q2_samples
     u2_samples = sqrt_q1 * (1.0 - 2.0 * q2_samples)
 
-    inclination_summary = _quantile_summary(inc_samples)
-    inclination_summary["conjunction_distance_clip_fraction"] = float(
-        np.mean(inclination_clipped)
-    )
-    posteriors["inclination_deg"] = inclination_summary
+    posteriors["inclination_deg"] = _quantile_summary(inc_samples)
     posteriors["a_rs"] = _quantile_summary(a_rs_samples)
     posteriors["conjunction_distance_a_rs"] = _quantile_summary(conjunction_distance_samples)
     posteriors["rho_star_solar"] = _quantile_summary(rho_samples)
@@ -2682,19 +2725,29 @@ def _make_dynesty_prior_transform(
         raise ValueError("stellar density and density uncertainty must be positive")
 
     def truncated_normal(unit_value: float, mean: float, sigma: float, lower: float, upper: float) -> float:
-        clipped = float(np.clip(unit_value, np.finfo(float).eps, 1.0 - np.finfo(float).eps))
+        if not math.isfinite(unit_value) or not 0.0 <= unit_value <= 1.0:
+            raise ValueError("dynesty truncated-normal variate must be finite and in [0, 1]")
+        if unit_value == 0.0:
+            return float(lower)
+        if unit_value == 1.0:
+            return float(upper)
         lower_cdf = ndtr((lower - mean) / sigma)
         upper_cdf = ndtr((upper - mean) / sigma)
-        return float(mean + sigma * ndtri(lower_cdf + clipped * (upper_cdf - lower_cdf)))
+        return float(mean + sigma * ndtri(lower_cdf + unit_value * (upper_cdf - lower_cdf)))
 
     def truncated_half_cauchy_log_jitter(unit_value: float) -> float:
-        clipped = float(np.clip(unit_value, np.finfo(float).eps, 1.0 - np.finfo(float).eps))
+        if not math.isfinite(unit_value) or not 0.0 <= unit_value <= 1.0:
+            raise ValueError("dynesty half-Cauchy variate must be finite and in [0, 1]")
         lower = math.exp(JITTER_LOG_LOWER)
         upper = math.exp(JITTER_LOG_UPPER)
+        if unit_value == 0.0:
+            return float(math.log(lower))
+        if unit_value == 1.0:
+            return float(math.log(upper))
         lower_cdf = 2.0 / math.pi * math.atan(lower / JITTER_HALF_CAUCHY_SCALE)
         upper_cdf = 2.0 / math.pi * math.atan(upper / JITTER_HALF_CAUCHY_SCALE)
         jitter = JITTER_HALF_CAUCHY_SCALE * math.tan(
-            0.5 * math.pi * (lower_cdf + clipped * (upper_cdf - lower_cdf))
+            0.5 * math.pi * (lower_cdf + unit_value * (upper_cdf - lower_cdf))
         )
         return float(math.log(jitter))
 

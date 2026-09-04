@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from .constants import ARCSECONDS_PER_DEGREE, MILLIARCSECONDS_PER_ARCSECOND
 from .inputs import load_stellar_parameters, load_tpf_cubes
 from .workspace import CandidateWorkspace
 
@@ -127,8 +128,8 @@ class ArchivalVettingService:
             return None
         delta_ra_deg = (first_ra - second_ra + 180.0) % 360.0 - 180.0
         separation = math.hypot(
-            delta_ra_deg * math.cos(math.radians(second_dec)) * 3600.0,
-            (first_dec - second_dec) * 3600.0,
+            delta_ra_deg * math.cos(math.radians(second_dec)) * ARCSECONDS_PER_DEGREE,
+            (first_dec - second_dec) * ARCSECONDS_PER_DEGREE,
         )
         return separation if math.isfinite(separation) else None
 
@@ -166,9 +167,13 @@ class ArchivalVettingService:
         elapsed_years = cls.EXOFOP_TARGET_EPOCH_JYEAR - reference_epoch
         propagated_ra = (
             source_ra
-            + pmra * elapsed_years / (1000.0 * 3600.0 * cosine_dec)
+            + pmra
+            * elapsed_years
+            / (MILLIARCSECONDS_PER_ARCSECOND * ARCSECONDS_PER_DEGREE * cosine_dec)
         ) % 360.0
-        propagated_dec = source_dec + pmdec * elapsed_years / (1000.0 * 3600.0)
+        propagated_dec = source_dec + pmdec * elapsed_years / (
+            MILLIARCSECONDS_PER_ARCSECOND * ARCSECONDS_PER_DEGREE
+        )
         if not (-90.0 <= propagated_dec <= 90.0):
             return None
         return cls._angular_separation_arcsec(
@@ -194,7 +199,7 @@ class ArchivalVettingService:
                 target_dec_deg,
             )
             source["j2000_separation_arcsec"] = (
-                round(propagated_separation, 4)
+                float(propagated_separation)
                 if propagated_separation is not None
                 else None
             )
@@ -256,10 +261,10 @@ class ArchivalVettingService:
         """
         tap_query = (
             f"SELECT source_id, ra, dec, phot_g_mean_mag, phot_bp_mean_mag, phot_rp_mean_mag, ruwe, pmra, pmdec, ref_epoch, "
-            f"DISTANCE(POINT('ICRS', ra, dec), POINT('ICRS', {ra}, {dec}))*3600.0 AS sep_arcsec, "
+            f"DISTANCE(POINT('ICRS', ra, dec), POINT('ICRS', {ra}, {dec}))*{ARCSECONDS_PER_DEGREE} AS sep_arcsec, "
             f"phot_g_mean_flux, phot_g_mean_flux_error, phot_bp_mean_flux, phot_bp_mean_flux_error, phot_rp_mean_flux, phot_rp_mean_flux_error "
             f"FROM {table_name} "
-            f"WHERE 1=CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', {ra}, {dec}, {radius_arcsec/3600.0})) "
+            f"WHERE 1=CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', {ra}, {dec}, {radius_arcsec / ARCSECONDS_PER_DEGREE})) "
             f"ORDER BY sep_arcsec ASC"
         )
         url = (
@@ -312,26 +317,26 @@ class ArchivalVettingService:
             sources.append(
                 {
                     "source_id": sid,
-                    "ra_deg": round(ra_val, 8) if ra_val is not None else None,
-                    "dec_deg": round(dec_val, 8) if dec_val is not None else None,
-                    "separation_arcsec": round(sep_val, 4),
-                    "ruwe": round(ruwe_val, 4) if ruwe_val is not None else None,
-                    "phot_g_mean_mag": round(gmag, 4) if gmag is not None else None,
+                    "ra_deg": float(ra_val) if ra_val is not None else None,
+                    "dec_deg": float(dec_val) if dec_val is not None else None,
+                    "separation_arcsec": float(sep_val),
+                    "ruwe": float(ruwe_val) if ruwe_val is not None else None,
+                    "phot_g_mean_mag": float(gmag) if gmag is not None else None,
                     "phot_g_mean_mag_error": self._pogson_magnitude_error(g_flux, g_flux_err),
 
-                    "phot_bp_mean_mag": round(bp_mag, 4) if bp_mag is not None else None,
+                    "phot_bp_mean_mag": float(bp_mag) if bp_mag is not None else None,
                     "phot_bp_mean_mag_error": self._pogson_magnitude_error(bp_flux, bp_flux_err),
 
-                    "phot_rp_mean_mag": round(rp_mag, 4) if rp_mag is not None else None,
+                    "phot_rp_mean_mag": float(rp_mag) if rp_mag is not None else None,
                     "phot_rp_mean_mag_error": self._pogson_magnitude_error(rp_flux, rp_flux_err),
 
-                    "pmra_mas_per_year": round(pmra_val, 6)
+                    "pmra_mas_per_year": float(pmra_val)
                     if pmra_val is not None
                     else None,
-                    "pmdec_mas_per_year": round(pmdec_val, 6)
+                    "pmdec_mas_per_year": float(pmdec_val)
                     if pmdec_val is not None
                     else None,
-                    "reference_epoch_jyear": round(reference_epoch, 6)
+                    "reference_epoch_jyear": float(reference_epoch)
                     if reference_epoch is not None
                     else None,
                 }
@@ -443,26 +448,26 @@ class ArchivalVettingService:
             sources.append(
                 {
                     "source_id": str(row["Source"]) if "Source" in row.colnames else "unknown",
-                    "ra_deg": round(row_ra, 8),
-                    "dec_deg": round(row_dec, 8),
-                    "separation_arcsec": round(sep_arcsec, 4),
-                    "ruwe": round(ruwe_val, 4) if ruwe_val is not None else None,
-                    "phot_g_mean_mag": round(g_mag, 4) if g_mag is not None else None,
+                    "ra_deg": float(row_ra),
+                    "dec_deg": float(row_dec),
+                    "separation_arcsec": float(sep_arcsec),
+                    "ruwe": float(ruwe_val) if ruwe_val is not None else None,
+                    "phot_g_mean_mag": float(g_mag) if g_mag is not None else None,
                     "phot_g_mean_mag_error": self._pogson_magnitude_error(flux_values["FG"], flux_values["e_FG"]),
 
-                    "phot_bp_mean_mag": round(bp_mag, 4) if bp_mag is not None else None,
+                    "phot_bp_mean_mag": float(bp_mag) if bp_mag is not None else None,
                     "phot_bp_mean_mag_error": self._pogson_magnitude_error(flux_values["FBP"], flux_values["e_FBP"]),
 
-                    "phot_rp_mean_mag": round(rp_mag, 4) if rp_mag is not None else None,
+                    "phot_rp_mean_mag": float(rp_mag) if rp_mag is not None else None,
                     "phot_rp_mean_mag_error": self._pogson_magnitude_error(flux_values["FRP"], flux_values["e_FRP"]),
 
-                    "pmra_mas_per_year": round(pmra_val, 6)
+                    "pmra_mas_per_year": float(pmra_val)
                     if pmra_val is not None
                     else None,
-                    "pmdec_mas_per_year": round(pmdec_val, 6)
+                    "pmdec_mas_per_year": float(pmdec_val)
                     if pmdec_val is not None
                     else None,
-                    "reference_epoch_jyear": round(reference_epoch, 6)
+                    "reference_epoch_jyear": float(reference_epoch)
                     if reference_epoch is not None
                     else None,
                 }
@@ -859,8 +864,8 @@ class ArchivalVettingService:
             "tic_id": str(tic_id) if tic_id else None,
             "toi_id": str(toi_id) if toi_id else None,
             "target_coordinates": {
-                "ra_deg": round(ra_deg, 6) if ra_deg is not None else None,
-                "dec_deg": round(dec_deg, 6) if dec_deg is not None else None,
+                "ra_deg": float(ra_deg) if ra_deg is not None else None,
+                "dec_deg": float(dec_deg) if dec_deg is not None else None,
             },
             "scientific_assessment": {
                 "1_is_hidden_binary": {

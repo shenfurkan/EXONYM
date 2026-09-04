@@ -21,8 +21,8 @@ def test_argv_builders_match_registered_cli_flags():
         "init", "tgt-01", "--mission", "tess", "--tic", "12345",
         "--tag", "a", "--tag", "b",
     ]
-    assert build_ingest_argv("tgt-01", [3, 4], 120, "lc") == [
-        "ingest", "tgt-01", "--sectors", "3", "4", "--exptime", "120", "--products", "lc",
+    assert build_ingest_argv("tgt-01", [3, 4], "lc") == [
+        "ingest", "tgt-01", "--sectors", "3", "4", "--products", "lc",
     ]
     assert build_detrend_argv("tgt-01", "wotan", 0.75) == [
         "detrend", "tgt-01", "--method", "wotan", "--window-days", "0.75",
@@ -36,6 +36,13 @@ def test_argv_builders_match_registered_cli_flags():
         "fit", "tgt-01", "--n-samples", "2500", "--eccentric",
     ]
     assert build_vet_argv("tgt-01", 2000) == ["vet", "tgt-01", "--n-draws", "2000"]
+
+
+def test_ingest_builder_never_selects_a_static_scientific_cadence():
+    argv = build_ingest_argv("tgt-01", [3, 4], "both")
+
+    assert "--exptime" not in argv
+    assert argv == ["ingest", "tgt-01", "--sectors", "3", "4", "--products", "both"]
 
 
 def test_validation_helpers_reject_bad_input():
@@ -120,7 +127,7 @@ def test_wizard_happy_path_executes_confirmed_steps_only(tmp_path, monkeypatch):
     ingest_argv = calls[0][len(root_prefix):]
     assert ingest_argv == [
         "ingest", "wizard-flow-target",
-        "--sectors", "1", "2", "--exptime", "120", "--products", "lc",
+        "--sectors", "1", "2", "--products", "lc",
     ]
     fit_argv = calls[1][len(root_prefix):]
     assert fit_argv == ["fit", "wizard-flow-target", "--n-samples", "2500"]

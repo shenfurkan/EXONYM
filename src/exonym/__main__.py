@@ -544,7 +544,6 @@ def _build_parser() -> argparse.ArgumentParser:
     ingest_parser.add_argument(
         "--sectors", nargs="+", type=int, default=None, help="TESS sectors to fetch."
     )
-    ingest_parser.add_argument("--exptime", type=int, default=120, help="Cadence in seconds.")
     ingest_parser.add_argument(
         "--products",
         choices=("lc", "tp", "both"),
@@ -1555,7 +1554,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             fetch_tess_products(
                                 candidate,
                                 sectors=args.sectors,
-                                exptime=args.exptime,
                                 provider=args.provider,
                                 quiet=_quiet,
                                 workers=_workers,
@@ -1568,7 +1566,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             fetch_tess_tpfs(
                                 candidate,
                                 sectors=args.sectors,
-                                exptime=args.exptime,
                                 provider=args.provider,
                                 quiet=_quiet,
                                 workers=_workers,

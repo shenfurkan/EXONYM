@@ -127,9 +127,7 @@ def sampling_window_periodogram(
     for start in range(0, usable_frequency.size, chunk_size):
         stop = min(start + chunk_size, usable_frequency.size)
         phase = -2.0j * np.pi * np.outer(usable_frequency[start:stop], centered_time)
-        evaluated[start:stop] = np.clip(
-            np.abs(np.mean(np.exp(phase), axis=1)) ** 2, 0.0, 1.0
-        )
+        evaluated[start:stop] = np.abs(np.mean(np.exp(phase), axis=1)) ** 2
     powers[valid_frequency] = evaluated
     return powers, baseline_days
 
@@ -421,8 +419,8 @@ def weighted_period_summary(
     mean_period = float(np.sum(periods * weights))
     variance = float(np.sum(weights * (periods - mean_period) ** 2))
     return {
-        "weighted_mean_period_days": round(mean_period, 4),
-        "weighted_std_period_days": round(math.sqrt(variance), 4),
+        "weighted_mean_period_days": float(mean_period),
+        "weighted_std_period_days": float(math.sqrt(variance)),
         "n_segments": int(periods.size),
     }
 
@@ -564,8 +562,8 @@ def run_stellar_activity(workspace: CandidateWorkspace) -> Path:
                 "n_points": int(np.sum(mask)),
                 "baseline_days": baseline_days,
                 "period_search_range_days": period_grid_range_days,
-                "best_period_days": round(best_period, 4),
-                "max_power": round(best_power, 4),
+                "best_period_days": float(best_period),
+                "max_power": float(best_power),
                 "analytic_white_noise_false_alarm_probability": finite_analytic_fap,
                 "sampling_window": window,
             }
@@ -616,12 +614,12 @@ def run_stellar_activity(workspace: CandidateWorkspace) -> Path:
             "Envelope of the cadence- and baseline-derived GLS grids recorded "
             "for individual segments; each segment's exact grid bounds are in segments[]."
         ),
-        "rotation_period_days": round(rotation_period, 4),
+        "rotation_period_days": float(rotation_period),
         "rotation_period_std_days": summary["weighted_std_period_days"],
         "rotation_period_posterior_days": rotation_posterior,
         "rotation_period_selection": reconciliation["status"],
         "rotation_period_reconciled_segments": reconciliation["segments"],
-        "modulation_amplitude_ppm": round(amplitude_posterior["median"], 2),
+        "modulation_amplitude_ppm": float(amplitude_posterior["median"]),
         "modulation_amplitude_posterior_ppm": amplitude_posterior,
         "uncertainty_method": (
             "Power-weighted segment peak percentiles for rotation and weighted linear "
